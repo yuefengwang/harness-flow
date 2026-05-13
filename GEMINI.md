@@ -1,23 +1,129 @@
-# 项目工作流：Superpower 风格
+# AI Agent 操作指南
 
-本项目遵循一套结构化的、由状态驱动的工作流，通过 `workflow/STATUS.md` 和特定任务目录进行管理。
+## ⚠️ 强制约束
 
-## 🚀 操作指南
+**所有任务必须通过 `/sw` CLI 统一入口启动，禁止直接编写代码。**
 
-1. **检查状态：** 在每次会话开始时，务必阅读 `workflow/STATUS.md` 以确定 **当前焦点 (Current Focus)**。
-2. **任务上下文：** 所有活动的工作文件都存放在 `workflow/tasks/[task-id]/` 目录下。
-3. **阶段流转：** 你负责推动任务完成各个阶段：
-   - `头脑风暴` ➔ `规划` ➔ `编码` ➔ `评审` ➔ `归档`
-4. **持久化：** 在完成每个重要里程碑后，更新任务文件夹中的特定 `.md` 文件以及 `STATUS.md` 中的中心 **任务板**。
+```bash
+/sw init --type=feature --name=<task-id> --session=<session>
+```
 
-## 📁 目录结构
-- `workflow/templates/`: 各阶段的原始模板。
-- `workflow/tasks/`: 活动功能/Bug 修复的工作目录。
-- `workflow/archive/`: 已完成任务的历史记录。
-- `workflow/STATUS.md`: 项目状态的唯一事实来源。
+绕过 `/sw` 直接编码 = 违反工作流，不被允许。
 
-## 🤖 Gemini CLI 指令
-- **新任务：** 通过将模板复制到新任务文件夹并更新仪表盘来进行初始化。
-- **恢复：** 在 `STATUS.md` 中定位当前任务，并继续执行指定阶段。
-- **完成：** 归档任务并将仪表盘状态更新为 `完成 (Done)`。
-- **进化：** 在 `归档` 阶段进行复盘。如果某个流程改进建议或痛点连续出现 **3 次**，必须将其记录在 `workflow/evolution.md` 中，用于优化全项目的工作流。
+## 身份认知
+
+你正在 **Harness-Engineering 工作流** 中运行。
+
+### 隔离层级
+
+你的运行环境有两层隔离：
+
+| 层级 | 机制 | 作用 |
+|------|------|------|
+| 环境隔离 | Docker 容器 | 依赖、工具链、运行时独立 |
+| 代码隔离 | git worktree | 独立分支，与其他任务并行开发 |
+
+```
+Docker 容器 (sw-agent)
+  └── worktree: .worktrees/<task-name>  ← 挂载到 /workspace
+       └── branch: harness/<project>/<task-name>
+```
+
+所有代码变更只影响当前 worktree 的分支，不影响主线和其他 worktree。如果通过 Docker 运行，你的 /workspace 即 worktree 目录。
+
+---
+
+## 启动方式
+
+你有两种运行模式：
+
+### Docker 容器模式（环境完全隔离）
+```bash
+harness/dispatch.sh <project> <task> --agent opencode --docker --launch
+```
+你的运行环境是一个独立的 Docker 容器，/workspace 即 worktree 目录。
+
+### 直接模式（仅 worktree 隔离）
+```bash
+harness/dispatch.sh <project> <task> --agent claude --launch
+```
+或手动进入:
+```bash
+cd .worktrees/<task-name>
+```
+
+---
+
+## 操作流程
+
+### 0. 检查上下文
+- 读取 `workflow/current-context.md` — 当前项目的背景信息
+- 读取 `workflow/STATUS.md` — 当前任务状态
+- 定位 `.harness/task.yaml` 获取任务元数据
+
+### 1-5. 标准阶段
+执行顺序不可跳过：
+
+```
+头脑风暴 (01) → 规划 (02) → 编码 (03) → 评审 (04) → 归档 (05)
+```
+
+每个阶段执行时：
+1. 先读该阶段的 `hooks/0X-*.md` 了解强制规则
+2. 再按 `templates/0X-*.md` 的结构执行并填写内容
+3. 逐条校验 hooks 中的验证条件
+
+### 完成归档
+归档时必须按 `05-archive.md` 的要求同步 README 文档。
+
+### 提交与清理
+在 worktree 中完成工作后：
+```bash
+# 提交变更到当前分支
+git add -A && git commit -m "[project] 功能描述"
+
+# 推送到远程
+git push origin HEAD
+
+# 由上级调度执行 PR 创建和 worktree 清理
+```
+或交由 `harness/pr.sh` 和 `harness/cleanup.sh` 处理。
+
+---
+
+## 派发子任务
+
+如果当前任务需要进一步拆分为多个并行子任务，可以派发新的子 Agent：
+
+```bash
+# 派发子任务到独立 worktree（直接模式）
+../../harness/dispatch.sh <project> <sub-task> --agent claude --launch
+
+# 派发子任务到 Docker 容器（环境完全隔离）
+../../harness/dispatch.sh <project> <sub-task> --agent opencode --docker --launch
+```
+
+子任务在独立的 worktree + 容器中并行运行，完成后通过 PR 合并回主线。
+
+---
+
+## 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `workflow/STATUS.md` | 状态看板，记录当前焦点 |
+| `workflow/current-context.md` | 项目上下文 |
+| `workflow/templates/` | 各阶段模板（结构 + 填写区） |
+| `hooks/` | 各阶段强制规则（检查点 + 验证条件） |
+| `.harness/task.yaml` | 任务元数据
+
+## Dashboard（Web 控制台）
+
+Harness 平台提供 Web 可视化控制台：
+```bash
+pip install -r harness/dashboard/requirements.txt
+python3 harness/dashboard/server.py
+# → http://localhost:8090
+```
+
+功能：查看所有活跃 Agent 状态、项目列表、任务详情，以及通过表单派发新任务。
