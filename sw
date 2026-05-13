@@ -20,10 +20,33 @@ state_f() { echo "${TASKS}/$1/.state"; }
 now() { date '+%Y-%m-%dT%H:%M:%S'; }
 today() { date '+%Y-%m-%d'; }
 
+# ── 交互式输入辅助 ──
+# prompt_val "提示" 变量名 [默认值]
+prompt_val() {
+  local p="$1" v="$2" d="${3:-}"
+  if [[ -n "$d" ]]; then
+    printf "  ${BLUE}→${NC} %s [%s]: " "$p" "$d"
+  else
+    printf "  ${BLUE}→${NC} %s: " "$p"
+  fi
+  read -r response || true
+  eval "$v=\"${response:-$d}\""
+}
+# prompt_yn "提示" [默认值=y|n]
+prompt_yn() {
+  local p="$1" d="${2:-y}" hint
+  [[ "$d" == "y" ]] && hint="Y/n" || hint="y/N"
+  printf "  ${BLUE}→${NC} %s [%s]: " "$p" "$hint"
+  read -r yn || true
+  yn="${yn:-$d}"
+  yn=$(echo "$yn" | tr '[:upper:]' '[:lower:]')
+  [[ "$yn" == "y" || "$yn" == "yes" ]]
+}
+
 usage() {
   echo "sw — Simple Workflow CLI (所有任务统一入口)"
   echo ""
-  echo "  sw init    --type=feature --name=<id> [--session=<sid>]"
+  echo "  sw init    --type=feature --name=<id> [--session=<sid>] [--agent=<agent>] [--no-tmux]"
   echo "  sw status  --name=<id>"
   echo "  sw advance --name=<id>"
   echo "  sw resume  --name=<id>"
@@ -39,19 +62,48 @@ CMD="$1"; shift
 
 case "$CMD" in
   init)
-    TYPE="feature"; NAME=""; SESSION=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --type=*) TYPE="${1#*=}" ;;
-        --name=*) NAME="${1#*=}" ;;
-        --session=*) SESSION="${1#*=}" ;;
-        *) err "未知参数: $1" ;;
-      esac
-      shift
-    done
+    TYPE="feature"; NAME=""; SESSION=""; AGENT=""; NO_TMUX=0; INTERACTIVE=0
+    # 无参数 → 交互模式
+    if [[ $# -eq 0 ]]; then
+      INTERACTIVE=1
+      hdr "创建新任务 (交互模式)"
+      while [[ -z "$NAME" ]]; do
+        prompt_val "任务名称 (必填)" NAME ""
+      done
+      prompt_val "任务类型 (feature/bugfix/refactor/chore)" TYPE "feature"
+      prompt_val "Session ID" SESSION "N/A"
+      prompt_val "AI Agent (opencode/claude/gemini/回车跳过)" AGENT ""
+      prompt_yn "创建 tmux 会话?" "y" || NO_TMUX=1
+    else
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --type=*) TYPE="${1#*=}" ;;
+          --name=*) NAME="${1#*=}" ;;
+          --session=*) SESSION="${1#*=}" ;;
+          --agent=*) AGENT="${1#*=}" ;;
+          --no-tmux) NO_TMUX=1 ;;
+          *) err "未知参数: $1" ;;
+        esac
+        shift
+      done
+    fi
     [[ -z "$NAME" ]] && { err "缺少 --name"; exit 1; }
     D="${TASKS}/${NAME}"
     if [[ -d "$D" ]]; then
+      # 交互模式下提供 resume 选项
+      if [[ $INTERACTIVE -eq 1 ]]; then
+        SF=$(state_f "$NAME")
+        S=$(grep '^stage:' "$SF" 2>/dev/null | awk -F'"' '{print $2}')
+        warn "任务已存在: ${NAME} (${S:-unknown})"
+        if prompt_yn "是否恢复 (resume)?" "y"; then
+          hdr "恢复任务: ${NAME}"
+          echo "  Stage: ${S:-unknown}"
+          echo "  状态文件: ${SF}"
+          echo "  继续: hooks/${S}.md → templates/${S}.md"
+          echo "  完成后: /sw advance --name=${NAME}"
+          exit 0
+        fi
+      fi
       err "任务已存在: ${NAME}，使用 /sw resume --name=${NAME} 恢复"
       exit 1
     fi
@@ -61,6 +113,7 @@ case "$CMD" in
 id: ${NAME}
 type: ${TYPE}
 session: ${SESSION:-N/A}
+agent: ${AGENT:-N/A}
 stage: "01-brainstorming"
 stage_idx: 0
 created_at: $(now)
@@ -76,6 +129,47 @@ open('${STATUS}','w').write(c)" 2>/dev/null || true
     ok "Stage: 01-头脑风暴"
     echo "  下一步: hooks/01-brainstorming.md → templates/01-brainstorming.md"
     echo "  完成后: /sw advance --name=${NAME}"
+
+    # ── Tmux 会话管理 ──
+    if [[ $NO_TMUX -eq 1 ]]; then
+      echo "  (--no-tmux: 跳过会话创建)"
+    elif command -v tmux &>/dev/null; then
+      TMUX_SESSION="sw-${NAME}"
+      # 清理同名旧会话
+      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+      # 创建 detached session，工作目录为项目根
+      tmux new-session -d -s "$TMUX_SESSION" -c "$ROOT"
+      tmux rename-window -t "$TMUX_SESSION" "sw"
+      # 获取窗口和 pane 索引（适配 base-index 配置）
+      WIN=$(tmux display -t "$TMUX_SESSION" -p '#{window_index}')
+      LEFT=$(tmux display -t "$TMUX_SESSION" -p '#{pane_index}')
+      # 左右分屏，捕获右侧 pane 索引
+      RIGHT=$(tmux split-window -h -P -F '#{pane_index}' -t "$TMUX_SESSION")
+      # 右侧 pane: 启动 AI Agent 或提示
+      if [[ -n "$AGENT" ]]; then
+        tmux send-keys -t "${TMUX_SESSION}:${WIN}.${RIGHT}" "$AGENT" Enter
+      else
+        tmux send-keys -t "${TMUX_SESSION}:${WIN}.${RIGHT}" "echo '🤖 在此启动 AI Agent: opencode / claude / gemini'" Enter
+      fi
+      # 选中左侧 pane (bash)
+      tmux select-pane -t "${TMUX_SESSION}:${WIN}.${LEFT}"
+      tmux send-keys -t "${TMUX_SESSION}:${WIN}.${LEFT}" C-l
+      tmux send-keys -t "${TMUX_SESSION}:${WIN}.${LEFT}" "echo '📋 任务: ${NAME} | Stage: 01-头脑风暴'" Enter
+      # 附加到会话
+      if [[ -z "${TMUX:-}" ]]; then
+        ok "tmux 会话: ${TMUX_SESSION}"
+        exec tmux attach -t "$TMUX_SESSION" 2>/dev/null || {
+          warn "无法附加 tmux (非 TTY 环境)"
+          echo "  手动: tmux attach -t ${TMUX_SESSION}"
+        }
+      else
+        warn "已在 tmux 中 → 切换到 sw-${NAME}"
+        echo "  (手动: tmux switch-client -t sw-${NAME})"
+        tmux switch-client -t "$TMUX_SESSION" 2>/dev/null || true
+      fi
+    else
+      warn "tmux 未安装，跳过会话创建 (brew install tmux)"
+    fi
     ;;
 
   status)
