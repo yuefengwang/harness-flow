@@ -1,0 +1,28 @@
+# Harness-Engineering Platform 配置
+# ====================================
+# 管理多项目、多 worktree、多 AI Agent 并行开发
+
+harness:
+  # Worktree 存放目录（相对于项目根目录）
+  worktree_dir: .worktrees
+
+  # 新 worktree 的基准分支
+  base_branch: dev
+
+  # 分支命名规则: harness/<project>/<task-name>
+  branch_prefix: harness
+
+  # 可用的 AI Agent 类型
+  agent:
+    default: claude
+    allowed:
+      - claude        # Claude Code:  docker run sw-agent:claude claude .
+      - gemini        # Gemini CLI:  docker run sw-agent:gemini gemini .
+      - opencode      # OpenCode:  docker run sw-agent:opencode opencode .
+
+  # Docker 容器隔离 (可选)
+  docker:
+    enabled: false
+    image_prefix: sw-agent
+    mount_git_config: true
+    mount_ssh: true
