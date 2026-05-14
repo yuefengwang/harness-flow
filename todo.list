@@ -1,4 +1,0 @@
-1.sw 增加交互式输入 done
-2.sw 的实现逻辑太复杂了，改用python实现。通过在workflow增加commands目录的形式，增加新的快捷执行命令 done
-3.sw init之后能将上下文直接传输到agent
-4.sw 任务编排状态还存在bug

@@ -1,44 +1,27 @@
-# 阶段 02：规划 (Planning)
+# 02-Planning
 
-> 📎 本阶段 hooks: `hooks/02-planning.md`
-> — 包含强制检查点，执行时逐条校验。
+> Hooks: `hooks/02-planning.md`
 
-## 项目概述
-*头脑风暴阶段批准的设计摘要。*
+## Task DAG
+- [ ] **Task 1**: `___` | Deps: None
+  - **Do**: ___
+  - **Verify**: ___
+- [ ] **Task 2**: `___` | Deps: Task 1
+  - **Do**: ___
+  - **Verify**: ___
+- [ ] **Task 3**: `___` | Deps: Task 2
+  - **Do**: ___
+  - **Verify**: ___
 
-## 技术架构
-- **构建工具:**
-- **语言/运行时版本:** 
-- **关键模块/包:**
-- **数据层:**
+## Test Strategy
+- **Method**: unit / integration / manual
+- **Key path**: ___
+- **Repro script** (bugfix): `___`
 
-## 任务拆解
+## Tech Detail
+- **Key types/interfaces**: ___
+- **Files to touch**: ___
 
-> 将功能拆解为 2-5 分钟可完成的微任务。每个任务必须有明确的文件路径和验证步骤。
-
-- [ ] **任务 1: 环境确认**
-  - 分支: `git branch` 确认 `harness/<project>/<task>`
-  - 文件: `pom.xml` / `build.gradle` / `pyproject.toml`
-- [ ] **任务 2: 接口 / DTO / 模型定义**
-  - 文件: 
-  - 验证: 
-- [ ] **任务 3: 测试用例 (RED)**
-  - 文件: 
-  - 验证: (应当失败)
-- [ ] **任务 4: 逻辑实现 (GREEN)**
-  - 文件: 
-  - 验证: (应当通过)
-
-## 📝 详细实施设计
-
-> 设计方案必须落地到文件/类级别：
-- 关键类的职责定义：
-- 核心算法/逻辑伪代码：
-- 接口/表结构确认：
-
-## 验收标准
-- [ ] 
-- [ ] 
-
-## 风险与缓解
--
+## Gate
+- [ ] Tests pass
+- [ ] No regression risk

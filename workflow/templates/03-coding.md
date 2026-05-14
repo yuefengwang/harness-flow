@@ -1,32 +1,19 @@
-# 阶段 03：编码 (Coding)
+# 03-Coding
 
-> 📎 本阶段 hooks: `hooks/03-coding.md`
-> — 包含强制检查点（编译保证、TDD 循环、设计模式、注释、原子提交），执行时逐条校验。
+> Hooks: `hooks/03-coding.md`
 
-## 当前任务
-*正在进行: [任务名称]*
+## Task
+`[Task ID]`: ___ 
 
-## TDD 循环: 红-绿-重构
+## Red-Green
+- [ ] **Red**: repro/test fails
+- [ ] **Green**: fix passes
+- **Verify cmd**: `___`
 
-- [ ] **红 (RED):** 编写失败的测试
-- [ ] **绿 (GREEN):** 最少代码使测试通过
-- [ ] **重构 (REFACTOR):** 优化结构，测试保持绿色
+## Implementation Notes
+- **Pattern**: ___
+- **Decisions**: ___
 
-## 实现细节
-- *上下文切换时的交接笔记。*
-- *关键决策记录。*
-
-## 实现标准
-- **编译**: 构建成功是任务完成的门禁条件
-- **设计模式**: 复杂逻辑优先使用显式模式，避免深层嵌套
-- **代码风格**: 遵循项目风格指南
-- **注释**: 复杂逻辑和非直观算法必须注释
-
-## Git
-- [ ] 原子提交: `git commit -m "feat: [描述]"`
-- [ ] 遵循 Conventional Commits 规范
-
-## 验证
-- [ ] 测试通过: 
-- [ ] 风格检查: 
-- [ ] 构建通过: 
+## Gate
+- [ ] Code builds & tests pass
+- [ ] Commit msg follows Conventional Commits

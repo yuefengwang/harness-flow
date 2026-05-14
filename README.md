@@ -54,19 +54,10 @@ cp -r workflow/ dev-init.sh GEMINI.md <your-project-root>/
 | 文件 | 作用 |
 |------|------|
 | `harness/` | 调度层：dispatch / status / pr / cleanup |
-| `harness/dashboard/` | Web 控制台：可视化 Agent 状态、派发任务 |
 | `workflow/` | 执行层：模板、任务、状态看板 |
 | `hooks/` | 强制规则：各阶段不可跳过的检查点 |
 | `docker/` | Docker 镜像构建（Agent 容器隔离） |
 | `dev-init.sh` | 项目初始化 |
 | `repo/` | 多项目代码 |
-
-### Dashboard
-
-```bash
-pip install -r harness/dashboard/requirements.txt
-python3 harness/dashboard/server.py
-# → http://localhost:8090
-```
 
 > 详细的工作流阶段说明、模板指南、演化规则 → 见 [`workflow/README.md`](workflow/README.md)

@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""sw — Simple Workflow CLI 入口"""
+import sys
+import os
+from pathlib import Path
+
+# 将引擎根目录 (workflow/) 加入 sys.path 以加载 sw_lib
+engine_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(engine_root))
+
+from sw_lib.main import main
+if __name__ == "__main__":
+    main()

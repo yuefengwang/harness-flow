@@ -1,26 +1,20 @@
-# 阶段 04：评审 (Review)
+# 04-Review
 
-> 📎 本阶段 hooks: `hooks/04-review.md`
-> — 包含强制检查点（零记忆评审、Google 标准、确定性构建、手动 QA、合并审批），执行时逐条校验。
+> Hooks: `hooks/04-review.md`
 
-## 零记忆评审
-- [ ] 以不带实现上下文的视角评审代码差异
-- [ ] 代码是否可维护？逻辑是否足够简单？
-- [ ] 文档是否充分？
+## Zero-Memory Review
+Is the diff self-explanatory? ___
 
-## 确定性验证
-- [ ] 完整构建 + 集成测试: 
-- [ ] 风格合规检查: 
-- [ ] 资源泄漏 / 空值安全检查:
+## Impact Analysis
+- **Side effects**: ___
+- **Regression tests**: ___
 
-## 手动 QA 清单
-- [ ] 日志无异常堆栈
-- [ ] API 响应已验证
-- [ ] 边界情况已测试
+## Security
+- [ ] No hardcoded secrets
+- [ ] Input validated (SQL/command injection)
+- [ ] Access control OK
 
-## 自审笔记
-- 
-
-## 最终批准
-- [ ] 所有验证通过
-- [ ] 准备合并/PR
+## Gate
+- [ ] Full build: `___`
+- [ ] Lint/static analysis pass
+- [ ] Doc/config in sync

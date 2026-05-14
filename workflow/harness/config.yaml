@@ -1,0 +1,69 @@
+# Harness-Engineering Platform 配置
+# ====================================
+
+harness:
+  auto_advance: false
+  worktree_dir: .worktrees
+  base_branch: dev
+  branch_prefix: harness
+
+  # 角色定义：将身份映射到具体的 agent 类型、模型和工具
+  roles:
+    analyst:
+      agent: "opencode"
+      model: "opencode/deepseek-v4-flash-free"
+      description: "需求分析师：擅长引导、澄清和长文本理解"
+      tools:
+        - list_files
+        - read_file
+
+    architect:
+      agent: "opencode"
+      model: "opencode/deepseek-v4-flash-free"
+      description: "系统架构师：擅长模块拆解和接口设计"
+      tools:
+        - list_files
+        - read_file
+
+    developer:
+      agent: "opencode"
+      model: "opencode/deepseek-v4-flash-free"
+      description: "代码执行者：全面开放代码读写和终端执行权限"
+      tools:
+        - list_files
+        - read_file
+        - write_file
+        - run_command
+
+    reviewer:
+      agent: "opencode"
+      model: "opencode/deepseek-v4-flash-free"
+      description: "代码评审员：快速、严苛的逻辑检查"
+      tools:
+        - list_files
+        - read_file
+        - run_command
+
+    archivist:
+      agent: "opencode"
+      model: "opencode/deepseek-v4-flash-free"
+      description: "文档专员：负责归档和文档整理"
+      tools:
+        - list_files
+        - read_file
+        - write_file
+
+  # 工作流阶段与角色的绑定关系
+  stage_roles:
+    01-brainstorming: analyst
+    02-planning: architect
+    03-coding: developer
+    04-review: reviewer
+    05-archive: archivist
+
+  # Docker 容器隔离 (可选)
+  docker:
+    enabled: false
+    image_prefix: sw-agent
+    mount_git_config: true
+    mount_ssh: true

@@ -1,42 +1,22 @@
-# 阶段 05：归档 (Archive)
+# 05-Archive
 
-> 📎 本阶段 hooks: `hooks/05-archive.md`
-> — 包含强制检查点（README 同步、演化追踪、环境清理），执行时逐条校验。
+> Hooks: `hooks/05-archive.md`
 
-## 项目总结
-*最终实现内容的简要摘要。*
+## Summary
+- **Delivered**: ___
+- **Key changes**: ___
 
-## 📈 流程复盘
+## Memory
+- **Learnings/pitfalls**: ___
+- **Patterns to promote**: ___
+- **Updated**: GEMINI.md / MEMORY.md
 
-### 复盘笔记：
-- 什么拖慢了我们的速度？
-- 下次有什么可以自动化的？
-- 子代理（subagents）是否偏离了计划？
+## Retro
+| Faster | Slower | Fix |
+|--------|--------|-----|
+| | | |
 
-### 🔄 演化追踪
-- [ ] 是否为重复出现的痛点？（连续 3 次 → 记录到 `EVOLUTION.md`）
-
-## 📖 README 同步
-
-### 1. workflow/README.md 同步
-- [ ] 工作流阶段或模板是否有变更？
-- [ ] hooks 是否有新增/修改？
-- [ ] 是否有新的工作流命令或脚本？
-- [ ] 目录结构是否有变化？
-- [ ] 是否有新的工作流规则或约定？
-
-### 2. repo/<project>/README.md 同步
-- [ ] 是否新增了 API 端点/功能？
-- [ ] 是否新增了依赖？
-- [ ] 是否修改了构建/运行方式？
-- [ ] 是否改变了项目结构？
-- [ ] 是否新增了环境变量或配置？
-
-## 审计轨迹与心得
-- **关键技术心得:** 
-- **流程改进建议:** 
-
-## 清理工作
-- [ ] 清理构建产物
-- [ ] 将工作流日志移动到 `archive/history/<task-name>.md`
-- [ ] 为下一个任务重置模板
+## Cleanup
+- [ ] Temp files removed
+- [ ] Workflow logs archived
+- [ ] Next task template ready

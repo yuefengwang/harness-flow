@@ -1,6 +1,6 @@
-# Simple Workflow 系统
+# Harness-Flow: AI-Native Workflow (Essential Flow)
 
-工作流引擎，管理任务的完整生命周期。
+基于 OpenAI 与 Gemini CLI 最佳实践构建的 AI 驱动开发工作流。核心遵循 **Research -> Strategy -> Execution** 宏观周期与 **Plan -> Act -> Reflect** 微观循环。
 
 ---
 
@@ -8,57 +8,40 @@
 
 | 路径 | 说明 |
 |------|------|
-| `STATUS.md` | 中心看板，记录当前焦点和所有任务状态 |
-| `EVOLUTION.md` | 演化日志，记录重复出现的流程痛点 |
-| `templates/` | 五大阶段模板，提供结构和填写指引 |
-| `hooks/` | 强制规则（与模板分离），定义不可跳过的检查点 |
-| `tasks/` | 活动任务的工作目录（按任务 ID 隔离） |
-| `archive/` | 已完成任务的历史存档 |
-| `current-context.md` | 当前项目的上下文快照（由 `dev-init.sh` 自动生成） |
-| `.current-project` | 当前选中的项目标记（自动生成） |
-| `README.md` | **本文件** — 工作流引擎内部参考 |
+| `STATUS.md` | 中心看板，记录当前焦点和任务状态 |
+| `EVOLUTION.md` | 演化日志，记录 ADR 与流程优化 |
+| `templates/` | **Essential Flow** 标准化交付物模板 |
+| `hooks/` | 强制验证规则 (Guardrails)，定义不可跳过的检查点 |
+| `tasks/` | 活动任务的工作目录 |
+| `archive/` | 历史任务存档与会话反思记录 |
+| `README.md` | **本文件** — 系统架构参考 |
 
 ---
 
-## 阶段总览
+## 阶段总览 (The Five Stages)
 
-| # | 阶段 | 模板 | Hooks |
-|---|------|------|-------|
-| 01 | 头脑风暴 | `templates/01-brainstorming.md` | `hooks/01-brainstorming.md` |
-| 02 | 规划 | `templates/02-planning.md` | `hooks/02-planning.md` |
-| 03 | 编码 | `templates/03-coding.md` | `hooks/03-coding.md` |
-| 04 | 评审 | `templates/04-review.md` | `hooks/04-review.md` |
-| 05 | 归档 | `templates/05-archive.md` | `hooks/05-archive.md` |
-
-- **模板** — 描述性指引，提供结构、上下文、填写区
-- **Hooks** — 强制规则，定义不可跳过的检查点和验证条件
+| # | 阶段 | 核心目标 | 交付物 |
+|---|------|----------|--------|
+| 01 | **Brainstorm** | 歧义消除与方案设计 | 设计 Specs / ADR |
+| 02 | **Plan** | 任务 DAG 编排 | 任务 DAG / 测试策略 |
+| 03 | **Coding** | 外科手术式更新 | 经验验证的代码变更 |
+| 04 | **Review** | 跨组件影响与安全审计 | 经过评审的 PR / 变更 |
+| 05 | **Archive** | 项目记忆与流程反思 | 更新后的 GEMINI.md / MEMORY.md |
 
 ---
 
-## AI Agent 操作指引
+## AI Agent 操作核心指令
 
-### 0. 任务启动 (所有任务必须通过此入口)
+1. **验证是唯一路径**: 所有变更必须有复现脚本或测试证明其正确性。
+2. **上下文效率优先**: 最小化回合数，合并工具调用。
+3. **零记忆评审**: 保证代码变更对任何新开发者都是自解释的。
+4. **强制入口**: 所有任务必须通过 `/sw` CLI 启动。
 
-```bash
-# 创建新任务（唯一入口，禁止绕过）
-/sw init --type=feature --name=<task-id> --session=<session-id>
+---
 
-# 恢复崩溃的任务
-/sw resume --name=<task-id>
+## Hook 与模板关系
 
-# 阶段推进
-/sw advance --name=<task-id>
-```
+- **Hooks** (`hooks/`) — **强制规则**: 定义 "做什么" 和 "如何验证"。
+- **模板** (`templates/`) — **交付结构**: 定义 "记在哪里" 和 "呈现格式"。
 
-`/sw init` 自动完成：创建任务目录、复制模板、初始化持久化状态、更新 STATUS.md。
-
-### 1-4. 标准操作
-
-1. **进入任务**：读取 `STATUS.md` 获取当前焦点，读取 `current-context.md` 获取项目背景
-2. **执行阶段**：先读该阶段的 `hooks/0X-*.md` 了解强制规则，再按 `templates/0X-*.md` 的结构执行并填写
-3. **完成归档**：逐条校验 `hooks/05-archive.md` 中的 README 同步规则，将任务目录移至 `archive/history/`
-4. **切换项目**：根目录执行 `./dev-init.sh <project>` 更新上下文
-
-## Hook 修改须知
-
-修改任意 hook 后，必须同步更新「阶段总览」表格和对应的模板引用。这是 archive 阶段的 README 同步规则的一部分。
+AI Agent 执行时必须：先读 Hook 确保合规，再按模板记录过程。

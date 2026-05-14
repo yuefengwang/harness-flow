@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${ROOT_DIR}/harness/config.sh"
+# 获取脚本真实路径（处理软链接）
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REAL_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
+ROOT_DIR="$(cd "${REAL_DIR}/../.." && pwd)"
+source "${ROOT_DIR}/workflow/harness/config.sh"
 
 WORKTREE_DIR="${ROOT_DIR}/${HARNESS_WORKTREE_DIR}"
 BASE_BRANCH="${HARNESS_BASE_BRANCH}"
@@ -16,7 +25,7 @@ title() { printf "\n${BLUE}━━━ %s ━━━${NC}\n" "$*"; }
 
 usage() {
     cat << 'EOF'
-用法: harness/dispatch.sh <project> <task-name> [选项]
+用法: workflow/bin/dispatch.sh <project> <task-name> [选项]
 
 派发一个新任务到独立的 git worktree 中，自动初始化项目上下文。
 
@@ -32,8 +41,8 @@ Options:
   --help                          显示帮助
 
 示例:
-  harness/dispatch.sh sample-java-app add-auth
-  harness/dispatch.sh simple-workflow update-template --agent opencode --launch
+  workflow/bin/dispatch.sh sample-java-app add-auth
+  workflow/bin/dispatch.sh simple-workflow update-template --agent opencode --launch
 EOF
     exit 1
 }
@@ -114,11 +123,25 @@ git -C "$ROOT_DIR" worktree add -b "$BRANCH" "$WORKTREE_PATH" "$BASE_BRANCH" >/d
 
 # ── 初始化项目上下文 ──
 # ── 同步基础设施（worktree 是基于 commit 的快照，未提交的文件需手动复制） ──
-for item in dev-init.sh sw task-state.yaml harness hooks docker repo .gitignore README.md GEMINI.md; do
+for item in .gitignore README.md GEMINI.md; do
     if [[ -e "$ROOT_DIR/$item" ]]; then
         cp -R "$ROOT_DIR/$item" "${WORKTREE_PATH}/" 2>/dev/null || true
     fi
 done
+
+# 同步引擎核心目录
+if [[ -d "$ROOT_DIR/workflow" ]]; then
+    cp -R "$ROOT_DIR/workflow" "${WORKTREE_PATH}/" 2>/dev/null || true
+fi
+
+# 在 worktree 根目录创建软链接以保持兼容性
+ln -s workflow/bin/sw "${WORKTREE_PATH}/sw" 2>/dev/null || true
+ln -s workflow/bin/dev-init.sh "${WORKTREE_PATH}/dev-init.sh" 2>/dev/null || true
+
+# 同步项目仓库目录
+if [[ -d "$ROOT_DIR/repo" ]]; then
+    cp -R "$ROOT_DIR/repo" "${WORKTREE_PATH}/" 2>/dev/null || true
+fi
 
 # ── 初始化项目上下文 ──
 if $IS_PLATFORM; then
@@ -132,15 +155,15 @@ if $IS_PLATFORM; then
 正在开发 simple-workflow 平台自身，包括 harness/、workflow/ 等模块。
 
 ## 平台架构
-- \`harness/\` — 调度层 (dispatch, status, pr, cleanup)
+- \`workflow/harness/\` — 调度层 (dispatch, status, pr, cleanup)
 - \`workflow/\` — 执行层 (模板, 任务, 看板)
-- \`docker/\` — 容器隔离
-- \`dev-init.sh\` — 项目初始化
+- \`workflow/docker/\` — 容器隔离
+- \`workflow/bin/dev-init.sh\` — 项目初始化
 PEOF
     # 平台模式下 STATUS.md 焦点
     sed -i '' 's/当前项目:.*/当前项目: harness-flow (平台自身)/' "${WORKTREE_PATH}/workflow/STATUS.md" 2>/dev/null || true
 else
-    "${WORKTREE_PATH}/dev-init.sh" "$PROJECT" >/dev/null 2>&1
+    "${WORKTREE_PATH}/workflow/bin/dev-init.sh" "$PROJECT" >/dev/null 2>&1
 fi
 
 # ── 任务元数据 ──
