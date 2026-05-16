@@ -1,0 +1,23 @@
+# Harness worktrees
+.worktrees/
+
+# Generated context files
+workflow/current-context.md
+workflow/.current-project
+
+# IDE
+.idea/
+
+# Docker build artifacts
+docker/.build-*
+*.log
+
+# Credentials (sensitive)
+workflow/harness/credentials.yaml
+harness/credentials.yaml
+**/credentials.yaml
+
+# Tasks (temporary)
+workflow/tasks/*
+
+workspace/*
