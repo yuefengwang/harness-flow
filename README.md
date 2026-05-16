@@ -52,7 +52,16 @@
 pip install pyyaml rich google-genai
 ```
 
-### 2. 初始化一个新任务
+### 2. 配置凭证 (Credentials)
+为了安全起见，敏感的 API Key 不会提交到仓库。请根据模板创建您的本地配置文件：
+```bash
+cp workflow/harness/credentials-template.yaml workflow/harness/credentials.yaml
+# 然后编辑 credentials.yaml 填入您的 GOOGLE_API_KEY 等信息
+```
+
+> 🛡️ **安全提示**：`credentials.yaml` 已被列入 `.gitignore`。如果您在 IDE 中仍能看到该文件出现在待提交列表，请在终端执行 `git rm --cached workflow/harness/credentials.yaml` 并提交，然后刷新 IDE 的 Git 插件缓存。
+
+### 3. 初始化一个新任务
 运行交互式向导，只需三步：起名、选型、贴需求。确认后会自动进入监控。
 ```bash
 ./sw init
