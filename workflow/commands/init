@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# shortcut: ./workflow/commands/init → ./sw init "$@"
-exec "$(cd "$(dirname "$0")/../.." && pwd)/sw" init "$@"

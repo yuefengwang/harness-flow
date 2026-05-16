@@ -1,1 +1,1 @@
-workflow/bin/sw
+bin/sw

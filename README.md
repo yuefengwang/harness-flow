@@ -55,11 +55,11 @@ pip install pyyaml rich google-genai
 ### 2. 配置凭证 (Credentials)
 为了安全起见，敏感的 API Key 不会提交到仓库。请根据模板创建您的本地配置文件：
 ```bash
-cp workflow/harness/credentials-template.yaml workflow/harness/credentials.yaml
+cp config/credentials-template.yaml config/credentials.yaml
 # 然后编辑 credentials.yaml 填入您的 GOOGLE_API_KEY 等信息
 ```
 
-> 🛡️ **安全提示**：`credentials.yaml` 已被列入 `.gitignore`。如果您在 IDE 中仍能看到该文件出现在待提交列表，请在终端执行 `git rm --cached workflow/harness/credentials.yaml` 并提交，然后刷新 IDE 的 Git 插件缓存。
+> 🛡️ **安全提示**：`credentials.yaml` 已被列入 `.gitignore`。如果您在 IDE 中仍能看到该文件出现在待提交列表，请在终端执行 `git rm --cached config/credentials.yaml` 并提交，然后刷新 IDE 的 Git 插件缓存。
 
 ### 3. 初始化一个新任务
 运行交互式向导，只需三步：起名、选型、贴需求。确认后会自动进入监控。
@@ -67,7 +67,7 @@ cp workflow/harness/credentials-template.yaml workflow/harness/credentials.yaml
 ./sw init
 ```
 
-### 3. 在监控面板中协作
+### 4. 在监控面板中协作
 在 `monitor` 中，您可以直接输入文本与 Agent 对话，或使用斜杠命令：
 -   `/advance`：执行当前阶段校验并尝试推进入下一阶段。
 -   `/status`：查看当前任务的详细状态。
@@ -79,17 +79,21 @@ cp workflow/harness/credentials-template.yaml workflow/harness/credentials.yaml
 ## 📂 项目架构
 
 ```text
-workflow/
-├── sw_lib/                 # 核心逻辑库 (重构后的分层架构)
+harness-flow/
+├── bin/                    # 🚀 入口脚本 (sw, dev-init.sh)
+├── sw_lib/                 # 🧠 逻辑核心 (分层架构)
 │   ├── agents/             # Agent 驱动 (Gemini, OpenCode, PTY, Mock)
-│   ├── cli/                # 命令行解析与指令路由
-│   ├── core/               # 编排引擎、业务服务、状态持久化、配置模型
-│   ├── tools/              # 插件化工具箱 (Task Tools)
-│   └── ui/                 # 现代交互界面 (Init UI & Monitor TUI)
-├── harness/                # 配置中心与凭证管理
-├── hooks/                  # 阶段合规性校验脚本
-├── templates/              # 各阶段产出物的标准 Markdown 模板
-└── tasks/                  # 运行中的活动任务数据
+│   ├── cli/                # 命令行解析
+│   ├── core/               # 引擎、服务、状态、配置模型
+│   ├── tools/              # 插件化工具箱
+│   └── ui/                 # 交互界面 (Init UI & Monitor TUI)
+├── config/                 # ⚙️ 全局配置与凭证
+├── hooks/                  # 🛡️ 阶段合规性门禁脚本
+├── templates/              # 📝 交付物标准 Markdown 模板
+├── workspace/              # 💾 动态数据 (任务、看板、回收站)
+│   ├── tasks/              # 活动任务
+│   └── STATUS.md           # 任务状态总看板
+└── tests/                  # 🧪 自动化测试套件
 ```
 
 ---
@@ -108,7 +112,7 @@ workflow/
 
 `Harness-Flow` 严禁不合规的开发行为。
 -   **Soft Check**：检查 Markdown 模板中的 `[ ]` 是否全部勾选，`___` 是否全部填写。
--   **Hard Check**：执行 `workflow/hooks/check_XX.sh` 脚本进行物理环境验证（如编译检查、Lint 检查）。
+-   **Hard Check**：执行 `hooks/check_XX.sh` 脚本进行物理环境验证（如编译检查、Lint 检查）。
 -   **强制性**：`/advance` 指令会无条件执行上述检查，失败则拒绝推进。
 
 ---
@@ -116,17 +120,8 @@ workflow/
 ## 🧪 开发者测试
 
 我们拥有一套稳健的测试套件，确保重构与功能的零退化：
--   **单元测试**：`python3 -m pytest workflow/tests/unit`
--   **端到端流测试**：`bash workflow/tests/e2e/test_e2e.sh`
-
----
-
-## ⚙️ 配置说明
-
-在 `workflow/harness/config.yaml` 中，您可以定义：
--   **Roles**：每个角色使用的 Agent、模型及分配的工具。
--   **Stage Roles**：每个阶段默认绑定的角色。
--   **Auto Advance**：是否在 Agent 完成产出后自动触发 Hooks 校验并推进。
+-   **单元测试**：`python3 -m pytest tests/unit`
+-   **端到端流测试**：`bash tests/e2e/test_e2e.sh`
 
 ---
 *Powered by Harness-Engineering. 让 AI 开发如外科手术般精准。*

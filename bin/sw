@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""sw — Simple Workflow CLI 入口"""
+import sys
+from pathlib import Path
+
+# 获取项目根目录 (harness-flow/)
+# 支持从项目根目录或 bin/ 启动
+current_file = Path(__file__).resolve()
+if current_file.parent.name == "bin":
+    project_root = current_file.parent.parent
+else:
+    project_root = current_file.parent
+
+# 将根目录加入 sys.path 以便直接加载 sw_lib
+sys.path.insert(0, str(project_root))
+
+from sw_lib.cli.main import main
+if __name__ == "__main__":
+    main()
