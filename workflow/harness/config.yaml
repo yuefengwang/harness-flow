@@ -1,69 +1,75 @@
-# Harness-Engineering Platform 配置
-# ====================================
-
 harness:
-  auto_advance: false
-  worktree_dir: .worktrees
+  auto_advance: true
   base_branch: dev
   branch_prefix: harness
-
-  # 角色定义：将身份映射到具体的 agent 类型、模型和工具
+  docker:
+    enabled: false
+    image_prefix: sw-agent
+    mount_git_config: true
+    mount_ssh: true
+  mock_agent:
+    enabled: true
+    response_delay: 2.0
+    responses:
+      01-brainstorming: "## \U0001F916 AI Output\n\n### \u6B67\u4E49\u5206\u6790\u7ED3\
+        \u679C\n- **\u7406\u89E3\u51C6\u786E\u5EA6**: \u9700\u6C42\u6E05\u6670\uFF0C\
+        \u65E0\u91CD\u5927\u6B67\u4E49\n- **\u5173\u952E\u5047\u8BBE**:\n  - \u5047\
+        \u8BBE\u7528\u6237\u5E0C\u671B\u4FDD\u6301\u5411\u540E\u517C\u5BB9\n  - \u5047\
+        \u8BBE\u90E8\u7F72\u73AF\u5883\u4E3A\u6807\u51C6 Linux \u670D\u52A1\u5668\n\
+        \n### \u8BBE\u8BA1\u65B9\u6848\n\u65B9\u6848 A: \u6700\u5C0F\u5316\u4FEE\u6539\
+        \ \u2014 \u5728\u73B0\u6709\u67B6\u6784\u4E0A\u589E\u91CF\u5B9E\u73B0\n\n\
+        **\u7ED3\u8BBA**: \u91C7\u7528\u65B9\u6848 A\uFF0C\u8BC4\u5BA1\u901A\u8FC7\
+        \u540E\u53EF\u8FDB\u5165\u89C4\u5212\u9636\u6BB5\u3002\n\n## Gate\n- [x] Design\
+        \ approved\n- [x] Ready for Planning\n"
   roles:
     analyst:
-      agent: "opencode"
-      model: "opencode/deepseek-v4-flash-free"
-      description: "需求分析师：擅长引导、澄清和长文本理解"
+      agent: opencode
+      description: "\u9700\u6C42\u5206\u6790\u5E08\uFF1A\u64C5\u957F\u5F15\u5BFC\u3001\
+        \u6F84\u6E05\u548C\u957F\u6587\u672C\u7406\u89E3"
+      model: opencode/deepseek-v4-flash-free
       tools:
-        - list_files
-        - read_file
-
+      - list_files
+      - read_file
     architect:
-      agent: "opencode"
-      model: "opencode/deepseek-v4-flash-free"
-      description: "系统架构师：擅长模块拆解和接口设计"
+      agent: opencode
+      description: "\u7CFB\u7EDF\u67B6\u6784\u5E08\uFF1A\u64C5\u957F\u6A21\u5757\u62C6\
+        \u89E3\u548C\u63A5\u53E3\u8BBE\u8BA1"
+      model: opencode/deepseek-v4-flash-free
       tools:
-        - list_files
-        - read_file
-
-    developer:
-      agent: "opencode"
-      model: "opencode/deepseek-v4-flash-free"
-      description: "代码执行者：全面开放代码读写和终端执行权限"
-      tools:
-        - list_files
-        - read_file
-        - write_file
-        - run_command
-
-    reviewer:
-      agent: "opencode"
-      model: "opencode/deepseek-v4-flash-free"
-      description: "代码评审员：快速、严苛的逻辑检查"
-      tools:
-        - list_files
-        - read_file
-        - run_command
-
+      - list_files
+      - read_file
     archivist:
-      agent: "opencode"
-      model: "opencode/deepseek-v4-flash-free"
-      description: "文档专员：负责归档和文档整理"
+      agent: opencode
+      description: "\u6587\u6863\u4E13\u5458\uFF1A\u8D1F\u8D23\u5F52\u6863\u548C\u6587\
+        \u6863\u6574\u7406"
+      model: opencode/deepseek-v4-flash-free
       tools:
-        - list_files
-        - read_file
-        - write_file
-
-  # 工作流阶段与角色的绑定关系
+      - list_files
+      - read_file
+      - write_file
+    developer:
+      agent: opencode
+      description: "\u4EE3\u7801\u6267\u884C\u8005\uFF1A\u5168\u9762\u5F00\u653E\u4EE3\
+        \u7801\u8BFB\u5199\u548C\u7EC8\u7AEF\u6267\u884C\u6743\u9650"
+      model: opencode/deepseek-v4-flash-free
+      tools:
+      - list_files
+      - read_file
+      - write_file
+      - run_command
+    reviewer:
+      agent: opencode
+      description: "\u4EE3\u7801\u8BC4\u5BA1\u5458\uFF1A\u5FEB\u901F\u3001\u4E25\u82DB\
+        \u7684\u903B\u8F91\u68C0\u67E5"
+      model: opencode/deepseek-v4-flash-free
+      tools:
+      - list_files
+      - read_file
+      - run_command
   stage_roles:
     01-brainstorming: analyst
     02-planning: architect
     03-coding: developer
     04-review: reviewer
     05-archive: archivist
-
-  # Docker 容器隔离 (可选)
-  docker:
-    enabled: false
-    image_prefix: sw-agent
-    mount_git_config: true
-    mount_ssh: true
+  worktree_dir: .worktrees

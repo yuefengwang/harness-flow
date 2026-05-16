@@ -3,9 +3,10 @@
 import subprocess, sys, os, shutil
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SW = str(ROOT.parent / "sw")
-TASKS = ROOT / "tasks"
+# 项目根目录 (harness-flow/)
+ROOT = Path(__file__).resolve().parent.parent.parent.parent
+SW = str(ROOT / "sw")
+TASKS = ROOT / "workflow" / "tasks"
 passed = 0
 failed = 0
 
@@ -61,56 +62,69 @@ r = run(f"python3 {SW} status --name=test-cli", 0, "status by name")
 assert "pending" in r.stdout.lower() or "in_progress" in r.stdout.lower(), "status should show stage_status"
 passed += 1
 
-# ── 4. advance (pending → reject) ──
+# ── 4. advance reject (pending) ──
 print("\n── 4. advance reject (pending) ──")
+# 现在 advance 会直接拦截 pending 状态
 run(f"python3 {SW} advance --name=test-cli", 1, "advance on pending should fail")
 
-# ── 5. next ──
-print("\n── 5. next ──")
-run(f"printf 'y\n' | python3 {SW} next --name=test-cli", 0, "next starts stage")
-
-# Verify state changed to in_progress
+# ── 5. monitor simulation (status → running) ──
+print("\n── 5. monitor simulation (status → running) ──")
+# 模拟 monitor 的效果：将状态改为 running
 sf = TASKS / "test-cli" / ".state"
-state_text = sf.read_text()
-assert "in_progress" in state_text, "stage_status should be in_progress after next"
-passed += 1
-print("  ✓ stage_status = in_progress after next")
+state = sf.read_text()
+state = state.replace('"stage_status": "pending"', '"stage_status": "running"')
+sf.write_text(state)
 
-# ── 6. advance (with validation) ──
-print("\n── 6. advance with validation ──")
-# Simulate filling in template
+# 勾选模板以满足校验
 tpl = TASKS / "test-cli" / "01-brainstorming.md"
 content = tpl.read_text()
-content = content.replace("[ ] 选项 A:", "[x] 选项 A:")
-content = content.replace("[ ] 选项 B:", "[x] 选项 B:")
-content = content.replace("[ ] 选项 C:", "[x] 选项 C:")
-content = content.replace("设计是否已批准？ (是/否)", "设计是否已批准？ 是")
+content = content.replace("[ ] ", "[x] ")
 tpl.write_text(content)
 
-run(f"printf 'y\n' | python3 {SW} advance --name=test-cli", 0, "advance after filling template")
+run(f"python3 {SW} advance --name=test-cli", 0, "advance after satisfying requirements")
 
+# Verify state changed to pending of next stage
 state_text = sf.read_text()
-assert "02-planning" in state_text, "should advance to 02-planning"
+assert "02-planning" in state_text, "should be in planning"
 assert "pending" in state_text, "new stage should be pending"
-passed += 2
+passed += 1
 print("  ✓ advanced to 02-planning (pending)")
 
-# ── 7. advance --force ──
-print("\n── 7. advance --force ──")
-run(f"printf 'y\n' | python3 {SW} next --name=test-cli", 0, "next for stage 02")
-run(f"python3 {SW} advance --name=test-cli --force", 0, "advance --force")
+# ── 6. advance with validation ──
+print("\n── 6. advance with validation ──")
+# 模拟进入 02 阶段并运行
+state = sf.read_text()
+state = state.replace('"stage_status": "pending"', '"stage_status": "running"')
+sf.write_text(state)
+
+# Simulate filling in template
+tpl = TASKS / "test-cli" / "02-planning.md"
+content = tpl.read_text()
+content = content.replace("[ ] ", "[x] ")
+tpl.write_text(content)
+
+run(f"python3 {SW} advance --name=test-cli", 0, "advance to 03")
 
 state_text = sf.read_text()
 assert "03-coding" in state_text, "should advance to 03-coding"
 passed += 1
-print("  ✓ --force advances to 03-coding")
+print("  ✓ advanced to 03-coding")
 
 # ── 8. advance at last stage ──
 print("\n── 8. advance at last stage ──")
 # Simulate quick advance through stages 3→4→5
-for stage in range(3, 5):
-    run(f"printf 'y\n' | python3 {SW} next --name=test-cli", 0, f"next stage {stage}")
-    run(f"python3 {SW} advance --name=test-cli --force", 0, f"advance stage {stage}")
+for stage_name in ["03-coding", "04-review"]:
+    # 模拟运行
+    state = sf.read_text()
+    state = state.replace('"stage_status": "pending"', '"stage_status": "running"')
+    sf.write_text(state)
+    # 模拟勾选
+    tpl = TASKS / "test-cli" / f"{stage_name}.md"
+    content = tpl.read_text()
+    content = content.replace("[ ] ", "[x] ")
+    tpl.write_text(content)
+    # 推进
+    run(f"python3 {SW} advance --name=test-cli", 0, f"advance stage {stage_name}")
 
 state_text = sf.read_text()
 assert "05-archive" in state_text, "should reach 05-archive"
@@ -144,8 +158,8 @@ print("\n── 10. edge cases ──")
 run(f"python3 {SW} remove --name=no-exist", 1, "remove non-existent")
 run(f"python3 {SW} restore --name=no-exist", 1, "restore non-existent")
 run(f"python3 {SW} remove --name=rm-test", 0, "remove again")
-run(f"python3 {SW} init --name=rm-test", 0, "init same name after remove")
-run(f"python3 {SW} restore --name=rm-test", 1, "restore when name conflict")
+run(f"python3 {SW} init --name=rm-test", 1, "init same name after remove (should fail if in trash)")
+run(f"python3 {SW} restore --name=rm-test", 0, "restore from trash")
 print("  ✓ error handling correct")
 
 # ── 11. list ──

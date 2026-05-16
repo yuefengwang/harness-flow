@@ -18,35 +18,32 @@ opencode run 输出格式（NDJSON）：
 
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
 from pathlib import Path
 
-from .config import ROOT, TASKS, STAGES, STAGE_NAMES
-from .utils import now, sw_log
+from ..core.config import ROOT, WORKFLOW, TASKS, STAGES, STAGE_NAMES
+from ..core.utils import now, sw_log
+from ..tools.toolbox import Toolbox
 
 
-class OpenCodeAgent:
-    STATUS_IDLE = "idle"
-    STATUS_CONNECTING = "connecting"
-    STATUS_ACTIVE = "active"
-    STATUS_ERROR = "error"
+from .base import BaseAgent
 
+
+class OpenCodeAgent(BaseAgent):
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode"):
-        self.callbacks = tui_callbacks
-        self.name = name
-        self.stage = stage
-        self.stage_idx = stage_idx
-        self.model_name = model_name
+        super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
         self.running = False
-        self.status = self.STATUS_IDLE
         self.agent_proc = None
         self._master_fd = None
 
+        self.toolbox = Toolbox(name, stage, callbacks=tui_callbacks)
         self._session_id = None
         self._current_proc = None
-        self._send_lock = threading.Lock()
+        self._send_queue = queue.Queue()
+        self._send_worker = None
         self._reader_thread = None
 
         self._env = self._load_env()
@@ -56,8 +53,8 @@ class OpenCodeAgent:
         import yaml
         env = os.environ.copy()
         paths = [
-            ROOT / "harness" / "credentials.yaml",
-            ROOT / "harness" / "config.yaml"
+            WORKFLOW / "harness" / "credentials.yaml",
+            WORKFLOW / "harness" / "config.yaml"
         ]
         for p in paths:
             if p.exists():
@@ -82,16 +79,6 @@ class OpenCodeAgent:
     @property
     def is_active(self):
         return self.running
-
-    def _add_log(self, source, msg):
-        if "add_log" in self.callbacks:
-            self.callbacks["add_log"](source, msg)
-        sw_log(self.name, msg[:500], source)
-
-    def _is_running(self):
-        if "is_running" in self.callbacks:
-            return self.callbacks["is_running"]()
-        return True
 
     def _build_command(self, message, is_continue=False):
         """构建 opencode run 命令列表"""
@@ -131,7 +118,7 @@ class OpenCodeAgent:
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 env=self._env,
                 cwd=str(ROOT),
             )
@@ -183,11 +170,19 @@ class OpenCodeAgent:
                     tool_name = part.get("tool") or part.get("name") or "unknown"
                     state = part.get("state", {})
                     tool_input = state.get("input") if isinstance(state, dict) else part.get("input", {})
-                    if isinstance(tool_input, dict) and tool_input:
+                    
+                    if tool_name == "ask_user":
+                        questions = tool_input.get("questions", [])
+                        self._add_log("system", f"\u2753 {tool_name} (\u6b63\u5728\u7b49\u5f85\u7528\u6237\u56de\u7b54 {len(questions)} \u4e2a\u95ee\u9898)")
+                        # 执行工具 (会阻塞当前 reader 线程直到用户回答完毕)
+                        result = self.toolbox.ask_user(questions)
+                        # 将结果入队发回给 opencode
+                        self.send(result)
+                    elif isinstance(tool_input, dict) and tool_input:
                         input_keys = ", ".join(f"{k}={v}" for k, v in list(tool_input.items())[:3])
-                        self._add_log("system", f"🔧 {tool_name}({input_keys})")
+                        self._add_log("system", f"\ud83d\udd27 {tool_name}({input_keys})")
                     else:
-                        self._add_log("system", f"🔧 {tool_name}")
+                        self._add_log("system", f"\ud83d\udd27 {tool_name}")
 
                 elif event_type == "tool_result":
                     result = part.get("result", "")
@@ -221,8 +216,8 @@ class OpenCodeAgent:
 
         sw_log(self.name, "opencode run completed", "sw")
 
-        # 通知 engine Agent 完成，可保存产出
-        if "on_complete" in self.callbacks:
+        # 仅当正常完成（非异常退出）时通知 engine 保存产出
+        if self.status != self.STATUS_ERROR and "on_complete" in self.callbacks:
             try:
                 self.callbacks["on_complete"]()
             except Exception:
@@ -233,9 +228,8 @@ class OpenCodeAgent:
         self.status = self.STATUS_IDLE
 
     def send(self, text, is_system=False):
-        """发送消息给 opencode Agent"""
+        """发送消息给 opencode Agent（非阻塞，自动排队）"""
         if not self.running and not is_system:
-            # 离线消息写入 .input 文件
             self._add_log("sw", "Agent 未运行，输入已写入 .input (sw next 后生效)")
             input_file = TASKS / self.name / ".input"
             input_file.parent.mkdir(parents=True, exist_ok=True)
@@ -244,12 +238,35 @@ class OpenCodeAgent:
             sw_log(self.name, f"user input (offline): {text[:80]}", "user")
             return
 
-        def _run():
-            with self._send_lock:
-                is_continue = self._session_id is not None
-                self._run_opencode(text, is_continue=is_continue)
+        # 入队消息
+        self._send_queue.put((text, is_system))
 
-        threading.Thread(target=_run, daemon=True).start()
+        # 确保 worker 线程在运行
+        if self._send_worker is None or not self._send_worker.is_alive():
+            self.status = self.STATUS_WAITING
+            self._send_worker = threading.Thread(target=self._send_loop, daemon=True)
+            self._send_worker.start()
+
+    def _send_loop(self):
+        while self.running:
+            try:
+                text, is_system = self._send_queue.get(timeout=0.5)
+            except queue.Empty:
+                if not self._is_busy():
+                    self.status = self.STATUS_IDLE
+                    break
+                continue
+
+            try:
+                self._run_opencode(text, is_continue=self._session_id is not None)
+            except Exception as e:
+                self._add_log("error", f"发送异常: {e}")
+                self.status = self.STATUS_IDLE
+                # 继续处理队列中的下一条
+
+    def _is_busy(self):
+        """是否有正在运行的 opencode 子进程"""
+        return self._current_proc is not None and self._current_proc.poll() is None
 
     def shutdown(self):
         self.running = False

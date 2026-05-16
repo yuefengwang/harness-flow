@@ -5,9 +5,15 @@ import os
 from pathlib import Path
 
 # 将引擎根目录 (workflow/) 加入 sys.path 以加载 sw_lib
-engine_root = Path(__file__).resolve().parent.parent
+# 支持从项目根目录或 workflow/bin/ 启动
+current_file = Path(__file__).resolve()
+if current_file.parent.name == "bin":
+    engine_root = current_file.parent.parent
+else:
+    engine_root = current_file.parent / "workflow"
+
 sys.path.insert(0, str(engine_root))
 
-from sw_lib.main import main
+from sw_lib.cli.main import main
 if __name__ == "__main__":
     main()

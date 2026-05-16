@@ -7,6 +7,6 @@ echo "[Hard Check] 01-brainstorming 门禁..."
 
 [ ! -f "$FILE" ] && echo "❌ 找不到 $FILE" && exit 1
 grep -q "## Gate" "$FILE" || { echo "❌ 缺少 Gate 章节"; exit 1; }
-grep -q "Design approved" "$FILE" || { echo "❌ 设计未批准"; exit 1; }
+grep -i -q "\[x\] Design approved" "$FILE" || { echo "❌ 设计未批准 ([x] Design approved)"; exit 1; }
 
 echo "[Hard Check] ✅ 通过"

@@ -5,15 +5,16 @@ import yaml
 import os
 import shutil
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+# 将引擎根目录 (workflow/) 加入 sys.path
+engine_root = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(engine_root))
 
-from sw_lib.config import resolve_agent_model, resolve_agent_type
+from sw_lib.core.config import resolve_agent_model, resolve_agent_type, WORKFLOW, _manager
 
 class TestModelResolution(unittest.TestCase):
     def setUp(self):
-        self.config_path = ROOT / "harness" / "config.yaml"
-        self.backup_path = ROOT / "harness" / "config.yaml.bak"
+        self.config_path = WORKFLOW / "harness" / "config.yaml"
+        self.backup_path = WORKFLOW / "harness" / "config.yaml.bak"
         if self.config_path.exists():
             shutil.copy2(self.config_path, self.backup_path)
         
@@ -31,12 +32,15 @@ class TestModelResolution(unittest.TestCase):
         }
         with open(self.config_path, "w") as f:
             yaml.dump(self.test_config, f)
+        _manager.reload()
 
     def tearDown(self):
         if self.backup_path.exists():
-            shutil.move(self.backup_path, self.config_path)
+            shutil.move(str(self.backup_path), str(self.config_path))
         elif self.config_path.exists():
             os.remove(self.config_path)
+        _manager.reload()
+
 
     def test_stage_resolution(self):
         self.assertEqual(resolve_agent_model("01-brainstorming"), "gemini-analyst-model")
@@ -58,8 +62,8 @@ class TestModelResolution(unittest.TestCase):
 
 class TestAgentTypeResolution(unittest.TestCase):
     def setUp(self):
-        self.config_path = ROOT / "harness" / "config.yaml"
-        self.backup_path = ROOT / "harness" / "config.yaml.bak"
+        self.config_path = WORKFLOW / "harness" / "config.yaml"
+        self.backup_path = WORKFLOW / "harness" / "config.yaml.bak"
         if self.config_path.exists():
             shutil.copy2(self.config_path, self.backup_path)
 
@@ -81,12 +85,15 @@ class TestAgentTypeResolution(unittest.TestCase):
         }
         with open(self.config_path, "w") as f:
             yaml.dump(self.test_config, f)
+        _manager.reload()
 
     def tearDown(self):
         if self.backup_path.exists():
-            shutil.move(self.backup_path, self.config_path)
+            shutil.move(str(self.backup_path), str(self.config_path))
         elif self.config_path.exists():
             os.remove(self.config_path)
+        _manager.reload()
+
 
     def test_type_from_role_config(self):
         self.assertEqual(resolve_agent_type("01-brainstorming"), "gemini")

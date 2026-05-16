@@ -8,30 +8,19 @@ from google import genai
 from google.genai import types
 from pathlib import Path
 
-from .config import ROOT, TASKS, STAGES, STAGE_NAMES
-from .utils import now, sw_log
-from .tools import Toolbox
+from ..core.config import ROOT, WORKFLOW, TASKS, STAGES, STAGE_NAMES
+from ..core.utils import now, sw_log
+from ..tools.toolbox import Toolbox
 
-class GeminiAPIAgent:
-    # status 常量
-    STATUS_IDLE = "idle"
-    STATUS_CONNECTING = "connecting"
-    STATUS_ACTIVE = "active"
-    STATUS_WAITING = "waiting"
-    STATUS_ERROR = "error"
+from .base import BaseAgent
 
+
+class GeminiAgent(BaseAgent):
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="gemini-2.0-flash"):
-        self.callbacks = tui_callbacks
-        self.name = name
-        self.stage = stage
-        self.stage_idx = stage_idx
-        self.model_name = model_name
+        super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
         self.history_file = TASKS / name / ".history.json"
-        self.toolbox = Toolbox(name, stage)
+        self.toolbox = Toolbox(name, stage, callbacks=tui_callbacks)
         self.running = False
-        self.status = self.STATUS_IDLE
-        self.agent_proc = None # 为了测试兼容性
-        self._master_fd = None # 为了测试兼容性
         
         self.api_key = self._get_api_key()
         self.client = None
@@ -51,7 +40,7 @@ class GeminiAPIAgent:
     def _get_api_key(self):
         """从凭证文件中获取 GOOGLE_API_KEY"""
         import yaml
-        paths = [ROOT / "harness" / "credentials.yaml", ROOT / "harness" / "config.yaml"]
+        paths = [WORKFLOW / "harness" / "credentials.yaml", WORKFLOW / "harness" / "config.yaml"]
         for p in paths:
             if p.exists():
                 try:
@@ -66,15 +55,6 @@ class GeminiAPIAgent:
                                 if val: return val
                 except: continue
         return os.environ.get("GOOGLE_API_KEY")
-
-    def _add_log(self, source, msg):
-        if "add_log" in self.callbacks:
-            self.callbacks["add_log"](source, msg)
-
-    def _is_running(self):
-        if "is_running" in self.callbacks:
-            return self.callbacks["is_running"]()
-        return True
 
     def _get_tools(self):
         """获取当前阶段允许的工具对象列表"""

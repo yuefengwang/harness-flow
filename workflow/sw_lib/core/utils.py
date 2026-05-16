@@ -1,5 +1,6 @@
 """sw_lib.utils — helper functions (colors, logging, prompts)"""
 
+import os
 import sys
 from datetime import datetime
 
@@ -75,6 +76,11 @@ def prompt(prompt_text: str, default: str = "") -> str:
 
 def prompt_yn(prompt_text: str, default: str = "y") -> bool:
     """交互式 Y/n 确认"""
+    if os.environ.get("SW_YES") == "1":
+        return True
+    if os.environ.get("SW_NON_INTERACTIVE") == "1":
+        return default.lower() in ("y", "yes")
+
     hint = "Y/n" if default == "y" else "y/N"
     sys.stdout.write(f"  {blue('→')} {prompt_text} [{hint}]: ")
     sys.stdout.flush()
@@ -94,6 +100,8 @@ def sw_log(name: str, message: str, source: str = "sw"):
         return  # 目录不存在（如已移除），跳过
     log_file = log_dir / ".log"
     ts = now()
-    line = f"[{ts}] {source:<6}| {message}\n"
+    # 清理 surrogate 字符，防止写入时编码崩溃
+    safe_msg = message.encode("utf-8", errors="replace").decode("utf-8")
+    line = f"[{ts}] {source:<6}| {safe_msg}\n"
     with open(log_file, "a") as f:
         f.write(line)
