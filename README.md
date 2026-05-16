@@ -1,63 +1,123 @@
-# Simple Workflow
+# 🚀 Harness-Flow: AI 驱动的标准化开发引擎
 
-一套结构化、状态驱动、可自我演化的 AI 辅助开发工作流。
-
-## 架构
-
-```
-Harness-Engineering Platform    ← 调度层：多项目/多 agent/worktree 并行
-        │
-        ▼
-   Workflow System              ← 执行层：任务级生命周期管理
-        │
-        ▼
-   repo/ 多项目                 ← 项目层：业务代码
-```
-
-- **Harness 平台** — 通过 git worktree 派发独立任务，每个 worktree 运行一个 AI Agent，互不干扰
-- **Workflow 系统** — 每个任务经历 `头脑风暴 → 规划 → 编码 → 评审 → 归档` 五个阶段
-- **repo/ 目录** — 统一管理多个项目代码，通过 `dev-init.sh` 切换开发焦点
-
-## 快速开始
-
-```bash
-# 1. 派发一个新任务到独立 worktree (repo 项目)
-./harness/dispatch.sh sample-java-app add-auth --agent claude
-
-# 或者：开发平台自身
-./harness/dispatch.sh harness-flow update-template --agent opencode --launch
-
-# 2. 进入 worktree 启动 AI Agent
-cd .worktrees/add-auth && claude .
-
-# 3. 完成 → 提交 PR
-./harness/pr.sh add-auth -m "Add authentication"
-
-# 4. PR 合并后清理 worktree
-./harness/cleanup.sh add-auth
-```
-
-## 集成到现有项目
-
-复制工作流到你的项目：
-
-```bash
-cp -r workflow/ dev-init.sh GEMINI.md <your-project-root>/
-```
-
-详细集成说明见 `workflow/README.md`。
+`Harness-Flow` 是一套高度结构化、状态驱动且可扩展的 AI Agent 编排框架。它将复杂的软件开发任务拆解为 5 个标准阶段，通过严密的 **合规性门禁 (Hooks)** 和 **现代化终端交互 (TUI)**，确保 AI 在可控、透明且高效的环境下完成开发工作。
 
 ---
 
-### 核心文件
+## 🌟 核心特性
 
-| 文件 | 作用 |
-|------|------|
-| `harness/` | 调度层：dispatch / status / pr / cleanup |
-| `workflow/` | 执行层：模板、任务、状态看板 |
-| `hooks/` | 强制规则：各阶段不可跳过的检查点 |
-| `docker/` | Docker 镜像构建（Agent 容器隔离） |
-| `dev-init.sh` | 项目初始化 |
-| `repo/` | 多项目代码 |
+-   **🎯 阶段驱动工作流**：将开发生命周期标准化为 `头脑风暴 → 规划 → 编码 → 评审 → 归档`。
+-   **🖥️ 沉浸式终端面板 (TUI)**：基于 `Rich` 打造的实时监控界面，支持日志自动聚焦、手动滚动及结构化问答。
+-   **🛡️ 强制性合规门禁**：每个阶段均设有前置 (Pre) 与后置 (Post) Hooks，严禁未经校验的非法推进。
+-   **🔌 插件化架构**：
+    -   **Agent 插件**：无缝切换 Gemini、OpenCode 或本地 PTY 模式。
+    -   **工具插件**：基于类定义的原子工具箱，支持精细权限控制。
+-   **⚡ 原子化交互**：全新设计的 `sw init` 向导，实现“三步进场，初始化即入场”。
+-   **🧪 工业级稳定性**：内置完善的 `MockAgent` 模拟器与覆盖率极高的自动化测试套件。
 
-> 详细的工作流阶段说明、模板指南、演化规则 → 见 [`workflow/README.md`](workflow/README.md)
+---
+
+## 📸 监控面板预览 (Monitor TUI)
+
+`sw monitor` 提供了一个专业的交互环境，让您实时掌控 Agent 的思考与执行：
+
+```text
+ 🚀 Harness-Flow | my-feature-task | 01-brainstorming (gemini-2.0-flash) ● 连接中... 
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 对话日志 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ ┃ [12:04:15] sw     | 启动 Agent (gemini-2.0-flash) — 01-brainstorming      ┃
+ ┃ [12:04:16] sys    | 核心指令已通过 API System Instruction 注入完毕        ┃
+ ┃ [12:04:18] agent  | 你好！我是你的需求分析专家。我已阅读了你的任务需求。  ┃
+ ┃ [12:04:19] agent  | 在开始设计之前，我需要确认几个关键细节：              ┃
+ ┃ [12:04:20] sw     | ❓ 收到 1 个结构化问题                                ┃
+ ┃ [12:04:20] user   | [1] 需要，预留 i18n 接口                              ┃
+ ┃ [12:04:21] agent  | 收到。我将据此制定支持多语言的设计方案。              ┃
+ ┃ [12:04:22] sw     | ✨ 阶段产出已就绪。你可以继续交流，或输入 /advance 推进。 ┃
+ ┃                                                                           ┃
+ ┃                                  (按 ↑/↓ 滚动历史, 按 PageUp/Dn 快速翻页)  ┃
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ ┃ 💬 输入消息或 /命令 (如 /advance, /status, /q)                            ┃
+ ┃ 👉: /advance                                                              ┃
+ ┃ ⚠️ 检测到 2 个待填项未完成，请完善后重试。                                ┃
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+```
+
+---
+
+## 🛠️ 快速开始
+
+### 1. 安装环境
+确保您的环境已安装 Python 3.9+ 及依赖：
+```bash
+pip install pyyaml rich google-genai
+```
+
+### 2. 初始化一个新任务
+运行交互式向导，只需三步：起名、选型、贴需求。确认后会自动进入监控。
+```bash
+./sw init
+```
+
+### 3. 在监控面板中协作
+在 `monitor` 中，您可以直接输入文本与 Agent 对话，或使用斜杠命令：
+-   `/advance`：执行当前阶段校验并尝试推进入下一阶段。
+-   `/status`：查看当前任务的详细状态。
+-   `/context`：预览注入给 Agent 的完整上下文。
+-   `/q`：保存并退出监控面板。
+
+---
+
+## 📂 项目架构
+
+```text
+workflow/
+├── sw_lib/                 # 核心逻辑库 (重构后的分层架构)
+│   ├── agents/             # Agent 驱动 (Gemini, OpenCode, PTY, Mock)
+│   ├── cli/                # 命令行解析与指令路由
+│   ├── core/               # 编排引擎、业务服务、状态持久化、配置模型
+│   ├── tools/              # 插件化工具箱 (Task Tools)
+│   └── ui/                 # 现代交互界面 (Init UI & Monitor TUI)
+├── harness/                # 配置中心与凭证管理
+├── hooks/                  # 阶段合规性校验脚本
+├── templates/              # 各阶段产出物的标准 Markdown 模板
+└── tasks/                  # 运行中的活动任务数据
+```
+
+---
+
+## 📐 五大开发阶段
+
+1.  **01-Brainstorming**：需求对齐。AI 引导用户澄清歧义，产出 Specs 文档。
+2.  **02-Planning**：任务拆解。生成 WBS、测试计划与详细设计。
+3.  **03-Coding**：纯粹执行。AI 编写业务代码，并确保单元测试通过。
+4.  **04-Review**：审计复核。对代码变更进行多维度检查与影响分析。
+5.  **05-Archive**：总结沉淀。生成任务简报，自动清理工作区并归档。
+
+---
+
+## 🛡️ 流程审计 (Hooks)
+
+`Harness-Flow` 严禁不合规的开发行为。
+-   **Soft Check**：检查 Markdown 模板中的 `[ ]` 是否全部勾选，`___` 是否全部填写。
+-   **Hard Check**：执行 `workflow/hooks/check_XX.sh` 脚本进行物理环境验证（如编译检查、Lint 检查）。
+-   **强制性**：`/advance` 指令会无条件执行上述检查，失败则拒绝推进。
+
+---
+
+## 🧪 开发者测试
+
+我们拥有一套稳健的测试套件，确保重构与功能的零退化：
+-   **单元测试**：`python3 -m pytest workflow/tests/unit`
+-   **端到端流测试**：`bash workflow/tests/e2e/test_e2e.sh`
+
+---
+
+## ⚙️ 配置说明
+
+在 `workflow/harness/config.yaml` 中，您可以定义：
+-   **Roles**：每个角色使用的 Agent、模型及分配的工具。
+-   **Stage Roles**：每个阶段默认绑定的角色。
+-   **Auto Advance**：是否在 Agent 完成产出后自动触发 Hooks 校验并推进。
+
+---
+*Powered by Harness-Engineering. 让 AI 开发如外科手术般精准。*
