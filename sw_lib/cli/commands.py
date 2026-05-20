@@ -19,6 +19,7 @@ import os
 import subprocess
 
 from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
+from ..web.app import create_app
 from ..core.state import get_active_from_status
 from ..core.utils import (
     green, yellow, blue,
@@ -27,10 +28,7 @@ from ..core.utils import (
 )
 from ..ui.tui import MonitorTUI
 from ..ui.init_ui import InitializationUI
-from ..core.service import TaskService, TaskError
-
-# 初始化全局 Service
-_service = TaskService()
+from ..core.service import _service, TaskError
 
 
 # ── commands ──
@@ -227,6 +225,16 @@ def cmd_monitor(args):
         MonitorTUI(name, stage, idx, agent).run()
     except TaskError as e:
         die(str(e))
+
+
+def cmd_dashboard(args):
+    """启动 Web Dashboard (FastAPI + HTMX)"""
+    import uvicorn
+    host = getattr(args, "host", "127.0.0.1")
+    port = int(getattr(args, "port", 8080))
+    app = create_app()
+    print(f"🌐 Harness-Flow Dashboard: http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def cmd_usage():

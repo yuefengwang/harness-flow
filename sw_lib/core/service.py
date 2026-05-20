@@ -1,10 +1,13 @@
 """
-sw_lib.service — 任务管理核心业务逻辑 (TaskService)。
+sw_lib.service — 任务管理核心业务逻辑 (TaskService).
 
 该模块将原本散落在 commands.py 中的业务逻辑收拢，提供统一的、
 不依赖于 CLI 表现层的任务操作接口。
+
+同时提供异步包装方法，供 Web Dashboard (FastAPI) 等异步调用方使用。
 """
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -13,7 +16,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from .config import ROOT,  TASKS, TPLS, STAGES, STAGE_NAMES, TRASH
 from .state import (
-    read_state, write_state, state_path,
+    read_state, write_state, state_path, StageValidator,
     update_status_active, clear_status_active,
     update_status_stage, get_active_from_status,
 )
@@ -23,6 +26,9 @@ from .utils import now, sanitize_name, sw_log
 class TaskError(Exception):
     """任务操作相关的业务异常"""
     pass
+
+
+_service: "TaskService" = None  # type: ignore
 
 
 class TaskService:
@@ -192,6 +198,52 @@ class TaskService:
 
         sw_log(name, f"user answer added: {text[:50]}", "user")
 
+    # ── 异步包装接口 (供 Web Dashboard 等异步调用方使用) ──
+
+    @classmethod
+    def get_instance(cls) -> "TaskService":
+        """获取全局单例"""
+        global _service_singleton
+        if _service_singleton is None:
+            _service_singleton = cls()
+        return _service_singleton
+
+    async def async_list_tasks(self, from_trash: bool = False) -> List[Dict[str, Any]]:
+        """异步版 list_tasks，通过线程池包装同步 I/O"""
+        return await asyncio.to_thread(self.list_tasks, from_trash)
+
+    async def async_get_task_state(self, name: str) -> Dict[str, Any]:
+        """异步版 get_task_state"""
+        return await asyncio.to_thread(self.get_task_state, name)
+
+    async def async_create_task(self, name: str, task_type: str = "feature",
+                                 session: str = "N/A", agent: str = "N/A",
+                                 context: str = "", allow_trash_collision: bool = False) -> str:
+        """异步版 create_task"""
+        return await asyncio.to_thread(
+            self.create_task, name, task_type, session, agent, context, allow_trash_collision
+        )
+
+    async def async_advance_stage(self, name: str) -> Dict[str, Any]:
+        """异步版 advance_stage"""
+        return await asyncio.to_thread(self.advance_stage, name)
+
+    async def async_remove_task(self, name: str):
+        """异步版 remove_task"""
+        return await asyncio.to_thread(self.remove_task, name)
+
+    async def async_restore_task(self, name: str):
+        """异步版 restore_task"""
+        return await asyncio.to_thread(self.restore_task, name)
+
+    async def async_validate_stage(self, name: str) -> Tuple[List[str], List[str]]:
+        """异步版 validate_stage"""
+        return await asyncio.to_thread(self.validate_stage, name)
+
+    async def async_add_answer(self, name: str, text: str):
+        """异步版 add_answer"""
+        return await asyncio.to_thread(self.add_answer, name, text)
+
     def get_task_state(self, name: str) -> Dict[str, Any]:
         """获取任务完整状态，若不存在则抛出异常"""
         st = read_state(name)
@@ -239,3 +291,6 @@ class TaskService:
             
         sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
         return st
+
+
+_service = TaskService()

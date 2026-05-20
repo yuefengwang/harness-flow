@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Harness-Flow Dashboard</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4"
+            integrity="sha384-HGfztofotPfshzWFZgqT9iTtkLq3W89RFJUalGKSXqnB53DbVOs4C2iB9UY6QJZn"
+            crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="nav-title">Harness-Flow</span>
+            <span class="nav-subtitle">Dashboard</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">任务看板</a>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

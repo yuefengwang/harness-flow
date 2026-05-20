@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1>任务: {{ task.id }}</h1>
+    <a href="/" class="btn">← 返回看板</a>
+</div>
+
+<div class="detail-grid">
+    <div class="detail-card">
+        <h3>基本信息</h3>
+        <table class="info-table">
+            <tr><td>ID</td><td>{{ task.id }}</td></tr>
+            <tr><td>类型</td><td>{{ task.type }}</td></tr>
+            <tr><td>当前阶段</td><td>{{ stage_labels.get(task.stage, task.stage) }}</td></tr>
+            <tr><td>阶段索引</td><td>{{ task.stage_idx }}</td></tr>
+            <tr><td>状态</td><td class="status-{{ task.stage_status }}">{{ task.stage_status }}</td></tr>
+            <tr><td>创建时间</td><td>{{ task.created_at }}</td></tr>
+            <tr><td>更新时间</td><td>{{ task.updated_at }}</td></tr>
+            <tr><td>Agent</td><td>{{ task.agent }}</td></tr>
+        </table>
+    </div>
+
+    <div class="detail-card">
+        <h3>阶段文件</h3>
+        <ul class="stage-list">
+            {% for sf in stage_files %}
+            <li class="stage-item {{ 'done' if sf.exists else 'pending' }}">
+                <span class="stage-icon">{{ '✓' if sf.exists else '○' }}</span>
+                <span class="stage-label">{{ sf.label }}</span>
+                <span class="stage-code">{{ sf.stage }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        <div class="actions">
+            <button class="btn btn-primary"
+                    hx-post="/tasks/{{ task.id }}/advance"
+                    hx-target="#advance-result"
+                    hx-swap="innerHTML">推进阶段</button>
+        </div>
+        <div id="advance-result"></div>
+    </div>
+</div>
+
+<div class="detail-card">
+    <h3>日志 (最近 5000 字符)</h3>
+    <pre class="log-viewer">{{ log_content }}</pre>
+</div>
+{% endblock %}

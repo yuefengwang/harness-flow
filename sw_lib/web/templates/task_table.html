@@ -1,0 +1,66 @@
+<div id="task-list">
+    {% if active_tasks %}
+    <h3>活跃任务</h3>
+    <table class="task-table">
+        <thead>
+            <tr>
+                <th>任务名</th>
+                <th>阶段</th>
+                <th>状态</th>
+                <th>更新时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in active_tasks %}
+            <tr>
+                <td><a href="/tasks/{{ t.id }}">{{ t.id }}</a></td>
+                <td>{{ stage_labels.get(t.stage, t.stage) }}</td>
+                <td class="status-{{ t.status }}">{{ t.status }}</td>
+                <td>{{ t.updated_at }}</td>
+                <td class="actions">
+                    <button hx-post="/tasks/{{ t.id }}/advance"
+                            hx-target="#task-list"
+                            hx-swap="outerHTML">推进</button>
+                    <button class="danger"
+                            hx-post="/tasks/{{ t.id }}/remove"
+                            hx-target="#task-list"
+                            hx-swap="outerHTML"
+                            hx-confirm="确认移除任务 {{ t.id }}?">删除</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">暂无活跃任务</p>
+    {% endif %}
+
+    {% if trashed_tasks %}
+    <h3>回收站</h3>
+    <table class="task-table">
+        <thead>
+            <tr>
+                <th>任务名</th>
+                <th>阶段</th>
+                <th>移除时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in trashed_tasks %}
+            <tr class="trashed">
+                <td>{{ t.id }}</td>
+                <td>{{ t.stage }}</td>
+                <td>{{ t.removed_at }}</td>
+                <td class="actions">
+                    <button hx-post="/tasks/{{ t.id }}/restore"
+                            hx-target="#task-list"
+                            hx-swap="outerHTML">恢复</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>

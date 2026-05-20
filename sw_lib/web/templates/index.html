@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h1>任务看板</h1>
+    <button class="btn btn-primary"
+            hx-get="/tasks/create-form"
+            hx-target="#create-modal"
+            hx-trigger="click"
+            onclick="document.getElementById('create-modal').classList.remove('hidden')">
+        + 新建任务
+    </button>
+</div>
+
+<!-- 创建任务模态框 -->
+<div id="create-modal" class="modal hidden">
+    <div class="modal-backdrop" onclick="this.parentElement.classList.add('hidden')"></div>
+    <div class="modal-content">
+        <form hx-post="/tasks/create"
+              hx-target="#task-list"
+              hx-swap="outerHTML"
+              hx-on::after-request="if(event.detail.successful) document.getElementById('create-modal').classList.add('hidden')">
+            <h2>创建新任务</h2>
+            <label>任务名称 <input type="text" name="name" required placeholder="my-task"></label>
+            <label>任务类型
+                <select name="task_type">
+                    <option value="feature">feature</option>
+                    <option value="bugfix">bugfix</option>
+                    <option value="refactor">refactor</option>
+                    <option value="chore">chore</option>
+                </select>
+            </label>
+            <label>需求描述 <textarea name="context" rows="4" placeholder="可选"></textarea></label>
+            <div class="form-actions">
+                <button type="button" onclick="document.getElementById('create-modal').classList.add('hidden')">取消</button>
+                <button type="submit" class="btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 任务列表 (支持 HTMX 定时刷新) -->
+<div id="task-list"
+     hx-get="/tasks/table"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+    {% include "task_table.html" %}
+</div>
+{% endblock %}

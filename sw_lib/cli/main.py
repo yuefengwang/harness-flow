@@ -13,7 +13,8 @@ from typing import List, Optional
 
 from .commands import (
     cmd_init, cmd_status, cmd_advance, cmd_resume,
-    cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor, cmd_usage,
+    cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor,
+    cmd_dashboard, cmd_usage,
 )
 
 
@@ -77,6 +78,11 @@ def main():
     p_answer.add_argument("--name", help="任务名称")
     p_answer.add_argument("--text", help="回复内容")
 
+    # dashboard
+    p_dash = subparsers.add_parser("dashboard", help="启动 Web Dashboard")
+    p_dash.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
+    p_dash.add_argument("--port", default=8080, type=int, help="监听端口 (默认 8080)")
+
     # 兼容性处理：如果没有任何参数，打印 usage
     if len(sys.argv) < 2:
         cmd_usage()
@@ -135,6 +141,9 @@ def main():
 
     elif cmd == "answer":
         cmd_answer(args)
+
+    elif cmd == "dashboard":
+        cmd_dashboard(args)
 
     else:
         cmd_usage()
