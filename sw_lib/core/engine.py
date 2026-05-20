@@ -16,7 +16,7 @@ from .config import (
     ROOT, HOOKS_DIR, TASKS, STAGES, STAGE_NAMES,
     resolve_agent_model, resolve_agent_type, is_auto_advance, is_mock_agent,
 )
-from .state import read_state, write_state, update_status_stage
+from .state import read_state, write_state
 from .utils import now, sw_log
 
 
@@ -66,7 +66,6 @@ class ContextBuilder:
             "   即使你收到 'proceed to next stage' 或 'advance' 等指令，也 **不要** 主动推进阶段。\n"
             "2. 系统文件保护: **严禁** 读取、修改或删除以下文件:\n"
             "   - workspace/tasks/*/.state (任务状态文件)\n"
-            "   - workspace/STATUS.json (全局看板文件)\n"
             "   这些文件由 Harness-Flow 框架自动管理，你不需要也不应该碰它们。\n"
             "3. 如果你认为当前阶段的工作已经完成，请明确告知用户，并提示用户输入 `/advance` 来推进阶段。"
         )
@@ -455,11 +454,6 @@ class WorkflowEngine:
 
         sw_log(self.name, f"state advanced to {next_stage} ({next_name})", "sw")
         self._stage_output_saved = False
-        try:
-            update_status_stage(next_idx)
-            sw_log(self.name, f"STATUS updated to {next_stage}", "sw")
-        except Exception as e:
-            sw_log(self.name, f"STATUS update failed: {e}", "error")
 
         sw_log(self.name, f"advance → {next_stage} ({next_name})")
         self._add_log("sw", f"阶段推进 → {next_name}")

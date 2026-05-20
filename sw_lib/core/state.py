@@ -1,9 +1,9 @@
 """
-sw_lib.state — 任务状态持久化、STATUS.json 管理及阶段校验。
+sw_lib.state — 任务状态持久化及阶段校验。
 
 主要职责：
-1. 维护任务的 .state 文件 (JSON 格式)。
-2. 提供对 STATUS.json (任务面板) 的自动更新接口。
+1. 维护任务的 .state 文件 (JSON 格式)，每个任务独立管理自身状态。
+2. 通过扫描 .state 文件查找当前活跃任务。
 3. 封装对任务状态的读取、写入及自动迁移逻辑。
 """
 
@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from .config import ROOT, TASKS, TPLS, STATUS, STATUS_OLD, STAGES, STAGE_NAMES
+from .config import ROOT, TASKS, STAGES, STAGE_NAMES
 
 
 def state_path(name: str) -> Path:
@@ -104,96 +104,32 @@ def write_state(name: str, data: Dict[str, Any]):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _load_status() -> Dict[str, Any]:
-    """加载 STATUS.json，包含兼容性迁移逻辑"""
-    if STATUS.exists():
+def _find_active_task_from_states() -> Optional[str]:
+    """扫描 workspace/tasks/*/.state 文件，返回最近更新的活跃任务名"""
+    if not TASKS.is_dir():
+        return None
+    candidates = []
+    for d in TASKS.iterdir():
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        sf = d / ".state"
+        if not sf.exists():
+            continue
         try:
-            return json.loads(STATUS.read_text(encoding="utf-8"))
+            st = json.loads(sf.read_text(encoding="utf-8"))
         except Exception:
-            pass
-
-    # 兼容性迁移: 尝试从 STATUS.md 读取
-    if STATUS_OLD.exists():
-        data = _migrate_from_md()
-        _save_status(data)
-        return data
-
-    # 默认值
-    return {
-        "project": "无",
-        "active_task": "无",
-        "stage": "N/A",
-        "init_date": ""
-    }
-
-
-def _save_status(data: Dict[str, Any]):
-    """保存 STATUS.json"""
-    STATUS.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATUS, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _migrate_from_md() -> Dict[str, Any]:
-    """从旧的 Markdown 格式解析数据"""
-    try:
-        content = STATUS_OLD.read_text(encoding="utf-8")
-    except Exception:
-        content = ""
-
-    data = {
-        "project": "无",
-        "active_task": "无",
-        "stage": "N/A",
-        "init_date": ""
-    }
-
-    m_proj = re.search(r'\*\*当前项目:\*\*\s*(.+)', content)
-    if m_proj: data["project"] = m_proj.group(1).strip()
-
-    m_task = re.search(r'\*\*活动任务:\*\*\s*(.+)', content)
-    if m_task: data["active_task"] = m_task.group(1).strip().rstrip("*")
-
-    m_stage = re.search(r'\*\*当前阶段:\*\*\s*(.+)', content)
-    if m_stage: data["stage"] = m_stage.group(1).strip()
-
-    m_date = re.search(r'\*\*初始化日期:\*\*\s*(.+)', content)
-    if m_date: data["init_date"] = m_date.group(1).strip()
-
-    return data
-
-
-def update_status_active(name: str):
-    """更新状态中的活动任务和当前阶段"""
-    data = _load_status()
-    data["active_task"] = name
-    data["stage"] = "01-头脑风暴"
-    _save_status(data)
-
-
-def clear_status_active(name: str):
-    """清除状态中指定任务的活动引用"""
-    data = _load_status()
-    if data.get("active_task") == name:
-        data["active_task"] = "无"
-        data["stage"] = "N/A"
-        _save_status(data)
-
-
-def update_status_stage(idx: int):
-    """推进状态中的当前阶段"""
-    data = _load_status()
-    data["stage"] = f"0{idx+1}-{STAGE_NAMES[idx]}"
-    _save_status(data)
+            continue
+        if st.get("stage_status") in ("running", "pending", "waiting"):
+            candidates.append((st.get("updated_at", ""), d.name))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def get_active_from_status() -> Optional[str]:
-    """从状态中读取当前活动任务名"""
-    data = _load_status()
-    name = data.get("active_task", "无")
-    if name and name != "无":
-        return name
-    return None
+    """从 .state 文件中查找当前活跃任务（替代旧的 STATUS.json 机制）"""
+    return _find_active_task_from_states()
 
 
 class StageValidator:

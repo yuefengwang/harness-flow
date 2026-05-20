@@ -22,7 +22,7 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
 from ..core.engine import WorkflowEngine
-from ..core.state import read_state, update_status_active
+from ..core.state import read_state
 from ..core.utils import sw_log, now
 
 # 如果环境没有 Rich，退回到基础 Console 占位
@@ -56,6 +56,9 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
     """
     从最近的日志记录中扫描并提取 Agent 提出的结构化选项。
     
+    仅从最近日志窗口末尾的 **最新 agent 消息连续块** 中提取选项，
+    避免将旧问题的选项与当前问题的选项混淆。
+    
     Args:
         lines: 日志行列表 (source, msg)
         max_age: 扫描最近的行数，默认 20
@@ -64,26 +67,42 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
         提取到的选项列表 [(label, text), ...]
     """
     recent = lines[-max_age:] if len(lines) > max_age else lines
-    seen = set()
-    options = []
-    for source, msg in recent:
-        if source != "agent":
-            continue
-        for line in msg.splitlines():
+
+    # 从末尾向前扫描，收集最新的连续 agent 消息块
+    latest_agent_block: List[Tuple[str, str]] = []
+    for source, msg in reversed(recent):
+        if source == "agent":
+            latest_agent_block.append((source, msg))
+        elif latest_agent_block:
+            break  # 已找到 agent 块末尾，停止扫描
+    latest_agent_block.reverse()
+
+    if not latest_agent_block:
+        return []
+
+    # 反向扫描选项：同一消息块中若包含多道题（标签相同），后出现的
+    # 选项（更新近的问题）优先覆盖先出现的，确保 footer 显示最
+    # 新的问题选项而非旧题的。
+    seen: set = set()
+    options_reversed: List[Tuple[str, str]] = []
+    for _src, msg in reversed(latest_agent_block):
+        for line in reversed(msg.splitlines()):
             line = line.strip()
             if not line:
                 continue
             for pat in OPTION_PATTERNS:
                 m = pat.match(line)
                 if m:
-                    label = m.group(1) or m.group(2)
-                    text = m.group(m.lastindex)
+                    label: str = m.group(1) or m.group(2)
+                    text: str = m.group(m.lastindex)
                     text = text.rstrip('*').strip()
                     if label and text and label not in seen:
                         seen.add(label)
-                        options.append((label, text))
+                        options_reversed.append((label, text))
                     break
-    return options
+    # 恢复为正向顺序（从上到下）
+    options_reversed.reverse()
+    return options_reversed
 
 def detect_input_mode(log_lines: List[Tuple[str, str]], options: List[Tuple[str, str]]) -> str:
     """
@@ -254,12 +273,6 @@ class MonitorTUI:
             with Live(self.layout, refresh_per_second=20, screen=True, console=self.console) as live:
                 self.live = live
                 
-                # 更新状态面板
-                try:
-                    update_status_active(self.state.name)
-                except Exception as e:
-                    sw_log(self.state.name, f"update STATUS active failed: {e}", "err")
-
                 # 启动引擎
                 self.engine.run_stage()
                 self.state.model_name = self.engine.model_name
@@ -687,6 +700,8 @@ class MonitorTUI:
             for l, t in self.state.options:
                 if l == label:
                     return f"我选择选项 {l}: {t}"
+            # 标签不匹配时返回原文（用户可能输入了完整文本而非缩写）
+            return raw_text
                     
         return raw_text
 
