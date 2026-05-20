@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from .config import ROOT, TASKS, STAGES, STAGE_NAMES
+from .config import ROOT, TASKS, STATUS, STAGES, STAGE_NAMES
 
 
 def state_path(name: str) -> Path:
@@ -104,32 +104,63 @@ def write_state(name: str, data: Dict[str, Any]):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _find_active_task_from_states() -> Optional[str]:
-    """扫描 workspace/tasks/*/.state 文件，返回最近更新的活跃任务名"""
-    if not TASKS.is_dir():
-        return None
-    candidates = []
-    for d in TASKS.iterdir():
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        sf = d / ".state"
-        if not sf.exists():
-            continue
+# ── STATUS.json 全局任务汇总 ──
+
+def _load_task_summary() -> Dict[str, Any]:
+    """加载 STATUS.json 全局任务汇总"""
+    if STATUS.exists():
         try:
-            st = json.loads(sf.read_text(encoding="utf-8"))
+            return json.loads(STATUS.read_text(encoding="utf-8"))
         except Exception:
-            continue
-        if st.get("stage_status") in ("running", "pending", "waiting"):
-            candidates.append((st.get("updated_at", ""), d.name))
+            pass
+    return {"project": "", "updated_at": "", "tasks": {}}
+
+
+def _save_task_summary(data: Dict[str, Any]):
+    """保存 STATUS.json"""
+    STATUS.parent.mkdir(parents=True, exist_ok=True)
+    data["updated_at"] = _now_iso()
+    with open(STATUS, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def upsert_task_summary(name: str, **fields):
+    """在 STATUS.json 中创建或更新一个 task 条目"""
+    data = _load_task_summary()
+    entry = data["tasks"].get(name, {})
+    entry["id"] = name
+    entry.update(fields)
+    entry["updated_at"] = _now_iso()
+    if "created_at" not in entry:
+        entry["created_at"] = _now_iso()
+    data["tasks"][name] = entry
+    _save_task_summary(data)
+
+
+def remove_task_summary(name: str):
+    """从 STATUS.json 中移除一个 task 条目"""
+    data = _load_task_summary()
+    data["tasks"].pop(name, None)
+    _save_task_summary(data)
+
+
+def get_active_from_status() -> Optional[str]:
+    """从 STATUS.json 的 tasks 中查找当前活跃任务"""
+    data = _load_task_summary()
+    tasks = data.get("tasks", {})
+    candidates = []
+    for name, entry in tasks.items():
+        if entry.get("stage_status") in ("running", "pending", "waiting"):
+            candidates.append((entry.get("updated_at", ""), name))
     if not candidates:
         return None
     candidates.sort(reverse=True)
     return candidates[0][1]
-
-
-def get_active_from_status() -> Optional[str]:
-    """从 .state 文件中查找当前活跃任务（替代旧的 STATUS.json 机制）"""
-    return _find_active_task_from_states()
 
 
 class StageValidator:

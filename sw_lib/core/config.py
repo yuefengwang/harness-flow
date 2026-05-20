@@ -20,6 +20,7 @@ HOOKS_DIR = ROOT / "hooks"
 TPLS = ROOT / "templates"
 WORKSPACE = ROOT / "workspace"
 TASKS = WORKSPACE / "tasks"
+STATUS = WORKSPACE / "STATUS.json"
 TRASH = TASKS / ".trash"
 
 # ── 阶段定义 ──

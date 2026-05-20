@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from .config import ROOT,  TASKS, TPLS, STAGES, STAGE_NAMES, TRASH
 from .state import (
     read_state, write_state, state_path, StageValidator,
-    get_active_from_status,
+    get_active_from_status, upsert_task_summary, remove_task_summary,
 )
 from .utils import now, sanitize_name, sw_log
 
@@ -89,6 +89,11 @@ class TaskService:
         }
         write_state(clean_name, state_data)
 
+        upsert_task_summary(clean_name,
+            type=task_type,
+            stage=STAGES[0], stage_idx=0, stage_status="pending",
+            created_at=state_data["created_at"])
+
         sw_log(clean_name, f"task created: {clean_name} (type={task_type})", "sw")
         return clean_name
 
@@ -145,6 +150,7 @@ class TaskService:
 
         shutil.move(str(task_dir), str(TRASH / name))
         
+        remove_task_summary(name)
         sw_log(name, "moved to trash", "sw")
 
     def restore_task(self, name: str):
@@ -164,6 +170,11 @@ class TaskService:
         if "removed_at" in st:
             del st["removed_at"]
         write_state(name, st)
+        
+        upsert_task_summary(name,
+            type=st.get("type", "feature"),
+            stage=st.get("stage", ""), stage_idx=st.get("stage_idx", 0),
+            stage_status=st.get("stage_status", "pending"))
         
         sw_log(name, "restored from trash", "sw")
 
@@ -272,7 +283,9 @@ class TaskService:
         
         write_state(name, st)
         
-             
+        upsert_task_summary(name,
+            stage=next_stage, stage_idx=next_idx, stage_status="pending")
+              
         sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
         return st
 
