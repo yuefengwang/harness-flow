@@ -52,6 +52,7 @@ class HarnessConfigModel:
     stage_roles: Dict[str, str] = field(default_factory=dict)
     auto_advance: bool = False
     mock_agent: MockAgentConfig = field(default_factory=MockAgentConfig)
+    repo_path: str = "repo"
 
 class ConfigManager:
     """配置加载与管理单例"""
@@ -97,7 +98,8 @@ class ConfigManager:
             roles=roles,
             stage_roles=harness_data.get("stage_roles", {}),
             auto_advance=harness_data.get("auto_advance", False),
-            mock_agent=mock_cfg
+            mock_agent=mock_cfg,
+            repo_path=harness_data.get("repo_path", "repo"),
         )
 
     def _load_raw_yaml(self) -> Dict[str, Any]:
@@ -114,6 +116,11 @@ class ConfigManager:
 _manager = ConfigManager()
 
 # ── 兼容性查询接口 ──
+
+def get_repo_path() -> str:
+    """获取默认代码生成目录路径（来自 config.yaml 的 harness.repo_path）"""
+    return _manager.config.repo_path
+
 
 def load_harness_config() -> Dict[str, Any]:
     """【旧接口兼容】加载原始配置字典"""
@@ -218,6 +225,10 @@ def is_auto_advance() -> bool:
 def is_mock_agent() -> bool:
     """检查是否启用 Mock Agent"""
     return _manager.config.mock_agent.enabled
+
+def get_repo_path() -> str:
+    """获取生成代码的默认输出目录"""
+    return _manager.config.repo_path
 
 # ── Rich 组件延迟加载 ──
 

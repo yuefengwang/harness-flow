@@ -27,7 +27,25 @@ class TaskError(Exception):
     pass
 
 
-_service: "TaskService" = None  # type: ignore
+def _write_context_marker(target_dir: str, project_name: str, task_type: str):
+    """在目标目录创建 .sw-context 标记文件，用于项目自动发现"""
+    import json, os
+    marker_dir = Path(target_dir)
+    if not marker_dir.is_absolute():
+        marker_dir = Path.cwd() / target_dir
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "project": project_name,
+            "target_dir": str(marker_dir.resolve()),
+            "type": task_type,
+            "created": now(),
+        }
+        (marker_dir / ".sw-context").write_text(
+            json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass  # marker 文件创建失败不阻塞任务创建
 
 
 class TaskService:
@@ -37,7 +55,8 @@ class TaskService:
 
     def create_task(self, name: str, task_type: str = "feature", 
                     session: str = "N/A", agent: str = "N/A", 
-                    context: str = "", allow_trash_collision: bool = False) -> str:
+                    context: str = "", allow_trash_collision: bool = False,
+                    target_dir: str = "") -> str:
         """
         创建一个新任务。
         
@@ -48,6 +67,7 @@ class TaskService:
             agent: 指定的 Agent 或角色
             context: 需求上下文文本
             allow_trash_collision: 是否允许同名任务在回收站中
+            target_dir: 生成代码的目标目录 (空字符串 = 使用 config repo_path 默认值)
             
         Returns:
             清理后的正式任务名称
@@ -71,9 +91,13 @@ class TaskService:
         (task_dir / ".input").touch(exist_ok=True)
         
         if context:
-            # 清理 surrogate 字符，防止 macOS Python 3.9 编码崩溃
             safe_context = context.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
             (task_dir / ".context").write_text(safe_context, encoding="utf-8")
+
+        # 解析 target_dir：显式传参 > config 默认值
+        if not target_dir:
+            from .config import get_repo_path
+            target_dir = str(Path(get_repo_path()) / clean_name)
 
         # 2. 写入初始状态
         state_data = {
@@ -84,6 +108,7 @@ class TaskService:
             "stage": STAGES[0],
             "stage_idx": 0,
             "stage_status": "pending",
+            "target_dir": target_dir,
             "created_at": now(),
             "updated_at": now(),
         }
@@ -92,7 +117,11 @@ class TaskService:
         upsert_task_summary(clean_name,
             type=task_type,
             stage=STAGES[0], stage_idx=0, stage_status="pending",
+            target_dir=target_dir,
             created_at=state_data["created_at"])
+
+        if target_dir and target_dir != ".":
+            _write_context_marker(target_dir, clean_name, task_type)
 
         sw_log(clean_name, f"task created: {clean_name} (type={task_type})", "sw")
         return clean_name

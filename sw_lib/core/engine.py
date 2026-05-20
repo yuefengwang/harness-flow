@@ -71,6 +71,16 @@ class ContextBuilder:
             "3. 如果你认为当前阶段的工作已经完成，请明确告知用户，并提示用户输入 `/advance` 来推进阶段。"
         )
 
+        # 0.6 注入项目目录信息
+        st = read_state(task_name)
+        target_dir = st.get("target_dir", "")
+        if target_dir:
+            parts.append(
+                f"=== 项目信息 ===\n"
+                f"代码生成目录: {target_dir}\n"
+                f"所有的业务代码、模板、静态文件等都应生成到此目录下。"
+            )
+
         # 1. 注入前一阶段的产出 (Context Injection)
         if stage_idx > 0:
             prev_stage = STAGES[stage_idx - 1]

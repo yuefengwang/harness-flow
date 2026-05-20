@@ -163,6 +163,23 @@ def get_active_from_status() -> Optional[str]:
     return candidates[0][1]
 
 
+def find_context_from_cwd(start_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """从当前目录向上查找 .sw-context 标记文件，返回项目上下文
+
+    返回格式: {"project": "...", "target_dir": "...", "type": "...", "created": "..."}
+    未找到时返回 None。
+    """
+    cwd = Path(start_dir).resolve() if start_dir else Path.cwd()
+    for parent in [cwd] + list(cwd.parents):
+        marker = parent / ".sw-context"
+        if marker.exists():
+            try:
+                return json.loads(marker.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    return None
+
+
 class StageValidator:
     """阶段完成校验器"""
 

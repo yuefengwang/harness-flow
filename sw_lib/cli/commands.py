@@ -1,7 +1,7 @@
 """sw — Simple Workflow CLI (统一入口)
 
 用法: ./sw <command> [options]
-  ./sw init    --type=feature --name=<id> [--context=<text>] [--agent=<agent>]
+  ./sw init    --type=feature --name=<id> [--context=<text>] [--agent=<agent>] [--target=<dir>] [--self]
   ./sw init                              # 交互模式
   ./sw monitor --name=<id>               # Rich TUI 监控面板 + Agent 对话
   ./sw status  [--name=<id>]
@@ -12,6 +12,7 @@
   ./sw remove  --name=<id>
   ./sw restore --name=<id>
   ./sw answer  --name=<id> --text=<reply>   # 回复 Agent 提问
+  ./sw dashboard                             # 启动 Web Dashboard
 """
 
 import sys
@@ -40,7 +41,17 @@ def cmd_init(args):
     context = getattr(args, "context", "") or ""
     agent = getattr(args, "agent", "") or ""
     interactive = getattr(args, "interactive", False)
+    target = getattr(args, "target", "") or ""
+    self_dev = getattr(args, "self", False)
     allow_trash_collision = False
+
+    # 解析 target_dir
+    if self_dev:
+        target_dir = "."
+    elif target:
+        target_dir = target
+    else:
+        target_dir = ""  # 让 create_task 使用 config 默认值: repo/<name>
 
     # 交互模式：进入精简版专业向导界面
     if interactive or not name:
@@ -53,6 +64,7 @@ def cmd_init(args):
         task_type = result["type"]
         context = result["context"]
         allow_trash_collision = result["allow_trash_collision"]
+        target_dir = result.get("target_dir", target_dir)
 
     try:
         # 如果未指定 agent，则传 N/A 让 Service/Engine 自动解析
@@ -61,7 +73,8 @@ def cmd_init(args):
             session="N/A", 
             agent=agent or "N/A", 
             context=context,
-            allow_trash_collision=allow_trash_collision
+            allow_trash_collision=allow_trash_collision,
+            target_dir=target_dir
         )
         
         # 自动进入监控面板 (原子化操作)

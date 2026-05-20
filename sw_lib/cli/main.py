@@ -42,6 +42,8 @@ def main():
     p_init.add_argument("--session", help="Session ID")
     p_init.add_argument("--agent", help="指定 AI 角色/模型")
     p_init.add_argument("--context", help="需求描述文本")
+    p_init.add_argument("--target", help="生成代码的目录 (默认: repo/<任务名>)")
+    p_init.add_argument("--self", action="store_true", help="开发 Harness-Flow 自身 (target=.)")
     p_init.add_argument("--interactive", action="store_true", help="进入交互式创建模式")
 
     # status

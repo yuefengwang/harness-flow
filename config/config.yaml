@@ -2,6 +2,7 @@ harness:
   auto_advance: false
   base_branch: dev
   branch_prefix: harness
+  repo_path: repo
   docker:
     enabled: false
     image_prefix: sw-agent
