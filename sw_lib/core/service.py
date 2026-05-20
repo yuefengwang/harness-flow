@@ -67,7 +67,9 @@ class TaskService:
         (task_dir / ".input").touch(exist_ok=True)
         
         if context:
-            (task_dir / ".context").write_text(context, encoding="utf-8")
+            # 清理 surrogate 字符，防止 macOS Python 3.9 编码崩溃
+            safe_context = context.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+            (task_dir / ".context").write_text(safe_context, encoding="utf-8")
 
         # 2. 写入初始状态
         state_data = {
