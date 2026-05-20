@@ -29,7 +29,7 @@ sw                                 ← CLI entry script
 sw_lib/                            ← core library (11 modules)
 workflow/templates/                ← stage deliverable templates
 workflow/hooks/                    ← stage guardrails (mandatory checks)
-workflow/STATUS.md                 ← task board
+workspace/STATUS.json                 ← task board
 harness/dispatch.sh                ← worktree dispatch
 harness/config.yaml                ← agent role config
 ```
@@ -41,5 +41,5 @@ harness/config.yaml                ← agent role config
 | Stage deliverable format | `workflow/templates/*.md` (per stage) |
 | Stage mandatory checks | `workflow/hooks/*.md` (per stage) |
 | Workflow architecture | `workflow/README.md` |
-| Task status | `workflow/STATUS.md` |
+| Task status | `workspace/STATUS.json` |
 | Agent/role config | `harness/config.yaml` |

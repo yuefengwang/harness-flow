@@ -22,7 +22,7 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
 from ..core.engine import WorkflowEngine
-from ..core.state import update_status_md_active
+from ..core.state import update_status_active
 from ..core.utils import sw_log, now
 
 # 如果环境没有 Rich，退回到基础 Console 占位
@@ -256,9 +256,9 @@ class MonitorTUI:
                 
                 # 更新状态面板
                 try:
-                    update_status_md_active(self.state.name)
+                    update_status_active(self.state.name)
                 except Exception as e:
-                    sw_log(self.state.name, f"update STATUS.md active failed: {e}", "err")
+                    sw_log(self.state.name, f"update STATUS active failed: {e}", "err")
 
                 # 启动引擎
                 self.engine.run_stage()

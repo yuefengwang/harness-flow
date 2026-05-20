@@ -16,7 +16,7 @@ from .config import (
     ROOT, HOOKS_DIR, TASKS, STAGES, STAGE_NAMES,
     resolve_agent_model, resolve_agent_type, is_auto_advance, is_mock_agent,
 )
-from .state import read_state, write_state, update_status_md_stage
+from .state import read_state, write_state, update_status_stage
 from .utils import now, sw_log
 
 
@@ -443,10 +443,10 @@ class WorkflowEngine:
         sw_log(self.name, f"state advanced to {next_stage} ({next_name})", "sw")
         self._stage_output_saved = False
         try:
-            update_status_md_stage(next_idx)
-            sw_log(self.name, f"STATUS.md updated to {next_stage}", "sw")
+            update_status_stage(next_idx)
+            sw_log(self.name, f"STATUS updated to {next_stage}", "sw")
         except Exception as e:
-            sw_log(self.name, f"STATUS.md update failed: {e}", "error")
+            sw_log(self.name, f"STATUS update failed: {e}", "error")
 
         sw_log(self.name, f"advance → {next_stage} ({next_name})")
         self._add_log("sw", f"阶段推进 → {next_name}")

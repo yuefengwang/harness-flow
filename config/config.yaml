@@ -1,5 +1,5 @@
 harness:
-  auto_advance: true
+  auto_advance: false
   base_branch: dev
   branch_prefix: harness
   docker:
@@ -8,7 +8,7 @@ harness:
     mount_git_config: true
     mount_ssh: true
   mock_agent:
-    enabled: true
+    enabled: false
     response_delay: 2.0
     responses:
       01-brainstorming: "## \U0001F916 AI Output\n\n### \u6B67\u4E49\u5206\u6790\u7ED3\

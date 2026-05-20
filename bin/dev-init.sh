@@ -6,7 +6,7 @@
 #   1. 扫描 repo/ 下的所有项目
 #   2. 交互式选择要开发的项目
 #   3. 加载项目上下文（README + 目录结构）
-#   4. 更新 STATUS.md 当前焦点
+#   4. 更新 STATUS.json 当前焦点
 #   5. 保存当前项目标记
 #
 # 用法:
@@ -31,7 +31,8 @@ REPO_DIR="${ROOT_DIR}/repo"
 WORKSPACE_DIR="${ROOT_DIR}/workspace"
 CURRENT_PROJECT_FILE="${WORKSPACE_DIR}/.current-project"
 CONTEXT_FILE="${WORKSPACE_DIR}/current-context.md"
-STATUS_FILE="${WORKSPACE_DIR}/STATUS.md"
+STATUS_FILE="${WORKSPACE_DIR}/STATUS.json"
+STATUS_OLD_FILE="${WORKSPACE_DIR}/STATUS.md"
 
 # ── 颜色 ──
 RED='\033[0;31m'
@@ -108,43 +109,61 @@ load_context() {
     info "上下文已保存到: ${CONTEXT_FILE}"
 }
 
-# 更新 STATUS.md
+# 更新 STATUS.json
 update_status() {
     local project="$1"
     local today
     today="$(date '+%Y-%m-%d')"
 
-    if [[ ! -f "$STATUS_FILE" ]]; then
-        error "STATUS.md 不存在: ${STATUS_FILE}"
-        return 1
-    fi
+    # 确保目录存在
+    mkdir -p "$(dirname "$STATUS_FILE")"
 
-    # 更新当前焦点部分
-    local new_focus_block="## 🎯 当前焦点\n- **当前项目:** ${project}\n- **活动任务:** 无\n- **当前阶段:** 就绪"
-
-    # 使用 Python 处理多行替换（更可靠）
+    # 使用 Python 处理 JSON 更新
     python3 -c "
-import re
-with open('${STATUS_FILE}', 'r') as f:
-    content = f.read()
+import json, os, re
 
-# 替换当前焦点区域
-pattern = r'## 🎯 当前焦点.*?(?=\n## |\Z)'
-replacement = '''## 🎯 当前焦点
-- **当前项目:** ${project}
-- **活动任务:** 无
-- **当前阶段:** 就绪
-- **初始化日期:** ${today}
+path = '${STATUS_FILE}'
+old_path = '${STATUS_OLD_FILE}'
+data = {
+    'project': '无',
+    'active_task': '无',
+    'stage': '就绪',
+    'init_date': ''
+}
 
-'''
+# 1. 尝试加载现有 JSON
+if os.path.exists(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data.update(json.load(f))
+    except:
+        pass
+# 2. 如果 JSON 不存在但 MD 存在，尝试迁移 (简单处理)
+elif os.path.exists(old_path):
+    try:
+        with open(old_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            m = re.search(r'\*\*当前项目:\*\*\s*(.+)', content)
+            if m: data['project'] = m.group(1).strip()
+            m = re.search(r'\*\*活动任务:\*\*\s*(.+)', content)
+            if m: data['active_task'] = m.group(1).strip().rstrip('*')
+            m = re.search(r'\*\*当前阶段:\*\*\s*(.+)', content)
+            if m: data['stage'] = m.group(1).strip()
+    except:
+        pass
 
-content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+# 3. 更新字段
+data['project'] = '${project}'
+data['active_task'] = '无'
+data['stage'] = '就绪'
+data['init_date'] = '${today}'
 
-with open('${STATUS_FILE}', 'w') as f:
-    f.write(content)
+# 4. 写入 JSON
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
 "
 
-    info "STATUS.md 当前焦点已更新为: ${project}"
+    info "STATUS.json 当前焦点已更新为: ${project}"
 }
 
 # ── 主逻辑 ──
@@ -224,7 +243,7 @@ main() {
     # 2. 加载上下文
     load_context "$selected"
 
-    # 3. 更新 STATUS.md
+    # 3. 更新 STATUS.json
     update_status "$selected"
 
     # 4. 汇总

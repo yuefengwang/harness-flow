@@ -4,7 +4,7 @@ Hooks define **mandatory quality gates** per stage. All hooks must pass before a
 
 ## Principle
 1. **Unskippable**: every hook must be verifiable (command, log, file state).
-2. **Empirical**: evolve hooks based on retro findings (see `workflow/STATUS.md`).
+2. **Empirical**: evolve hooks based on retro findings (see `workspace/STATUS.json`).
 
 ## Index
 

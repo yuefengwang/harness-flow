@@ -92,7 +92,7 @@ harness-flow/
 ├── templates/              # 📝 交付物标准 Markdown 模板
 ├── workspace/              # 💾 动态数据 (任务、看板、回收站)
 │   ├── tasks/              # 活动任务
-│   └── STATUS.md           # 任务状态总看板
+│   └── STATUS.json         # 任务状态总看板
 └── tests/                  # 🧪 自动化测试套件
 ```
 

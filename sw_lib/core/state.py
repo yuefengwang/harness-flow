@@ -1,9 +1,9 @@
 """
-sw_lib.state — 任务状态持久化、STATUS.md 管理及阶段校验。
+sw_lib.state — 任务状态持久化、STATUS.json 管理及阶段校验。
 
 主要职责：
 1. 维护任务的 .state 文件 (JSON 格式)。
-2. 提供对 STATUS.md (任务面板) 的自动更新接口。
+2. 提供对 STATUS.json (任务面板) 的自动更新接口。
 3. 封装对任务状态的读取、写入及自动迁移逻辑。
 """
 
@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from .config import ROOT, TASKS, TPLS, STATUS, STAGES, STAGE_NAMES
+from .config import ROOT, TASKS, TPLS, STATUS, STATUS_OLD, STAGES, STAGE_NAMES
 
 
 def state_path(name: str) -> Path:
@@ -104,49 +104,95 @@ def write_state(name: str, data: Dict[str, Any]):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _update_status_md(pattern: str, replacement: str):
-    """通用 STATUS.md 更新辅助函数"""
-    if not STATUS.exists():
-        return
+def _load_status() -> Dict[str, Any]:
+    """加载 STATUS.json，包含兼容性迁移逻辑"""
+    if STATUS.exists():
+        try:
+            return json.loads(STATUS.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # 兼容性迁移: 尝试从 STATUS.md 读取
+    if STATUS_OLD.exists():
+        data = _migrate_from_md()
+        _save_status(data)
+        return data
+
+    # 默认值
+    return {
+        "project": "无",
+        "active_task": "无",
+        "stage": "N/A",
+        "init_date": ""
+    }
+
+
+def _save_status(data: Dict[str, Any]):
+    """保存 STATUS.json"""
+    STATUS.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATUS, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _migrate_from_md() -> Dict[str, Any]:
+    """从旧的 Markdown 格式解析数据"""
     try:
-        content = STATUS.read_text()
-        new_content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-        if new_content != content:
-            STATUS.write_text(new_content)
-    except Exception as e:
-        from .utils import sw_log
-        sw_log("system", f"Failed to update STATUS.md: {e}", "err")
+        content = STATUS_OLD.read_text(encoding="utf-8")
+    except Exception:
+        content = ""
+
+    data = {
+        "project": "无",
+        "active_task": "无",
+        "stage": "N/A",
+        "init_date": ""
+    }
+
+    m_proj = re.search(r'\*\*当前项目:\*\*\s*(.+)', content)
+    if m_proj: data["project"] = m_proj.group(1).strip()
+
+    m_task = re.search(r'\*\*活动任务:\*\*\s*(.+)', content)
+    if m_task: data["active_task"] = m_task.group(1).strip().rstrip("*")
+
+    m_stage = re.search(r'\*\*当前阶段:\*\*\s*(.+)', content)
+    if m_stage: data["stage"] = m_stage.group(1).strip()
+
+    m_date = re.search(r'\*\*初始化日期:\*\*\s*(.+)', content)
+    if m_date: data["init_date"] = m_date.group(1).strip()
+
+    return data
 
 
-def update_status_md_active(name: str):
-    """更新 STATUS.md 中的活动任务和当前阶段"""
-    _update_status_md(r'^(- \*\*活动任务:\*\*)\s*.*', rf'\1 {name}')
-    _update_status_md(r'^(- \*\*当前阶段:\*\*)\s*.*', r'\1 01-头脑风暴')
+def update_status_active(name: str):
+    """更新状态中的活动任务和当前阶段"""
+    data = _load_status()
+    data["active_task"] = name
+    data["stage"] = "01-头脑风暴"
+    _save_status(data)
 
 
-def clear_status_md_active(name: str):
-    """清除 STATUS.md 中指定任务的活动引用"""
-    # 只有当当前活动任务是我们要清除的任务时才清除
-    current = get_active_from_status()
-    if current == name:
-        _update_status_md(r'^(- \*\*活动任务:\*\*)\s*.*', r'\1 无')
-        _update_status_md(r'^(- \*\*当前阶段:\*\*)\s*.*', r'\1 N/A')
+def clear_status_active(name: str):
+    """清除状态中指定任务的活动引用"""
+    data = _load_status()
+    if data.get("active_task") == name:
+        data["active_task"] = "无"
+        data["stage"] = "N/A"
+        _save_status(data)
 
 
-def update_status_md_stage(idx: int):
-    """推进 STATUS.md 中的当前阶段"""
-    new_stage = f"0{idx+1}-{STAGE_NAMES[idx]}"
-    _update_status_md(r'^(- \*\*当前阶段:\*\*)\s*.*', rf'\1 {new_stage}')
+def update_status_stage(idx: int):
+    """推进状态中的当前阶段"""
+    data = _load_status()
+    data["stage"] = f"0{idx+1}-{STAGE_NAMES[idx]}"
+    _save_status(data)
 
 
 def get_active_from_status() -> Optional[str]:
-    """从 STATUS.md 读取当前活动任务名"""
-    content = STATUS.read_text()
-    m = re.search(r'\*\*活动任务:\*\*\s*(.+?)(?:\*\*)?$', content, re.MULTILINE)
-    if m:
-        name = m.group(1).strip().rstrip("*")
-        if name and name != "无":
-            return name
+    """从状态中读取当前活动任务名"""
+    data = _load_status()
+    name = data.get("active_task", "无")
+    if name and name != "无":
+        return name
     return None
 
 

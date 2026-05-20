@@ -160,8 +160,21 @@ if $IS_PLATFORM; then
 - \`workflow/docker/\` — 容器隔离
 - \`workflow/bin/dev-init.sh\` — 项目初始化
 PEOF
-    # 平台模式下 STATUS.md 焦点
-    sed -i '' 's/当前项目:.*/当前项目: harness-flow (平台自身)/' "${WORKTREE_PATH}/workflow/STATUS.md" 2>/dev/null || true
+    # 平台模式下 STATUS.json 焦点
+    python3 -c "
+import json, os
+path = '${WORKTREE_PATH}/workflow/STATUS.json'
+data = {'project': 'harness-flow (平台自身)', 'active_task': '无', 'stage': '就绪'}
+if os.path.exists(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data.update(json.load(f))
+    except:
+        pass
+data['project'] = 'harness-flow (平台自身)'
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+" 2>/dev/null || true
 else
     "${WORKTREE_PATH}/workflow/bin/dev-init.sh" "$PROJECT" >/dev/null 2>&1
 fi

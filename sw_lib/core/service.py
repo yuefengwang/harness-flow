@@ -14,9 +14,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from .config import ROOT,  TASKS, TPLS, STAGES, STAGE_NAMES, TRASH
 from .state import (
     read_state, write_state, state_path,
-    update_status_md_active, clear_status_md_active,
-    update_status_md_stage, get_active_from_status,
-    StageValidator
+    update_status_active, clear_status_active,
+    update_status_stage, get_active_from_status,
 )
 from .utils import now, sanitize_name, sw_log
 
@@ -87,9 +86,9 @@ class TaskService:
 
         # 3. 同步外部面板
         try:
-            update_status_md_active(clean_name)
+            update_status_active(clean_name)
         except Exception as e:
-            sw_log(clean_name, f"同步 STATUS.md 失败: {e}", "error")
+            sw_log(clean_name, f"同步 STATUS 失败: {e}", "error")
 
         sw_log(clean_name, f"task created: {clean_name} (type={task_type})", "sw")
         return clean_name
@@ -149,7 +148,7 @@ class TaskService:
         
         # 清除活跃标记
         try:
-            clear_status_md_active(name)
+            clear_status_active(name)
         except: pass
         
         sw_log(name, "moved to trash", "sw")
@@ -234,7 +233,7 @@ class TaskService:
         write_state(name, st)
         
         try:
-            update_status_md_stage(next_idx)
+            update_status_stage(next_idx)
         except Exception as e:
             sw_log(name, f"更新看板失败: {e}", "error")
             
