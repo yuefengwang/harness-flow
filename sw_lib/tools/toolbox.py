@@ -88,6 +88,10 @@ class WriteFileTool(BaseTool):
     def __call__(self, file_path: str, content: str) -> str:
         try:
             target = self._safe_path(file_path)
+            # 禁止 Agent 直接写入系统状态文件
+            _PROTECTED_FILES = (".state", "STATUS.json")
+            if target.name in _PROTECTED_FILES:
+                return f"错误: 禁止直接修改系统文件 {target.name}。请使用 /advance 命令推进阶段。"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"成功写入 {file_path}"
@@ -104,6 +108,9 @@ class RunCommandTool(BaseTool):
 
     def __call__(self, command: str) -> str:
         try:
+            # 禁止 Agent 通过命令行修改状态文件
+            if ".state" in command or "STATUS.json" in command or "sw advance" in command:
+                return "错误: 禁止通过命令行修改系统状态。请使用 /advance 命令。"
             res = subprocess.run(
                 command, shell=True, capture_output=True,
                 text=True, cwd=str(ROOT), timeout=30

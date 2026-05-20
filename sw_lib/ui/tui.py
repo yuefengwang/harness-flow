@@ -22,7 +22,7 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
 from ..core.engine import WorkflowEngine
-from ..core.state import update_status_active
+from ..core.state import read_state, update_status_active
 from ..core.utils import sw_log, now
 
 # 如果环境没有 Rich，退回到基础 Console 占位
@@ -500,8 +500,14 @@ class MonitorTUI:
             self.state.agent_status = agent.status
         
         # 同步工作流阶段状态到 UI 状态
-        self.state.stage = self.engine.stage
-        self.state.stage_idx = self.engine.stage_idx
+        # 优先从 .state 文件读取（agent 可能直接修改磁盘状态）
+        st = read_state(self.state.name)
+        if st:
+            self.state.stage = st.get("stage", self.engine.stage)
+            self.state.stage_idx = int(st.get("stage_idx", self.engine.stage_idx))
+        else:
+            self.state.stage = self.engine.stage
+            self.state.stage_idx = self.engine.stage_idx
         self.state.model_name = self.engine.model_name
         
         # 探测模式
@@ -672,7 +678,7 @@ class MonitorTUI:
         """根据模式构造发送给 Agent 的文本"""
         if self.state.input_mode == "yesno":
             if raw_text.strip().lower() in ("yes", "y"):
-                return "yes, I approve. Please proceed to the next stage."
+                return "yes, I approve."
             else:
                 return "no, I don't approve. Please revise based on our discussion."
                 
