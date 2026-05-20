@@ -391,51 +391,49 @@ class MonitorTUI:
         # 总高度 - header(3) - footer(6) - 边框(2)
         visible_height = max(5, self.console.size.height - 11)
         
-        # 2. 展平日志为单行列表 (处理换行符)
-        flat_lines: List[Tuple[str, str, bool]] = []
+        # 2. 构造 Rich Text
+        text = Text()
+        style_map = {
+            "agent": "green", "user": "cyan",
+            "system": "yellow", "error": "bold red", "sw": "dim"
+        }
+        prefix_map = {
+            "agent": "agent ", "user": "user  ",
+            "system": "sys   ", "error": "ERR   ", "sw": "sw    "
+        }
+
+        # 展平日志并关联源信息
+        all_lines: List[Tuple[str, str, bool]] = []
         for source, msg in self.state.log_lines:
             lines = msg.splitlines()
             if not lines: lines = [""]
             for i, line in enumerate(lines):
-                flat_lines.append((source, line, i == 0))
+                all_lines.append((source, line, i == 0))
         
-        total_flat = len(flat_lines)
-        
-        # 3. 计算切片窗口
-        # offset 0 表示显示最后 visible_height 行
+        total_lines = len(all_lines)
         offset = self.state.log_scroll_offset
-        end = total_flat - offset
+        
+        # 计算显示范围
+        end = total_lines - offset
         start = max(0, end - visible_height)
         
-        # 修正越界 offset
-        if start < 0: 
-            start = 0
-            # self.state.log_scroll_offset = max(0, total_flat - visible_height)
+        # 修正越界
+        if start < 0: start = 0
+        if end > total_lines: end = total_lines
+        if end < start: end = start
+
+        visible_lines = all_lines[start:end]
         
-        visible_items = flat_lines[start:max(0, end)]
-        
-        # 4. 构造 Rich Text
-        text = Text()
-        for source, content, is_first in visible_items:
-            style_map = {
-                "agent": "green", "user": "cyan",
-                "system": "yellow", "error": "bold red", "sw": "dim"
-            }
-            prefix_map = {
-                "agent": "agent ", "user": "user  ",
-                "system": "sys   ", "error": "ERR   ", "sw": "sw    "
-            }
-            
+        for source, content, is_first in visible_lines:
             style = style_map.get(source, "dim")
             prefix = prefix_map.get(source, "      ")
             
             if is_first:
-                # 仅在第一行显示前缀
                 text.append(prefix, style=style)
-                text.append(content + "\n")
             else:
-                # 后续行缩进对齐
-                text.append("      " + content + "\n")
+                text.append("      ", style=style)
+            
+            text.append(content + "\n")
             
         # 5. 滚动条指示器
         title = " 对话日志 "
@@ -585,6 +583,7 @@ class MonitorTUI:
         cmd = cmd.strip()
         if not cmd: return
         self.state.error_msg = ""
+        self._refresh_display()
 
         if cmd == "/q":
             self.running = False
@@ -609,6 +608,7 @@ class MonitorTUI:
             self._add_log("user", f"[{self.state.current_q_idx + 1}] {answer_text}")
             
             self.state.current_q_idx += 1
+            self._refresh_display()
             if self.state.current_q_idx >= len(self.state.pending_questions):
                 if self._q_res_queue:
                     # 安全性校验：确保回答列表不为空且长度匹配

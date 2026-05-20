@@ -43,10 +43,8 @@ class BaseAgent(ABC):
             source: 日志来源 (sw, agent, system, user, error)
             msg: 日志内容
         """
-        from ..core.utils import sw_log
         if "add_log" in self.callbacks:
             self.callbacks["add_log"](source, msg)
-        sw_log(self.name, msg, source)
 
     def _is_running(self) -> bool:
         """检查 UI 是否仍在运行，用于中断长时间操作"""
