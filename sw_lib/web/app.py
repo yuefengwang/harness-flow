@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .routes.tasks import router as tasks_router
+from .routes.console import router as console_router
 
 HERE = Path(__file__).resolve().parent
 
@@ -22,5 +23,6 @@ def create_app() -> FastAPI:
 
     # 注册路由
     app.include_router(tasks_router)
+    app.include_router(console_router)
 
     return app

@@ -21,11 +21,12 @@ import subprocess
 
 from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
 from ..web.app import create_app
-from ..core.state import get_active_from_status
+from ..core.state import get_active_from_status, write_state, upsert_task_summary
 from ..core.utils import (
     green, yellow, blue,
     ok, warn, hdr, die,
     prompt, prompt_yn,
+    now,
 )
 from ..ui.tui import MonitorTUI
 from ..ui.init_ui import InitializationUI
@@ -134,7 +135,19 @@ def cmd_advance(args):
         cur_status = st.get("stage_status", "pending")
         
         if idx >= len(STAGES) - 1:
-            ok("任务已完成 (05-归档)")
+            # 主动进入归档完成流程：执行校验后将状态置为 Finished
+            hdr(f"归档阶段校验: {STAGES[idx]} ({STAGE_NAMES[idx]})")
+            done_items, todo_items = _service.validate_stage(name)
+            for item in done_items: print(f"  {green('[✓]')} {item}")
+            for item in todo_items: print(f"  {yellow('[!]')} {item}")
+            if todo_items:
+                die(f"检测到 {len(todo_items)} 个未完成项，请完善后重试。")
+
+            st["stage_status"] = "Finished"
+            st["updated_at"] = now()
+            write_state(name, st)
+            upsert_task_summary(name, stage_status="Finished")
+            ok("🏁 任务已完成 (Finished)")
             return
 
         if cur_status == "pending":

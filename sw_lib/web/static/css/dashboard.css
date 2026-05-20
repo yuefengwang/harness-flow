@@ -346,3 +346,207 @@ h3 {
 .htmx-request .htmx-indicator {
     opacity: 1;
 }
+
+/* ── Console Page ── */
+:root {
+    --console-bg: #0a0e14;
+    --console-color-agent: #00ff87;
+    --console-color-user: #00bfff;
+    --console-color-sw: #a0a0a0;
+    --console-color-error: #ff4444;
+    --console-color-system: #ffaa00;
+}
+
+#console-app {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 60px);
+    background: var(--console-bg);
+    color: #e0e0e0;
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Menlo", monospace;
+    font-size: 0.85rem;
+    margin: -1.5rem;
+    position: relative;
+}
+
+#console-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 1rem;
+    background: #11161e;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+}
+
+.console-task-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.console-task-name {
+    font-weight: 700;
+    font-size: 1rem;
+    color: #58a6ff;
+}
+
+.console-stage {
+    font-size: 0.8rem;
+    color: #8b949e;
+    background: #1c2333;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+}
+
+.console-agent-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #8b949e;
+}
+
+.status-dot.status-pending { background: #d29922; }
+.status-dot.status-running,
+.status-dot.status-active { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+.status-dot.status-waiting,
+.status-dot.status-connecting { background: #d29922; animation: pulse 1.5s infinite; }
+.status-dot.status-error { background: #f85149; }
+.status-dot.status-idle { background: #8b949e; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.console-header-actions {
+    display: flex;
+    gap: 0.4rem;
+}
+
+#console-logs {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem 1rem;
+    line-height: 1.5;
+}
+
+#log-container {
+    min-height: 100%;
+}
+
+.log-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.5;
+    padding: 1px 0;
+}
+
+.log-time {
+    color: #484f58;
+    margin-right: 0.5rem;
+}
+
+.log-source {
+    display: inline-block;
+    min-width: 6ch;
+    margin-right: 0.5rem;
+}
+
+.log-msg {
+    color: #e0e0e0;
+}
+
+#console-input-area {
+    flex-shrink: 0;
+    border-top: 1px solid #1e2a3a;
+    background: #11161e;
+}
+
+#input-mode-indicator {
+    padding: 0.3rem 1rem;
+    font-size: 0.75rem;
+    color: #8b949e;
+}
+
+.input-mode-question {
+    color: #d29922 !important;
+    background: rgba(210, 153, 34, 0.1);
+}
+
+#question-area {
+    padding: 0.5rem 1rem;
+    background: #0d1117;
+    border-bottom: 1px solid #1e2a3a;
+}
+
+#question-area.hidden {
+    display: none;
+}
+
+#question-prompt {
+    color: #d29922;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+#question-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.option-btn {
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+    background: #1c2333;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    cursor: pointer;
+}
+
+.option-btn:hover {
+    background: #2d3748;
+    border-color: #58a6ff;
+}
+
+#console-form {
+    display: flex;
+    padding: 0.5rem 1rem;
+    gap: 0.5rem;
+}
+
+#console-input {
+    flex: 1;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    color: #e6edf3;
+    font-family: inherit;
+    font-size: 0.85rem;
+    outline: none;
+}
+
+#console-input:focus {
+    border-color: #58a6ff;
+}
+
+#btn-send {
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+.success {
+    color: #3fb950;
+    padding: 0.25rem 0;
+    font-size: 0.8rem;
+}

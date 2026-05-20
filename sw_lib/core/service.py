@@ -298,9 +298,14 @@ class TaskService:
         """
         st = self.get_task_state(name)
         idx = int(st.get("stage_idx", 0))
+        cur_stage = STAGES[idx]
         
         if idx >= len(STAGES) - 1:
             raise TaskError("任务已是最后阶段，无法继续推进")
+
+        # 自动勾选 Gate（advance = 用户确认）
+        from .engine import _auto_check_gate
+        _auto_check_gate(name, cur_stage)
 
         next_idx = idx + 1
         next_stage = STAGES[next_idx]

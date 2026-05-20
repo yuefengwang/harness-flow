@@ -19,6 +19,7 @@
                 <td class="status-{{ t.status }}">{{ t.status }}</td>
                 <td>{{ t.updated_at }}</td>
                 <td class="actions">
+                    <a href="/tasks/{{ t.id }}/console" class="btn">对话</a>
                     <button hx-post="/tasks/{{ t.id }}/advance"
                             hx-target="#task-list"
                             hx-swap="outerHTML">推进</button>

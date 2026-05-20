@@ -20,6 +20,29 @@ from .state import read_state, write_state, upsert_task_summary
 from .utils import now, sw_log
 
 
+def _auto_check_gate(task_name: str, stage: str):
+    """用户输入 /advance = 确认当前阶段完成，自动勾选模板 Gate。
+
+    不做任何其他检查——hard hook 仍由后续 _validate_post_hooks 负责。
+    """
+    import re
+    tpl = TASKS / task_name / f"{stage}.md"
+    if not tpl.exists():
+        return
+    content = tpl.read_text(encoding="utf-8")
+    # 仅替换 ## Gate 章节中的 [ ] 为 [x]
+    in_gate = False
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## Gate"):
+            in_gate = True
+        elif in_gate and line.strip().startswith("##"):
+            break  # 下一章节开始，停止
+        elif in_gate and re.match(r"^\s*- \[ \]", line):
+            lines[i] = line.replace("[ ]", "[x]", 1)
+    tpl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class ContextBuilder:
     """负责构建 Agent 启动所需的系统指令和上下文环境。"""
 
@@ -435,6 +458,9 @@ class WorkflowEngine:
         # 1. 保存当前产出
         self.save_stage_output()
 
+        # 1.5 自动勾选 Gate（/advance = 用户确认）
+        _auto_check_gate(self.name, self.stage)
+
         # 2. 验证后置 hooks (Post-hooks)
         if not self._validate_post_hooks():
             self._add_log("error", "后置 Hooks 验证未通过，无法推进")
@@ -442,6 +468,14 @@ class WorkflowEngine:
 
         # 3. 检查是否为最后阶段
         if self.stage_idx >= len(STAGES) - 1:
+            # 标记任务状态为已完成
+            st_final = read_state(self.name)
+            st_final["stage_status"] = "Finished"
+            st_final["updated_at"] = now()
+            write_state(self.name, st_final)
+            upsert_task_summary(self.name, stage_status="Finished")
+            sw_log(self.name, "🏁 任务已完成 (Finished)", "sw")
+
             self._add_log("sw", "🏁 任务所有阶段已完成！正在进入结算流程...")
             if "on_settlement" in self.callbacks:
                 self.callbacks["on_settlement"]()

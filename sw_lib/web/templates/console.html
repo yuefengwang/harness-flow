@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="/static/js/console.js" defer></script>
+{% endblock %}
+
+{% block content %}
+<div id="console-app" data-task-name="{{ task.id }}">
+    <div id="console-header">
+        <div class="console-task-info">
+            <span class="console-task-name">{{ task.id }}</span>
+            <span class="console-stage">{{ stage_labels.get(task.stage, task.stage) }}</span>
+        </div>
+        <div class="console-agent-status" id="agent-status-led">
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-label" id="status-label">{{ task.stage_status }}</span>
+        </div>
+        <div class="console-header-actions">
+            <button id="btn-start-engine" class="btn btn-primary" onclick="startEngine()">启动引擎</button>
+            <a href="/tasks/{{ task.id }}" class="btn">返回详情</a>
+        </div>
+    </div>
+
+    <div id="console-logs">
+        <div id="log-container">
+            {% for line in log_content.splitlines() %}
+            <div class="log-line">{% if line.startswith("[") %}{{ line }}{% else %}{{ line }}{% endif %}</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div id="console-input-area">
+        <div id="input-mode-indicator" class="input-mode-none">💬 输入消息或 /命令</div>
+        <div id="question-area" class="hidden">
+            <div id="question-prompt"></div>
+            <div id="question-options"></div>
+        </div>
+        <form id="console-form" onsubmit="return sendMessage()">
+            <input type="text" id="console-input" placeholder="输入消息或 /advance, /status, /q ..." autofocus>
+            <button type="submit" id="btn-send">发送</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
