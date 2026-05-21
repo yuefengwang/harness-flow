@@ -13,7 +13,13 @@ from sw_lib.web.engine_manager import WebEngineManager
 from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
 from sw_lib.core.state import read_state, write_state
 from sw_lib.core.service import _service
-from sw_lib.core.config import get_repo_path
+
+
+def _rm_repo(name: str):
+    """清理 repo 目录下的测试残留 (safe — ignores if not found)"""
+    p = TASKS.parent.parent / "repo" / name
+    if p.exists():
+        shutil.rmtree(p, ignore_errors=True)
 
 
 TEST_TASK = "web-test-task"

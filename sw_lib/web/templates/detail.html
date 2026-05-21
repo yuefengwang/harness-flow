@@ -6,6 +6,18 @@
     <a href="/" class="btn">← 返回看板</a>
 </div>
 
+{% if deploy_url %}
+<div class="detail-card deploy-access">
+    <div class="deploy-access-inner">
+        <span class="deploy-access-label">🚀 已部署</span>
+        <a href="{{ deploy_url }}" target="_blank" class="btn btn-success btn-lg">
+            打开应用 ↗
+        </a>
+        <span class="deploy-access-url">{{ deploy_url }}</span>
+    </div>
+</div>
+{% endif %}
+
 <div class="detail-grid">
     <div class="detail-card">
         <h3>基本信息</h3>

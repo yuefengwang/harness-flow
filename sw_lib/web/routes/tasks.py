@@ -15,6 +15,7 @@ from ...core.service import _service, TaskError
 from ...core.config import STAGES, STAGE_NAMES, TASKS, resolve_agent_type, resolve_agent_model
 import threading
 from sw_lib.agents.base import AgentFactory
+from ..cloudflared import start_tunnel, stop_tunnel as stop_cloudflared_tunnel
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -125,6 +126,7 @@ async def task_advance(name: str):
 @router.post("/tasks/{name}/remove")
 async def task_remove(name: str):
     try:
+        stop_cloudflared_tunnel(name)
         _service.remove_task(name)
         return HTMLResponse(content=_task_table_html())
     except TaskError as e:
@@ -203,7 +205,23 @@ def _run_deploy_agent(name: str, target_dir: str):
                 deploy_url = m.group(1)
                 log(f"检测到服务地址: {deploy_url}")
                 break
-        _service.complete_deploy(name, success=True, deploy_url=deploy_url)
+
+        tunnel_url = None
+        if deploy_url:
+            port_match = re.search(r':(\d+)', deploy_url)
+            if port_match:
+                port = int(port_match.group(1))
+                log(f"正在创建 Cloudflare Tunnel (端口 {port})...")
+                tunnel_url = start_tunnel(port, name)
+                if tunnel_url:
+                    log(f"Cloudflare Tunnel 已创建: {tunnel_url}")
+                else:
+                    log("Cloudflare Tunnel 创建失败，使用本地地址")
+            else:
+                log("无法解析端口，跳过 Cloudflare Tunnel")
+
+        final_url = tunnel_url or deploy_url
+        _service.complete_deploy(name, success=True, deploy_url=final_url)
     except Exception as e:
         log(f"部署失败: {e}")
         try:

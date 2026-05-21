@@ -1,0 +1,22 @@
+# Harness-Flow Dashboard — Caddy 反向代理配置
+# 将 sw dashboard (127.0.0.1:8080) 暴露到 8080 端口
+
+:8080 {
+    reverse_proxy 127.0.0.1:8080 {
+        # SSE 实时日志推送需要关闭缓冲
+        flush_interval -1
+    }
+
+    # 可选：限制请求速率（防止滥用）
+    # rate_limit {
+    #     zone dynamic {
+    #         key {remote_host}
+    #         events 10
+    #         window 1s
+    #     }
+    # }
+
+    log {
+        output file caddy.log
+    }
+}
