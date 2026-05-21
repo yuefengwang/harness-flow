@@ -19,11 +19,14 @@ import json
 import os
 import queue
 import re
+import socket
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from ..core.config import ROOT, CONFIG_DIR, TASKS, STAGES, STAGE_NAMES
 from ..core.utils import now, sw_log
@@ -62,6 +65,11 @@ class OpenCodeAgent(BaseAgent):
         self._lock = threading.RLock()  # 使用递归锁，防止同一线程内的死lock
         self._no_output_timeout = float(os.environ.get("SW_OPENCODE_NO_OUTPUT_TIMEOUT", "180"))
         self._startup_timeout = float(os.environ.get("SW_OPENCODE_STARTUP_TIMEOUT", "30"))
+
+        self._server_proc: Optional[subprocess.Popen] = None
+        self._server_port: Optional[int] = None
+        self._server_url: Optional[str] = None
+        self._http_session_id: Optional[str] = None
 
         self._env = self._load_env()
 
@@ -127,6 +135,200 @@ class OpenCodeAgent(BaseAgent):
         cmd.append(message)
 
         return cmd
+
+    def _find_free_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _start_server(self):
+        """Start persistent opencode serve subprocess and wait for health check.
+
+        If server startup fails, logs a warning and falls back gracefully
+        to non-attached mode (per-message subprocess spawn).
+        """
+        try:
+            self._server_port = self._find_free_port()
+            self._server_url = f"http://127.0.0.1:{self._server_port}"
+
+            self._server_proc = subprocess.Popen(
+                ["opencode", "serve", "--port", str(self._server_port)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=self._env,
+                cwd=str(ROOT),
+                text=True,
+            )
+
+            # Poll health endpoint with timeout
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if self._server_proc.poll() is not None:
+                    self._add_log("error", "opencode server exited prematurely, falling back to non-attached mode")
+                    self._stop_server()
+                    return
+                try:
+                    req = Request(f"{self._server_url}/global/health")
+                    with urlopen(req, timeout=2) as resp:
+                        if resp.status == 200:
+                            self._add_log("sw", f"opencode server ready on port {self._server_port} (HTTP API mode)")
+                            return
+                except (URLError, OSError):
+                    pass
+                time.sleep(0.5)
+
+            # Timed out
+            self._add_log("error", "opencode server startup timed out, falling back to non-attached mode")
+            self._stop_server()
+        except FileNotFoundError:
+            self._add_log("error", "opencode command not found, falling back to non-attached mode")
+            self._stop_server()
+        except Exception as e:
+            self._add_log("error", f"Failed to start opencode server: {e}, falling back to non-attached mode")
+            self._stop_server()
+
+    def _stop_server(self):
+        self._server_url = None
+        self._server_port = None
+        if self._server_proc is None:
+            return
+        try:
+            self._server_proc.terminate()
+            self._server_proc.wait(timeout=5)
+        except Exception:
+            try:
+                self._server_proc.kill()
+            except Exception:
+                pass
+        self._server_proc = None
+
+    def _create_http_session(self):
+        """Create a new session via opencode serve REST API."""
+        try:
+            body = json.dumps({"title": f"agent-{self.name}"}).encode("utf-8")
+            req = Request(
+                f"{self._server_url}/session",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                self._http_session_id = result.get("id")
+                self._add_log("sw", f"opencode HTTP session: {self._http_session_id[:16]}...")
+        except Exception as e:
+            self._add_log("error", f"Failed to create HTTP session: {e}")
+            self._http_session_id = None
+            raise
+
+    def _parse_model_for_http(self) -> Optional[Dict[str, str]]:
+        """Parse self.model_name like 'opencode-go/deepseek-v4-flash' into {providerID, modelID}."""
+        if not self.model_name or self.model_name == "opencode":
+            return None
+        parts = self.model_name.split("/", 1)
+        if len(parts) == 2:
+            return {"providerID": parts[0], "modelID": parts[1]}
+        return None
+
+    def _run_via_http(self, message: str, is_continue: bool = False):
+        """Send message via opencode serve REST API and dispatch response parts."""
+        self._add_log("sw", "⏳ opencode HTTP API 连接中...")
+        self.status = self.STATUS_CONNECTING
+
+        try:
+            if not self._http_session_id or not is_continue:
+                self._create_http_session()
+
+            body: Dict[str, Any] = {
+                "parts": [{"type": "text", "text": message}],
+            }
+            model = self._parse_model_for_http()
+            if model:
+                body["model"] = model
+
+            req = Request(
+                f"{self._server_url}/session/{self._http_session_id}/message",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urlopen(req, timeout=self._no_output_timeout) as resp:
+                result = json.loads(resp.read())
+
+            agent_text_parts: List[str] = []
+            for part in result.get("parts", []):
+                part_type = part.get("type", "")
+
+                if part_type == "step-start":
+                    self.status = self.STATUS_ACTIVE
+                    self._add_log("sw", "opencode step started")
+
+                elif part_type == "text":
+                    text = part.get("text", "")
+                    if text:
+                        agent_text_parts.append(text)
+                        self._add_log("agent", text)
+
+                elif part_type == "reasoning":
+                    text = part.get("text", "")
+                    if text:
+                        preview = text.strip().replace("\n", " ")
+                        if len(preview) > 160:
+                            preview = preview[:157] + "..."
+                        self._add_log("system", f"thinking: {preview}")
+
+                elif part_type in ("tool_use", "tool"):
+                    self._handle_http_tool_part(part)
+
+                elif part_type == "step-finish":
+                    reason = part.get("reason", "unknown")
+                    if reason == "stop":
+                        self.status = self.STATUS_IDLE
+                        self._add_log("sw", "✓ opencode 回复完成")
+                    else:
+                        self._add_log("sw", f"opencode step 完成 (reason={reason})")
+
+            if agent_text_parts:
+                full_text = "\n".join(agent_text_parts)
+                sw_log(self.name, f"complete reply ({len(full_text)} chars)", "agent")
+            else:
+                self._add_log("error", "HTTP API 返回空响应 (模型可能不可用)，回退到 CLI")
+                self.status = self.STATUS_ERROR
+
+            sw_log(self.name, "opencode HTTP completed", "sw")
+
+            if self.status != self.STATUS_ERROR and "on_complete" in self.callbacks:
+                try:
+                    self.callbacks["on_complete"]()
+                except Exception:
+                    pass
+
+        except URLError as e:
+            self._add_log("error", f"HTTP API error: {e}")
+            self.status = self.STATUS_ERROR
+        except Exception as e:
+            self._add_log("error", f"HTTP API 异常: {e}")
+            self.status = self.STATUS_ERROR
+
+    def _handle_http_tool_part(self, part: Dict[str, Any]):
+        """Handle tool_use parts from HTTP API response, similar to _handle_tool_event."""
+        tool_name = part.get("name") or part.get("tool") or "unknown"
+        tool_input = part.get("input") if isinstance(part.get("input"), dict) else {}
+        summary = self._summarize_mapping(tool_input)
+        if summary:
+            self._add_log("system", f"🛠 {tool_name}: {summary}")
+        else:
+            self._add_log("system", f"🛠 {tool_name}")
+
+        # Check for question/ask_user tools
+        if tool_name in ("question", "ask_user"):
+            questions = tool_input.get("questions", [])
+            if questions:
+                self._add_log("system", f"❓ opencode 提出 {len(questions)} 个问题")
+                answers = self._ask_user(questions)
+                if answers:
+                    self.send(self._format_answers(questions, answers), is_system=True)
 
     def _parse_json_line(self, line):
         """解析 opencode run 输出的单行 JSON"""
@@ -344,6 +546,18 @@ class OpenCodeAgent(BaseAgent):
 
     def _run_opencode(self, message, is_continue=False, is_system=False):
         message = self._prepare_message(message, is_system=is_system)
+
+        if self._server_url:
+            try:
+                self._run_via_http(message, is_continue)
+                if self.status != self.STATUS_ERROR:
+                    return
+            except Exception as e:
+                self._add_log("sw", f"HTTP API 失败，回退到 CLI: {e}")
+            self._add_log("sw", "HTTP API 无有效输出，回退到 CLI 模式")
+            self._server_url = None
+            self._stop_server()
+
         cmd = self._build_command(message, is_continue)
         self._add_log("sw", f"⏳ opencode 连接中... (会话继续: {is_continue})")
         self.status = self.STATUS_CONNECTING
@@ -476,10 +690,15 @@ class OpenCodeAgent(BaseAgent):
                 pass
 
     def start(self):
-        """启动 Agent，初始化 worker 线程"""
+        """启动 Agent，初始化 worker 线程和持久化 opencode server"""
         if self.running: return
         self.running = True
         self.status = self.STATUS_IDLE
+        
+        # Start persistent opencode server for connection reuse
+        # Gracefully falls back to per-message subprocess if server fails
+        if self._server_proc is None:
+            self._start_server()
         
         # 启动唯一的 worker 线程
         if self._send_worker is None or not self._send_worker.is_alive():
@@ -542,11 +761,14 @@ class OpenCodeAgent(BaseAgent):
                 except Exception:
                     pass
         self._current_proc = None
+        self._http_session_id = None
+        self._stop_server()
 
     def restart(self):
         """重启 Agent（新会话）"""
         self.shutdown()
         self._session_id = None
+        self._http_session_id = None
         self.start()
 
     def inject_context(self):
