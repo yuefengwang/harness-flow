@@ -150,64 +150,30 @@ async def task_deploy(name: str):
 
 
 def _run_deploy_agent(name: str, target_dir: str):
-    """后台线程：构建部署上下文 → 创建 Agent → 执行 → 记录结果"""
-    from sw_lib.core.utils import now, sw_log
-    from sw_lib.core.state import read_state, write_state
-
+    from sw_lib.core.utils import now
+    from sw_lib.core.config import TASKS
     deploy_log_path = TASKS / name / ".deploy_log"
-
-    def log(msg: str):
+    def log(msg):
         with open(deploy_log_path, "a", encoding="utf-8") as f:
             f.write(f"[{now()}] {msg}\n")
-        sw_log(name, f"[deploy] {msg}", "deploy")
-
     try:
-        log("开始部署...")
+        log(f"开始部署: {target_dir}")
         agent_type = resolve_agent_type("03-coding")
         model_name = resolve_agent_model("03-coding")
-
-        context = (
-            "## 部署任务\n\n"
-            "你是一个部署专家。请执行以下操作：\n\n"
-            f"1. 进入项目目录: {target_dir}\n"
-            "2. 列出目录内容，检测项目类型（Dockerfile / docker-compose.yml / package.json / pom.xml / requirements.txt / go.mod 等）\n"
-            "3. 根据检测到的项目类型，选择合适的启动方式：\n"
-            "   - Docker: `docker-compose up -d` 或 `docker build && docker run`\n"
-            "   - Node.js: `npm install && npm start`\n"
-            "   - Python: `pip install -r requirements.txt && python app.py` 或 `uvicorn`\n"
-            "   - Java: `mvn spring-boot:run` 或 `java -jar target/*.jar`\n"
-            "   - Go: `go run .` 或 `go build && ./binary`\n"
-            "4. 执行启动命令\n"
-            "5. 确认服务是否成功启动（检查端口、进程、HTTP 响应等）\n"
-            "6. 报告最终结果：服务地址、端口、状态\n"
-        )
-
-        callbacks = {
-            "add_log": lambda s, m: log(f"[{s}] {m}"),
-            "is_running": lambda: True,
-            "on_complete": lambda: None,
-            "on_ask_user": lambda q, r: r.put([""] * len(q)),
-        }
-
+        context = f"进入 {target_dir}，检测项目类型并启动服务。"
+        callbacks = {"add_log": lambda s, m: log(f"[{s}] {m}"), "is_running": lambda: True, "on_complete": lambda: None, "on_ask_user": lambda q, r: r.put([""] * len(q))}
         agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
-        log(f"Agent 已创建: {agent_type} / {model_name}")
-
         agent.start()
         if hasattr(agent, 'send'):
             agent.send(context, is_system=True)
-
         from sw_lib.agents.pty import PtyAgent
+        import threading as _th
         if isinstance(agent, PtyAgent):
-            import threading as _th
             _th.Thread(target=agent.reader_loop, daemon=True).start()
-
-        log("Agent 已启动，等待完成...")
         if hasattr(agent, 'wait'):
             agent.wait()
         log("部署完成")
-
         _service.complete_deploy(name, success=True)
-
     except Exception as e:
         log(f"部署失败: {e}")
         try:
@@ -233,16 +199,30 @@ def _task_table_html() -> str:
         for t in data["active_tasks"]:
             stage_label = data["stage_labels"].get(t["stage"], t["stage"])
             status_class = "status-" + t.get("status", "unknown")
+            actions_html = '<td class="actions">'
+            if t.get("status") == "Finished":
+                ds = t.get("deploy_status", "idle")
+                if ds == "idle":
+                    actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">部署</button>'
+                elif ds == "deploying":
+                    actions_html += '<span class="status-deploying">部署中...</span>'
+                elif ds == "deployed":
+                    actions_html += '<span class="status-deployed">已部署</span> '
+                    actions_html += f'<a href="/tasks/{t["id"]}">日志</a>'
+                elif ds == "deploy_failed":
+                    actions_html += '<span class="status-failed">部署失败</span> '
+                    actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重试</button>'
+            else:
+                actions_html += f'<button hx-post="/tasks/{t["id"]}/advance" hx-target="#task-list" hx-swap="outerHTML">推进</button>'
+            actions_html += f'<button class="danger" hx-post="/tasks/{t["id"]}/remove" hx-target="#task-list" hx-swap="outerHTML" hx-confirm="确认移除任务 {t["id"]}?">删除</button>'
+            actions_html += '</td>'
             lines.append(
                 f'<tr>'
                 f'<td><a href="/tasks/{t["id"]}">{t["id"]}</a></td>'
                 f'<td>{stage_label}</td>'
                 f'<td class="{status_class}">{t["status"]}</td>'
                 f'<td>{t.get("updated_at", "")}</td>'
-                f'<td class="actions">'
-                f'<button hx-post="/tasks/{t["id"]}/advance" hx-target="#task-list" hx-swap="outerHTML">推进</button>'
-                f'<button class="danger" hx-post="/tasks/{t["id"]}/remove" hx-target="#task-list" hx-swap="outerHTML" hx-confirm="确认移除任务 {t["id"]}?">删除</button>'
-                f'</td>'
+                f'{actions_html}'
                 f'</tr>'
             )
         lines.append("</tbody></table>")
