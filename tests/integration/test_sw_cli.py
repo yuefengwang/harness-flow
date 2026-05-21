@@ -120,6 +120,9 @@ for stage_name in ["03-coding", "04-review"]:
     tpl = TASKS / "test-cli" / f"{stage_name}.md"
     content = tpl.read_text()
     content = content.replace("[ ] ", "[x] ")
+    # 04-review 需要填写 Route 字段（check_04-review.sh 会验证）
+    if stage_name == "04-review":
+        content = content.replace("`___`", "`05-Archive`")
     tpl.write_text(content)
     # 推进
     run(f"python3 {SW} advance --name=test-cli", 0, f"advance stage {stage_name}")

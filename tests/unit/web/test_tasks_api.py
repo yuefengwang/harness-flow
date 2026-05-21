@@ -426,6 +426,7 @@ def test_full_lifecycle_smoke(client, clean_engine_mgr):
                 )
             elif "review" in stage:
                 tpl_file.write_text(
+                    "## Review Decision\n- **Route**: `05-Archive`\n- **Reason**: All criteria met\n\n"
                     "## Review Summary\n- [x] Code reviewed\n\n"
                     "## Gate\n- [x] Review passed\n- [x] Ready for Archive\n",
                     encoding="utf-8"

@@ -7,6 +7,7 @@ sw_lib.engine — 工作流自动化编排引擎。
 3. WorkflowEngine: 核心控制器，管理 Agent 生命周期、阶段状态推进及组件协作。
 """
 
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -41,6 +42,127 @@ def _auto_check_gate(task_name: str, stage: str):
         elif in_gate and re.match(r"^\s*- \[ \]", line):
             lines[i] = line.replace("[ ]", "[x]", 1)
     tpl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+MAX_REROUTE = 3
+
+
+def parse_route_field(task_name: str) -> Optional[str]:
+    """从 04-review.md 解析 **Route**: `XXX` 字段，返回目标 stage code。
+
+    Returns:
+        stage code (如 "05-Archive") 或 None (字段缺失/格式错误)
+    """
+    review_path = TASKS / task_name / "04-review.md"
+    if not review_path.exists():
+        return None
+    content = review_path.read_text(encoding="utf-8")
+    m = re.search(r'\*\*Route\*\*:\s*`([^`]+)`', content)
+    if m:
+        route = m.group(1).strip().lower()
+        # STAGES 使用小写格式 (如 "03-coding")，Route 字段可能用 "03-Coding"
+        if route in STAGES:
+            return route
+        # 也支持直接匹配 STAGES 中的值
+        for s in STAGES:
+            if s.lower() == route:
+                return s
+    return None
+
+
+def extract_evidence_table(task_name: str) -> Optional[str]:
+    """从 04-review.md 提取 Reroute Evidence 的 Markdown 表格。
+
+    Returns:
+        完整的 Evidence 表格字符串（含表头行），若无表格则返回 None。
+    """
+    review_path = TASKS / task_name / "04-review.md"
+    if not review_path.exists():
+        return None
+    content = review_path.read_text(encoding="utf-8")
+
+    # 查找 "### Reroute Evidence" 章节后的表格
+    lines = content.splitlines()
+    in_evidence = False
+    table_lines = []
+    for line in lines:
+        if line.strip().startswith("### Reroute Evidence"):
+            in_evidence = True
+            continue
+        if in_evidence:
+            # 表格结束条件：空行 或 下一个 ## 标题
+            if not line.strip() or line.startswith("##"):
+                break
+            # 只收集表格行（| 开头）
+            if line.strip().startswith("|"):
+                table_lines.append(line)
+
+    if not table_lines:
+        return None
+
+    # 至少需要表头 + 分隔线 + 1 行数据（且数据行不能全是占位符 `___`）
+    if len(table_lines) < 3:
+        return None
+
+    data_rows = table_lines[2:]  # 跳过表头和分隔线
+    has_real_data = any("___" not in row for row in data_rows)
+    if not has_real_data:
+        return None
+
+    return "\n".join(table_lines)
+
+
+def inject_reroute_context(task_name: str, target_stage: str):
+    """将 review 的 Evidence 表注入到目标 stage 模板顶部。
+
+    先清理目标文件中之前注入的旧 block，再注入新的，确保始终只有最新的返工上下文。
+    """
+    review_path = TASKS / task_name / "04-review.md"
+    target_path = TASKS / task_name / f"{target_stage}.md"
+    if not review_path.exists() or not target_path.exists():
+        return
+
+    evidence = extract_evidence_table(task_name)
+    if not evidence:
+        return
+
+    inject_block = (
+        "> 🔄 **返工上下文（来自 04-Review）**\n"
+        f"{evidence}\n"
+        "> 请优先修复上述问题。\n\n"
+    )
+
+    original = target_path.read_text(encoding="utf-8")
+
+    # 清理旧的返工上下文 block（两个标记之间）
+    cleaned = _remove_old_reroute_blocks(original)
+
+    # 注入到文件头部
+    target_path.write_text(inject_block + cleaned, encoding="utf-8")
+
+
+def _remove_old_reroute_blocks(content: str) -> str:
+    """移除之前注入的所有返工上下文 block。
+
+    从标记行开始，跳过所有属于 block 的内容行（以 >、| 开头或空行），
+    直到遇到第一条非 block 内容行。
+    """
+    lines = content.splitlines()
+    result = []
+    skip_block = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("> 🔄 **返工上下文（来自 04-Review）**"):
+            skip_block = True
+            continue
+        if skip_block:
+            if stripped == "" or stripped.startswith(">") or stripped.startswith("|"):
+                continue
+            else:
+                skip_block = False
+        if not skip_block:
+            result.append(line)
+    return "\n".join(result)
 
 
 class ContextBuilder:
@@ -493,12 +615,48 @@ class WorkflowEngine:
         if self.agent and hasattr(self.agent, 'shutdown'):
             self.agent.shutdown()
 
-        # 5. 推进状态
-        next_idx = self.stage_idx + 1
+        # 5. 推进状态 — 支持 04-review 的路由决策
+        if self.stage == "04-review":
+            target = parse_route_field(self.name)
+            if target and target in STAGES:
+                next_idx = STAGES.index(target)
+            else:
+                self._add_log("error", "❌ Route 字段无效或未填写，无法推进。请在 Review Decision 中填写 **Route**: `目标阶段`")
+                return False
+        else:
+            next_idx = self.stage_idx + 1
+
         next_stage = STAGES[next_idx]
         next_name = STAGE_NAMES[next_idx]
 
         st = read_state(self.name)
+
+        # 6. 返工处理：注入上下文 + 循环保护
+        _is_reroute = (self.stage == "04-review" and next_stage != "05-archive")
+        if _is_reroute:
+            # 递增返工计数
+            st["reroute_count"] = st.get("reroute_count", 0) + 1
+            st.setdefault("reroute_history", []).append({
+                "from": self.stage,
+                "to": next_stage,
+                "at": now(),
+                "count": st["reroute_count"],
+            })
+
+            # 循环保护
+            if st["reroute_count"] > MAX_REROUTE:
+                st["stage_status"] = "blocked"
+                st["updated_at"] = now()
+                write_state(self.name, st)
+                upsert_task_summary(self.name, stage_status="blocked")
+                self._add_log("error", f"⛔ 返工已超过 {MAX_REROUTE} 次，需人工介入。请在 TUI 中处理。")
+                sw_log(self.name, f"reroute blocked: exceeded {MAX_REROUTE} reroutes", "sw")
+                return False
+
+            # 注入返工上下文
+            inject_reroute_context(self.name, next_stage)
+            sw_log(self.name, f"reroute: {self.stage} → {next_stage} (count={st['reroute_count']})", "sw")
+
         st["stage"] = next_stage
         st["stage_idx"] = next_idx
         st["stage_status"] = "pending"

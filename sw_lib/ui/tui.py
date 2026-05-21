@@ -793,5 +793,3 @@ class MonitorTUI:
             self.state.log_scroll_offset += visible_height
         elif seq == '\x1b[6~': # PageDown
             self.state.log_scroll_offset = max(0, self.state.log_scroll_offset - visible_height)
-        
-        self._refresh_display()
