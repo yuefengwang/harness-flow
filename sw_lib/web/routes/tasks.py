@@ -12,10 +12,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ...core.service import _service, TaskError
-from ...core.config import STAGES, STAGE_NAMES, TASKS
+from ...core.config import STAGES, STAGE_NAMES, TASKS, resolve_agent_type, resolve_agent_model
 import threading
 from sw_lib.agents.base import AgentFactory
-from sw_lib.core.config import resolve_agent_type, resolve_agent_model
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
