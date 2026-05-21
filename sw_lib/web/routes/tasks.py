@@ -13,6 +13,12 @@ from fastapi.templating import Jinja2Templates
 
 from ...core.service import _service, TaskError
 from ...core.config import STAGES, STAGE_NAMES, TASKS
+import threading
+from sw_lib.agents.base import AgentFactory
+from sw_lib.core.config import resolve_agent_type, resolve_agent_model
+import threading
+from sw_lib.agents.base import AgentFactory
+from sw_lib.core.config import resolve_agent_type, resolve_agent_model
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -129,6 +135,138 @@ async def task_restore(name: str):
         return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
+
+
+@router.post("/tasks/{name}/deploy")
+async def task_deploy(name: str):
+    try:
+        st = _service.deploy_task(name)
+    except TaskError as e:
+        return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
+
+    target_dir = st.get("target_dir", "")
+    threading.Thread(
+        target=_run_deploy_agent,
+        args=(name, target_dir),
+        daemon=True,
+    ).start()
+    return HTMLResponse(content=_task_table_html())
+
+
+def _run_deploy_agent(name: str, target_dir: str):
+    from sw_lib.core.utils import now
+    from sw_lib.core.config import TASKS
+    deploy_log_path = TASKS / name / ".deploy_log"
+    def log(msg):
+        with open(deploy_log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now()}] {msg}\n")
+    try:
+        log(f"开始部署: {target_dir}")
+        agent_type = resolve_agent_type("03-coding")
+        model_name = resolve_agent_model("03-coding")
+        context = f"进入 {target_dir}，检测项目类型并启动服务。"
+        callbacks = {"add_log": lambda s, m: log(f"[{s}] {m}"), "is_running": lambda: True, "on_complete": lambda: None, "on_ask_user": lambda q, r: r.put([""] * len(q))}
+        agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
+        agent.start()
+        if hasattr(agent, 'send'):
+            agent.send(context, is_system=True)
+        from sw_lib.agents.pty import PtyAgent
+        import threading as _th
+        if isinstance(agent, PtyAgent):
+            _th.Thread(target=agent.reader_loop, daemon=True).start()
+        if hasattr(agent, 'wait'):
+            agent.wait()
+        log("部署完成")
+        _service.complete_deploy(name, success=True)
+    except Exception as e:
+        log(f"部署失败: {e}")
+        try:
+            _service.complete_deploy(name, success=False)
+        except Exception:
+            pass
+
+
+@router.post("/tasks/{name}/deploy")
+async def task_deploy(name: str):
+    try:
+        st = _service.deploy_task(name)
+    except TaskError as e:
+        return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
+
+    target_dir = st.get("target_dir", "")
+    threading.Thread(
+        target=_run_deploy_agent,
+        args=(name, target_dir),
+        daemon=True,
+    ).start()
+    return HTMLResponse(content=_task_table_html())
+
+
+def _run_deploy_agent(name: str, target_dir: str):
+    """后台线程：构建部署上下文 → 创建 Agent → 执行 → 记录结果"""
+    from sw_lib.core.utils import now, sw_log
+    from sw_lib.core.state import read_state, write_state
+
+    deploy_log_path = TASKS / name / ".deploy_log"
+
+    def log(msg: str):
+        with open(deploy_log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now()}] {msg}\n")
+        sw_log(name, f"[deploy] {msg}", "deploy")
+
+    try:
+        log("开始部署...")
+        agent_type = resolve_agent_type("03-coding")
+        model_name = resolve_agent_model("03-coding")
+
+        context = (
+            "## 部署任务\n\n"
+            "你是一个部署专家。请执行以下操作：\n\n"
+            f"1. 进入项目目录: {target_dir}\n"
+            "2. 列出目录内容，检测项目类型（Dockerfile / docker-compose.yml / package.json / pom.xml / requirements.txt / go.mod 等）\n"
+            "3. 根据检测到的项目类型，选择合适的启动方式：\n"
+            "   - Docker: `docker-compose up -d` 或 `docker build && docker run`\n"
+            "   - Node.js: `npm install && npm start`\n"
+            "   - Python: `pip install -r requirements.txt && python app.py` 或 `uvicorn`\n"
+            "   - Java: `mvn spring-boot:run` 或 `java -jar target/*.jar`\n"
+            "   - Go: `go run .` 或 `go build && ./binary`\n"
+            "4. 执行启动命令\n"
+            "5. 确认服务是否成功启动（检查端口、进程、HTTP 响应等）\n"
+            "6. 报告最终结果：服务地址、端口、状态\n"
+        )
+
+        callbacks = {
+            "add_log": lambda s, m: log(f"[{s}] {m}"),
+            "is_running": lambda: True,
+            "on_complete": lambda: None,
+            "on_ask_user": lambda q, r: r.put([""] * len(q)),
+        }
+
+        agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
+        log(f"Agent 已创建: {agent_type} / {model_name}")
+
+        agent.start()
+        if hasattr(agent, 'send'):
+            agent.send(context, is_system=True)
+
+        from sw_lib.agents.pty import PtyAgent
+        if isinstance(agent, PtyAgent):
+            import threading as _th
+            _th.Thread(target=agent.reader_loop, daemon=True).start()
+
+        log("Agent 已启动，等待完成...")
+        if hasattr(agent, 'wait'):
+            agent.wait()
+        log("部署完成")
+
+        _service.complete_deploy(name, success=True)
+
+    except Exception as e:
+        log(f"部署失败: {e}")
+        try:
+            _service.complete_deploy(name, success=False)
+        except Exception:
+            pass
 
 
 def _task_table_html() -> str:
