@@ -15,13 +15,17 @@
   ./sw dashboard                             # 启动 Web Dashboard
 """
 
+import signal
 import sys
 import os
 import subprocess
+import time
+from pathlib import Path
 
 from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
 from ..web.app import create_app
-from ..core.state import get_active_from_status, write_state, upsert_task_summary
+from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
+from ..core.deploy import run_deploy_agent
 from ..core.utils import (
     green, yellow, blue,
     ok, warn, hdr, die,
@@ -261,6 +265,145 @@ def cmd_dashboard(args):
     app = create_app()
     print(f"🌐 Harness-Flow Dashboard: http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+def cmd_deploy(args):
+    """部署应用：通过 Agent 一键部署 sw init 生成的项目"""
+    name = getattr(args, "name", "") or ""
+    deploy_port = getattr(args, "port", 8000)
+    no_tunnel = getattr(args, "no_tunnel", False)
+
+    if not name:
+        ctx = find_context_from_cwd()
+        if ctx and ctx.get("project"):
+            name = ctx["project"]
+            target_dir = ctx.get("target_dir", "")
+            hdr(f"检测到项目上下文: {name}")
+        else:
+            name = get_active_from_status()
+            if not name or name == "无":
+                die("未指定任务名，且当前目录无 .sw-context 标记。请使用 --name 指定。")
+            target_dir = ""
+    else:
+        target_dir = ""
+
+    try:
+        st = _service.get_task_state(name)
+        if not target_dir:
+            target_dir = st.get("target_dir", "")
+
+        if not target_dir:
+            die(f"任务 {name} 未设置目标目录")
+
+        target_path = Path(target_dir)
+        if not target_path.is_dir():
+            die(f"目标目录不存在: {target_dir}")
+
+        _service.deploy_task(name, force=True)
+        hdr(f"正在部署: {name}")
+        print(f"目标目录: {target_dir}")
+        print(f"首选端口: {deploy_port}")
+        if no_tunnel:
+            print(f"Cloudflare Tunnel: 已禁用")
+        print()
+
+        final_url = run_deploy_agent(
+            name, target_dir,
+            log_callback=print,
+            port=deploy_port,
+            no_tunnel=no_tunnel,
+        )
+
+        if final_url:
+            ok(f"部署成功!")
+            print(f"服务地址: {green(final_url)}")
+        else:
+            warn("部署完成，但未检测到服务地址。请查看日志。")
+            return
+
+        # ── 前台阻塞模式 ──
+        from ..core.config import TASKS as _TASKS
+
+        deploy_log = _TASKS / name / ".deploy_log"
+        pid_file = _TASKS / name / ".deploy.pid"
+
+        def _cleanup(signum=None, frame=None):
+            """清理子进程和 tunnel"""
+            print()
+            warn("正在停止服务...")
+
+            # 停止服务进程
+            if pid_file.exists():
+                try:
+                    pid = int(pid_file.read_text().strip())
+                    os.kill(pid, signal.SIGTERM)
+                    warn(f"已终止服务进程 (PID {pid})")
+                except (ValueError, ProcessLookupError, OSError):
+                    pass
+                pid_file.unlink(missing_ok=True)
+
+            # 停止 tunnel
+            try:
+                from ..web.cloudflared import stop_tunnel as _stop_tunnel
+                _stop_tunnel(name)
+            except Exception:
+                pass
+
+            # 更新部署状态
+            try:
+                _service.complete_deploy(name, success=False)
+            except Exception:
+                pass
+
+            ok("服务已停止")
+            sys.exit(0)
+
+        # 注册信号处理
+        signal.signal(signal.SIGINT, _cleanup)
+        signal.signal(signal.SIGTERM, _cleanup)
+
+        hdr("服务运行中 (Ctrl+C 停止)")
+        print(f"本地地址: {green(final_url)}")
+        print()
+
+        # 实时 tail 日志
+        try:
+            if deploy_log.exists():
+                # 从日志末尾开始 tail，但先显示最后几行上下文
+                with open(deploy_log, "r") as f:
+                    lines = f.readlines()
+                    tail_lines = lines[-5:] if len(lines) > 5 else lines
+                    for line in tail_lines:
+                        print(f"  {line.strip()}")
+
+            # 持续读取 deploy_log 更新并输出到 stdout
+            last_size = deploy_log.stat().st_size if deploy_log.exists() else 0
+            while True:
+                time.sleep(0.5)
+                if deploy_log.exists():
+                    current_size = deploy_log.stat().st_size
+                    if current_size > last_size:
+                        with open(deploy_log, "r") as f:
+                            f.seek(last_size)
+                            new_data = f.read()
+                            if new_data:
+                                print(new_data, end="")
+                            last_size = f.tell()
+
+                # 检查进程是否还活着
+                if pid_file.exists():
+                    try:
+                        pid = int(pid_file.read_text().strip())
+                        os.kill(pid, 0)  # 信号 0 仅用于检查进程存在
+                    except (ProcessLookupError, ValueError, OSError):
+                        warn("服务进程已意外退出")
+                        _cleanup()
+                        break
+        except KeyboardInterrupt:
+            _cleanup()
+
+    except TaskError as e:
+        die(str(e))
 
 
 def cmd_usage():

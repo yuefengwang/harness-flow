@@ -12,10 +12,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ...core.service import _service, TaskError
-from ...core.config import STAGES, STAGE_NAMES, TASKS, resolve_agent_type, resolve_agent_model
+from ...core.config import STAGES, STAGE_NAMES, TASKS
+from ...core.deploy import run_deploy_agent
 import threading
-from sw_lib.agents.base import AgentFactory
-from ..cloudflared import start_tunnel, stop_tunnel as stop_cloudflared_tunnel
+from ..cloudflared import stop_tunnel as stop_cloudflared_tunnel
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -151,83 +151,11 @@ async def task_deploy(name: str):
 
     target_dir = st.get("target_dir", "")
     threading.Thread(
-        target=_run_deploy_agent,
+        target=run_deploy_agent,
         args=(name, target_dir),
         daemon=True,
     ).start()
     return HTMLResponse(content=_task_table_html())
-
-
-def _run_deploy_agent(name: str, target_dir: str):
-    import re
-    from sw_lib.core.utils import now
-    from sw_lib.core.config import TASKS
-    deploy_log_path = TASKS / name / ".deploy_log"
-    agent_output_lines = []
-
-    def log(msg):
-        with open(deploy_log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{now()}] {msg}\n")
-
-    try:
-        log(f"开始部署: {target_dir}")
-        agent_type = resolve_agent_type("03-coding")
-        model_name = resolve_agent_model("03-coding")
-        context = (
-            "## 部署任务\n\n"
-            f"进入项目目录 {target_dir}，检测项目类型并启动服务。\n\n"
-            "完成部署后，请以以下格式输出服务访问地址：\n"
-            "SERVICE_URL: http://host:port\n"
-            "例如: SERVICE_URL: http://localhost:8080\n"
-        )
-        callbacks = {
-            "add_log": lambda s, m: (log(f"[{s}] {m}"), agent_output_lines.append(m)),
-            "is_running": lambda: True,
-            "on_complete": lambda: None,
-            "on_ask_user": lambda q, r: r.put([""] * len(q)),
-        }
-        agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
-        agent.start()
-        if hasattr(agent, 'send'):
-            agent.send(context, is_system=True)
-        from sw_lib.agents.pty import PtyAgent
-        import threading as _th
-        if isinstance(agent, PtyAgent):
-            _th.Thread(target=agent.reader_loop, daemon=True).start()
-        if hasattr(agent, 'wait'):
-            agent.wait()
-        log("部署完成")
-
-        deploy_url = ""
-        for line in agent_output_lines:
-            m = re.search(r'SERVICE_URL:\s*(\S+)', line)
-            if m:
-                deploy_url = m.group(1)
-                log(f"检测到服务地址: {deploy_url}")
-                break
-
-        tunnel_url = None
-        if deploy_url:
-            port_match = re.search(r':(\d+)', deploy_url)
-            if port_match:
-                port = int(port_match.group(1))
-                log(f"正在创建 Cloudflare Tunnel (端口 {port})...")
-                tunnel_url = start_tunnel(port, name)
-                if tunnel_url:
-                    log(f"Cloudflare Tunnel 已创建: {tunnel_url}")
-                else:
-                    log("Cloudflare Tunnel 创建失败，使用本地地址")
-            else:
-                log("无法解析端口，跳过 Cloudflare Tunnel")
-
-        final_url = tunnel_url or deploy_url
-        _service.complete_deploy(name, success=True, deploy_url=final_url)
-    except Exception as e:
-        log(f"部署失败: {e}")
-        try:
-            _service.complete_deploy(name, success=False)
-        except Exception:
-            pass
 
 
 def _task_table_html() -> str:

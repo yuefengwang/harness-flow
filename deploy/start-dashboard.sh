@@ -409,44 +409,125 @@ start_caddy() {
 check_tunnel_healthy() {
     local url=""; [[ -f "$CF_URL_FILE" ]] && url=$(cat "$CF_URL_FILE")
     [[ -z "$url" ]] && return 1
-    nslookup "$(echo "$url" | sed 's|https://||')" > /dev/null 2>&1 || return 1
-    curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 "$url" 2>/dev/null | grep -qE '^(2|3|4)' || return 1
-    return 0
+    # 只做轻量 HTTP 连通性检查（不依赖 DNS 解析和 curl 下载完整响应）
+    curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | grep -qE '^(2|3|4)' && return 0
+    return 1
 }
 
 start_cloudflared() {
+    local cf_url=""
+    # 如果已有健康运行的隧道，直接复用
     if [[ -f "$CF_PID_FILE" ]] && kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
-        if check_tunnel_healthy; then warn "Cloudflare Tunnel 已在运行"; return 0; fi
-        warn "Tunnel 连接断开，重启中..."; kill "$(cat "$CF_PID_FILE")" 2>/dev/null || true
-        rm -f "$CF_PID_FILE" "$CF_URL_FILE"; sleep 1
+        if check_tunnel_healthy; then
+            cf_url=$(cat "$CF_URL_FILE" 2>/dev/null || true)
+            [[ -n "$cf_url" ]] && { warn "Cloudflare Tunnel 已在运行"; return 0; }
+        fi
     fi
+
+    # 检测旧进程是否残留（例如僵尸进程），如有则清理
+    if [[ -f "$CF_PID_FILE" ]]; then
+        local old_pid=$(cat "$CF_PID_FILE")
+        kill -0 "$old_pid" 2>/dev/null && kill "$old_pid" 2>/dev/null || true
+        rm -f "$CF_PID_FILE"
+        sleep 1
+    fi
+
     log "启动 Cloudflare Tunnel..."
     rm -f "$CF_URL_FILE"
-    cloudflared tunnel --protocol http2 --url "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}" > /tmp/sw-cloudflared.log 2>&1 &
+
+    # 使用 --retries 让 cloudflared 在网络抖动时自动重连而非直接退出
+    cloudflared tunnel --protocol http2 --retries 5 \
+        --url "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}" \
+        > /tmp/sw-cloudflared.log 2>&1 &
     local pid=$!; echo "$pid" > "$CF_PID_FILE"
-    for _ in $(seq 1 30); do
+
+    # 等待 URL 出现（最多 45s，比之前更宽容）
+    for _ in $(seq 1 45); do
         sleep 1
         if grep -q 'trycloudflare\.com' /tmp/sw-cloudflared.log 2>/dev/null; then
-            local url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/sw-cloudflared.log | head -1)
-            if [[ -n "$url" ]]; then
-                echo "$url" > "$CF_URL_FILE"
-                log "外网地址: ${CYAN}${url}${NC}"; return 0
+            cf_url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/sw-cloudflared.log | head -1)
+            if [[ -n "$cf_url" ]]; then
+                echo "$cf_url" > "$CF_URL_FILE"
+                log "外网地址: ${CYAN}${cf_url}${NC}"
+                # 预热连接：发送一次请求确保隧道链路畅通
+                curl -s -o /dev/null --connect-timeout 5 --max-time 10 "$cf_url" 2>/dev/null || true
+                return 0
             fi
         fi
     done
-    kill -0 "$pid" 2>/dev/null && warn "Tunnel 运行中但未获取到 URL" || { warn "Tunnel 启动失败"; rm -f "$CF_PID_FILE"; }
+
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "Tunnel 运行中但 45s 内未获取到 URL，查看 /tmp/sw-cloudflared.log"
+        return 1
+    fi
+    warn "Tunnel 启动失败"; rm -f "$CF_PID_FILE"; return 1
 }
 
 monitor_tunnel() {
     echo $$ > "$CF_MONITOR_PID_FILE"
-    local interval="${TUNNEL_CHECK_INTERVAL:-60}"
-    log "隧道健康监控已启动 (${interval}s)"
+    local check_interval="${TUNNEL_CHECK_INTERVAL:-60}"
+    local max_retries=3           # 连续健康检查失败次数阈值
+    local retry_delay=5           # 每次重试间隔（秒）
+    local restart_backoff=60      # 重启后首次检查的等待时间
+    local fail_count=0
+    local last_url=""
+
+    log "隧道健康监控已启动 (检查间隔 ${check_interval}s, 容忍 ${max_retries} 次连续失败)"
+
     while true; do
-        sleep "$interval"
+        sleep "$check_interval"
+
+        # 进程丢了 → 直接重建（进程死亡是确定性失败，无需重试）
         if [[ ! -f "$CF_PID_FILE" ]] || ! kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
-            warn "Tunnel 进程丢失，重建中..."; start_cloudflared; continue
+            warn "Tunnel 进程丢失，重建中..."
+            fail_count=0
+            start_cloudflared
+            sleep "$restart_backoff"  # 给新隧道充分建立时间
+            continue
         fi
-        check_tunnel_healthy || { warn "Tunnel 异常，自动恢复..."; kill "$(cat "$CF_PID_FILE")" 2>/dev/null || true; rm -f "$CF_PID_FILE" "$CF_URL_FILE"; sleep 2; start_cloudflared; }
+
+        # 健康检查：单次失败不杀进程，连续失败才判定为真故障
+        if check_tunnel_healthy; then
+            fail_count=0
+            last_url=$(cat "$CF_URL_FILE" 2>/dev/null || true)
+            # 检查域名是否意外变更
+            if [[ -n "$last_url" ]] && [[ -f "$CF_URL_FILE" ]]; then
+                local cur_url=$(cat "$CF_URL_FILE" 2>/dev/null || true)
+                if [[ -n "$cur_url" ]] && [[ "$cur_url" != "$last_url" ]]; then
+                    warn "⚠️ 隧道域名意外变更: ${last_url} → ${cur_url}"
+                    last_url="$cur_url"
+                fi
+            fi
+            continue
+        fi
+
+        # 单次健康检查失败 → 快速重试几次（网络抖动容忍）
+        fail_count=$((fail_count + 1))
+        local recovered=0
+        for i in $(seq 1 $((max_retries - 1))); do
+            sleep "$retry_delay"
+            if check_tunnel_healthy; then
+                recovered=1
+                break
+            fi
+        done
+
+        if [[ "$recovered" -eq 1 ]]; then
+            fail_count=0
+            log "隧道从瞬态故障中恢复 (重试 ${i}/${max_retries})"
+            continue
+        fi
+
+        # 连续多次失败 → 确认是真故障，重启隧道
+        warn "隧道连续 ${max_retries} 次健康检查失败，重建隧道..."
+        if [[ -f "$CF_PID_FILE" ]]; then
+            kill "$(cat "$CF_PID_FILE")" 2>/dev/null || true
+            rm -f "$CF_PID_FILE"
+        fi
+        # 保留 CF_URL_FILE 作为审计记录（不删除，新 start_cloudflared 会覆盖）
+        fail_count=0
+        start_cloudflared
+        sleep "$restart_backoff"
     done
 }
 

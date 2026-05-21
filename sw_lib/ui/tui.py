@@ -50,7 +50,38 @@ OPTION_PATTERNS = [
     re.compile(r'^\s*[-*]\s+\[[ xX]\]\s*([A-Z\d]+)[.、)]\s*(.+)', re.UNICODE),
     re.compile(r'^\s*(\d+)[.、)\uff09]\s+(.+)', re.UNICODE),
     re.compile(r'^\s*[-*]\s+(?:\u2b50\s*)?\*{0,2}([A-Z])[.、)\uff09\u3001:]\s*(.+)', re.UNICODE),
+    re.compile(r'^\s*([A-Z])[.、)\uff09：:]\s+(.{2,})', re.UNICODE),
 ]
+
+# ── 问题上下文检测关键词 ──
+# 只有 agent 消息中包含以下指标之一时，才会将其中的编号行视为结构化选项
+_QUESTION_CONTEXT_KEYWORDS = [
+    r'\?', r'\uff1f',                           # ? / ？
+    r'\u9009\u62e9', r'\u9009\u9879',            # 选择 / 选项
+    r'\u8bf7\u9009\u62e9',                        # 请选择
+    r'\bchoose\b', r'\bselect\b', r'\bpick\b',    # choose / select / pick
+    r'\bwhich\s+one\b', r'\boptions?\b',          # which one / option(s)
+    r'\u51b3\u5b9a',                               # 决定
+    r'^[-*]\s+\[[ xX]\]',                          # checklist marker (- [ ] or - [x])
+]
+
+def _has_question_context(messages) -> bool:
+    """检查消息块中是否包含提问信号（问号或选择类关键词）。
+
+    同时支持 List[Tuple[str,str]] (extract_options 调用) 和 List[str] 
+    (detect_input_mode 调用) 两种输入格式。
+    """
+    if not messages:
+        return False
+    if isinstance(messages[0], tuple):
+        combined = "\n".join(msg for _, msg in messages)
+    else:
+        combined = "\n".join(messages)
+    for pat in _QUESTION_CONTEXT_KEYWORDS:
+        if re.search(pat, combined, re.IGNORECASE):
+            return True
+    return False
+
 
 def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tuple[str, str]]:
     """
@@ -58,6 +89,10 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
     
     仅从最近日志窗口末尾的 **最新 agent 消息连续块** 中提取选项，
     避免将旧问题的选项与当前问题的选项混淆。
+    
+    增加提问上下文检查：如果 agent 消息块中不包含问号、选择关键词
+    或 option-list 标记，则跳过提取，防止将伪代码中的编号列表
+    (如 "1. xxxx 2. xxxx") 误判为结构化选项。
     
     Args:
         lines: 日志行列表 (source, msg)
@@ -78,6 +113,11 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
     latest_agent_block.reverse()
 
     if not latest_agent_block:
+        return []
+
+    # 提问上下文守卫：agent 消息中必须包含问号或选择/选项类关键词，
+    # 否则跳过选项提取，避免将伪代码中的编号列表误判为提问选项
+    if not _has_question_context(latest_agent_block):
         return []
 
     # 反向扫描选项：同一消息块中若包含多道题（标签相同），后出现的
@@ -104,6 +144,7 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
     options_reversed.reverse()
     return options_reversed
 
+
 def detect_input_mode(log_lines: List[Tuple[str, str]], options: List[Tuple[str, str]]) -> str:
     """
     根据最近的对话上下文自动推断当前应处于哪种交互模式。
@@ -111,6 +152,9 @@ def detect_input_mode(log_lines: List[Tuple[str, str]], options: List[Tuple[str,
     逻辑准则：
     1. 只有当最近的一条有效消息来自 Agent 时，才允许进入交互模式（yesno/options）。
     2. 如果用户已经回复（最新消息源为 user），则必须退出交互模式，回到 none。
+    3. 选项模式需要同时满足：(a) 从 agent 输出中提取到了选项行，(b) agent
+       的上下文包含明显的提问信号（问号、选择指令等），避免将普通编号列表
+       （如步骤说明）误判为需要用户选择的选项。
     """
     if not log_lines:
         return "none"
@@ -140,7 +184,7 @@ def detect_input_mode(log_lines: List[Tuple[str, str]], options: List[Tuple[str,
     for pat in YES_NO_PATTERNS:
         if re.search(pat, combined, re.IGNORECASE):
             return "yesno"
-    if options:
+    if options and _has_question_context(recent_agent):
         return "options"
     return "none"
 

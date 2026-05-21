@@ -359,19 +359,20 @@ class TaskService:
         sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
         return st
 
-    def deploy_task(self, name: str) -> Dict[str, Any]:
+    def deploy_task(self, name: str, force: bool = False) -> Dict[str, Any]:
         """
         部署任务：将已完成的任务发布到目标目录。
 
         Args:
             name: 任务名称
+            force: 若为 True，跳过 stage_status == "Finished" 检查
 
         Returns:
             更新后的任务状态字典
         """
         st = self.get_task_state(name)
 
-        if st.get("stage_status") != "Finished":
+        if not force and st.get("stage_status") != "Finished":
             raise TaskError(f"任务未完成，无法部署: {name}")
 
         if st.get("deploy_status") == "deploying":

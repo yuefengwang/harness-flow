@@ -14,7 +14,7 @@ from typing import List, Optional
 from .commands import (
     cmd_init, cmd_status, cmd_advance, cmd_resume,
     cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor,
-    cmd_dashboard, cmd_usage,
+    cmd_dashboard, cmd_usage, cmd_deploy,
 )
 
 
@@ -80,6 +80,12 @@ def main():
     p_answer.add_argument("--name", help="任务名称")
     p_answer.add_argument("--text", help="回复内容")
 
+    # deploy
+    p_deploy = subparsers.add_parser("deploy", help="部署应用")
+    p_deploy.add_argument("--name", help="任务名称 (默认从 .sw-context 检测)")
+    p_deploy.add_argument("--port", type=int, default=8000, help="首选端口 (默认 8000)")
+    p_deploy.add_argument("--no-tunnel", action="store_true", help="跳过 Cloudflare Tunnel")
+
     # dashboard
     p_dash = subparsers.add_parser("dashboard", help="启动 Web Dashboard")
     p_dash.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
@@ -143,6 +149,9 @@ def main():
 
     elif cmd == "answer":
         cmd_answer(args)
+
+    elif cmd == "deploy":
+        cmd_deploy(args)
 
     elif cmd == "dashboard":
         cmd_dashboard(args)

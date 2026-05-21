@@ -25,6 +25,9 @@ def _auto_check_gate(task_name: str, stage: str):
     """用户输入 /advance = 确认当前阶段完成，自动勾选模板 Gate。
 
     不做任何其他检查——hard hook 仍由后续 _validate_post_hooks 负责。
+
+    对于 04-review 阶段，额外从 AI Output 解析 Route 决策并回填到模板字段
+    （解决 agent 在输出中写了 Route 但模板字段仍为 ___ 的死锁问题）。
     """
     import re
     tpl = TASKS / task_name / f"{stage}.md"
@@ -38,10 +41,58 @@ def _auto_check_gate(task_name: str, stage: str):
         if line.strip().startswith("## Gate"):
             in_gate = True
         elif in_gate and line.strip().startswith("##"):
-            break  # 下一章节开始，停止
+            break
         elif in_gate and re.match(r"^\s*- \[ \]", line):
             lines[i] = line.replace("[ ]", "[x]", 1)
-    tpl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    content = "\n".join(lines) + "\n"
+
+    # 04-review: 自动从 AI Output 回填 Route 字段
+    if stage == "04-review" and "`___`" in content:
+        route_from_output = _parse_route_from_ai_output(content)
+        if route_from_output:
+            content = content.replace(
+                "- **Route**: `___`",
+                f"- **Route**: `{route_from_output}`",
+                1
+            )
+
+    tpl.write_text(content, encoding="utf-8")
+
+
+def _parse_route_from_ai_output(content: str) -> Optional[str]:
+    """从 04-review.md 的 AI Output 区域解析 Route 决策。
+
+    支持的格式（按优先级排列）:
+    - **Route**: `05-Archive`
+    - **建议路由：05-Archive（正常归档）**
+    - **Route** 决策为 `05-Archive`
+    - Route → 05-Archive
+
+    Returns:
+        Stage code 字符串 (如 "05-Archive") 或 None
+    """
+    import re
+    marker = "## 🤖 AI Output"
+    idx = content.find(marker)
+    if idx < 0:
+        return None
+    ai_section = content[idx + len(marker):]
+
+    # 优先匹配反引号格式: `05-Archive`
+    m = re.search(r'`\s*(05-Archive|03-Coding|02-Planning|01-Brainstorming)\s*`', ai_section)
+    if m:
+        return m.group(1)
+
+    # 匹配星号粗体格式: **建议路由：05-Archive** 或 **Route → 05-Archive**
+    m = re.search(
+        r'(?:建议路由|Route|路由|路由决策)\s*[：:→>]\s*\*{0,2}\s*'
+        r'(05-Archive|03-Coding|02-Planning|01-Brainstorming)',
+        ai_section
+    )
+    if m:
+        return m.group(1)
+
+    return None
 
 
 MAX_REROUTE = 3
