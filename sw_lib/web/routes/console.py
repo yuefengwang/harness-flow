@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Request, Form
+from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -30,18 +30,44 @@ async def console_page(request: Request, name: str):
     except TaskError:
         return HTMLResponse("任务不存在", status_code=404)
 
-    task_dir = TASKS / name
-    log_content = ""
-    log_file = task_dir / ".log"
-    if log_file.exists():
-        log_content = log_file.read_text(encoding="utf-8")[-10000:]
-
     return templates.TemplateResponse("console.html", {
         "request": request,
         "task": st,
-        "log_content": log_content,
         "stage_labels": dict(zip(STAGES, STAGE_NAMES)),
     })
+
+
+@router.get("/tasks/{name}/log")
+async def task_log(name: str, after_line: int = Query(0, alias="after_line")):
+    """返回指定行号之后的日志行（结构化 JSON），用于前端增量拉取"""
+    task_dir = TASKS / name
+    log_file = task_dir / ".log"
+    if not log_file.exists():
+        return JSONResponse({"lines": [], "total_lines": 0})
+
+    raw = log_file.read_text(encoding="utf-8")
+    all_lines = raw.splitlines()
+    total = len(all_lines)
+
+    new_lines = all_lines[after_line:] if after_line < total else []
+    parsed = [_parse_log_line(ln) for ln in new_lines]
+
+    return JSONResponse({"lines": parsed, "total_lines": total})
+
+
+def _parse_log_line(line: str) -> dict:
+    """将 [2026-05-21T10:39:53] sw    | task created ... 格式解析为结构化日志"""
+    import re
+    result = {"raw": line}
+    m = re.match(
+        r"^\[([^\]]+)\]\s+(\w+)\s*\|\s*(.*)",
+        line
+    )
+    if m:
+        result["ts"] = m.group(1)
+        result["source"] = m.group(2)
+        result["msg"] = m.group(3)
+    return result
 
 
 _STAGE_LABELS = dict(zip(STAGES, STAGE_NAMES))

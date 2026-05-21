@@ -23,9 +23,6 @@
 
     <div id="console-logs">
         <div id="log-container">
-            {% for line in log_content.splitlines() %}
-            <div class="log-line">{% if line.startswith("[") %}{{ line }}{% else %}{{ line }}{% endif %}</div>
-            {% endfor %}
         </div>
     </div>
 

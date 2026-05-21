@@ -21,31 +21,18 @@
   var sse = null;
   var reconnectTimer = null;
   var pollTimer = null;
+  var lastLineCount = 0;
+  var sseConnected = false;
 
-  // ── 2 秒轮询：刷新阶段名称和状态 ──
+  // ── 日志格式化（对齐 .log 文件格式：[ts] source | msg）──
 
-  function startPolling() {
-    pollTaskState();
-    pollTimer = setInterval(pollTaskState, 2000);
+  function parseLogLine(raw) {
+    var m = raw.match(/^\[([^\]]+)\]\s+(\S+)\s*\|\s*(.*)/);
+    if (m) {
+      return { ts: m[1], source: m[2], msg: m[3] };
+    }
+    return { raw: raw };
   }
-
-  function pollTaskState() {
-    fetch("/tasks/" + taskName + "/state")
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.error) return;
-        var stageEl = document.querySelector(".console-stage");
-        if (stageEl && data.stage_label) {
-          stageEl.textContent = data.stage_label;
-        }
-        if (data.stage_status) {
-          setStatus(data.stage_status);
-        }
-      })
-      .catch(function () {});
-  }
-
-  // ── 日志渲染 ──
 
   function getSourceColor(source) {
     switch (source) {
@@ -66,7 +53,7 @@
     var line = document.createElement("div");
     line.className = "log-line";
 
-    var timeStr = ts ? ts.split("T")[1] || ts : "";
+    var timeStr = ts ? (ts.split("T")[1] || ts) : "";
     var color = getSourceColor(source);
     line.innerHTML =
       '<span class="log-time">[' + timeStr + ']</span> ' +
@@ -77,15 +64,89 @@
     scrollToBottom();
   }
 
+  function appendRawLine(raw) {
+    var parsed = parseLogLine(raw);
+    if (parsed.source) {
+      appendLog(parsed.source, parsed.msg, parsed.ts);
+    } else {
+      var line = document.createElement("div");
+      line.className = "log-line";
+      line.innerHTML = '<span class="log-msg">' + escapeHtml(raw) + '</span>';
+      logContainer.appendChild(line);
+      scrollToBottom();
+    }
+  }
+
   function scrollToBottom() {
     var logs = document.getElementById("console-logs");
-    logs.scrollTop = logs.scrollHeight;
+    if (logs) logs.scrollTop = logs.scrollHeight;
   }
 
   function escapeHtml(text) {
     var div = document.createElement("div");
     div.appendChild(document.createTextNode(text));
     return div.innerHTML;
+  }
+
+  // ── 日志拉取（增量轮询）──
+
+  function fetchLogs(sinceLine) {
+    var url = "/tasks/" + taskName + "/log?after_line=" + (sinceLine || 0);
+    return fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.lines) {
+          data.lines.forEach(function (item) {
+            if (item.source) {
+              appendLog(item.source, item.msg, item.ts);
+            } else {
+              appendRawLine(item.raw || "");
+            }
+          });
+        }
+        if (typeof data.total_lines === "number") {
+          lastLineCount = data.total_lines;
+        }
+        scrollToBottom();
+      })
+      .catch(function () {});
+  }
+
+  function startLogPolling() {
+    stopLogPolling();
+    pollTimer = setInterval(function () {
+      fetchLogs(lastLineCount);
+    }, 2000);
+  }
+
+  function stopLogPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  // ── 状态轮询 ──
+
+  function startPolling() {
+    pollTaskState();
+    pollTimer = setInterval(pollTaskState, 2000);
+  }
+
+  function pollTaskState() {
+    fetch("/tasks/" + taskName + "/state")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) return;
+        var stageEl = document.querySelector(".console-stage");
+        if (stageEl && data.stage_label) {
+          stageEl.textContent = data.stage_label;
+        }
+        if (data.stage_status) {
+          setStatus(data.stage_status);
+        }
+      })
+      .catch(function () {});
   }
 
   // ── 状态更新 ──
@@ -112,6 +173,7 @@
   // ── SSE 事件处理 ──
 
   function handleLogEvent(data) {
+    if (sseConnected) stopLogPolling();
     appendLog(data.source, data.msg, data.ts);
   }
 
@@ -135,7 +197,7 @@
 
     if (q.options && q.options.length > 0) {
       consoleInput.style.display = "none";
-      q.options.forEach(function (opt, i) {
+      q.options.forEach(function (opt) {
         var btn = document.createElement("button");
         btn.className = "btn option-btn";
         btn.textContent = opt;
@@ -151,16 +213,6 @@
   }
 
   function submitAnswer(text) {
-    if (pendingQuestion && pendingQIdx < pendingQuestion.length) {
-      var q = pendingQuestion[pendingQIdx];
-      if (q.type === "choice" && q.options && q.options.length > 0) {
-        var matched = false;
-        q.options.forEach(function (opt) {
-          if (opt === text || text.startsWith(opt[0])) matched = true;
-        });
-      }
-    }
-
     fetch("/tasks/" + taskName + "/engine/answer", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -202,6 +254,7 @@
       sse = null;
     }
 
+    sseConnected = false;
     sse = new EventSource("/tasks/" + taskName + "/sse");
 
     sse.onmessage = function (event) {
@@ -220,19 +273,23 @@
       }
     };
 
-    sse.onerror = function () {
-      sse.close();
-      sse = null;
-      appendLog("sw", "⚠️ SSE 连接断开，5 秒后重连...", new Date().toISOString());
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(function () {
-        appendLog("sw", "正在重连 SSE...", new Date().toISOString());
-        connectSSE();
-      }, 5000);
+    sse.onopen = function () {
+      sseConnected = true;
+      stopLogPolling();
+      appendLog("sw", "SSE 实时连接已建立", new Date().toISOString());
     };
 
-    sse.onopen = function () {
-      appendLog("sw", "SSE 连接已建立", new Date().toISOString());
+    sse.onerror = function () {
+      sseConnected = false;
+      sse.close();
+      sse = null;
+      appendLog("sw", "⚠️ SSE 连接断开，切换到轮询模式", new Date().toISOString());
+      startLogPolling();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(function () {
+        appendLog("sw", "正在尝试重连 SSE...", new Date().toISOString());
+        connectSSE();
+      }, 5000);
     };
   }
 
@@ -245,7 +302,7 @@
 
     fetch("/tasks/" + taskName + "/engine/start", {
       method: "POST",
-    }).then(function (r) { return r.text(); }).then(function (html) {
+    }).then(function (r) { return r.text(); }).then(function () {
       btn.textContent = "已启动";
       appendLog("sw", "引擎已启动", new Date().toISOString());
       connectSSE();
@@ -309,7 +366,20 @@
     }
   });
 
-  // ── 启动 2 秒轮询 ──
-  startPolling();
+  // ── 初始化：加载日志 → 自动滚动 → 启动 SSE/轮询 ──
+
+  function init() {
+    fetchLogs(0).then(function () {
+      scrollToBottom();
+      connectSSE();
+    }).catch(function () {
+      startLogPolling();
+      connectSSE();
+    });
+
+    startPolling();
+  }
+
+  init();
 
 })();
