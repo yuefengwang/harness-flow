@@ -20,9 +20,25 @@
                 <td>{{ t.updated_at }}</td>
                 <td class="actions">
                     <a href="/tasks/{{ t.id }}/console" class="btn">对话</a>
+                    {% if t.status == "Finished" %}
+                        {% if t.deploy_status == "idle" %}
+                        <button class="btn-success" hx-post="/tasks/{{ t.id }}/deploy"
+                                hx-target="#task-list" hx-swap="outerHTML">部署</button>
+                        {% elif t.deploy_status == "deploying" %}
+                        <span class="status-deploying">部署中...</span>
+                        {% elif t.deploy_status == "deployed" %}
+                        <span class="status-deployed">已部署</span>
+                        <a href="/tasks/{{ t.id }}">日志</a>
+                        {% elif t.deploy_status == "deploy_failed" %}
+                        <span class="status-failed">部署失败</span>
+                        <button class="btn-success" hx-post="/tasks/{{ t.id }}/deploy"
+                                hx-target="#task-list" hx-swap="outerHTML">重试</button>
+                        {% endif %}
+                    {% else %}
                     <button hx-post="/tasks/{{ t.id }}/advance"
                             hx-target="#task-list"
                             hx-swap="outerHTML">推进</button>
+                    {% endif %}
                     <button class="danger"
                             hx-post="/tasks/{{ t.id }}/remove"
                             hx-target="#task-list"

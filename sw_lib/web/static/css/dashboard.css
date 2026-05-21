@@ -550,3 +550,25 @@ h3 {
     padding: 0.25rem 0;
     font-size: 0.8rem;
 }
+
+/* Deploy status */
+.status-deploying { color: #d29922; font-style: italic; }
+.status-deployed { color: #3fb950; font-weight: bold; }
+.status-failed { color: #f85149; }
+.btn-success { background: #3fb950; color: #fff; border: none; padding: 0.3em 0.8em; border-radius: 4px; cursor: pointer; }
+.btn-success:hover { opacity: 0.85; }
+.deploy-section { margin-top: 2em; }
+.deploy-section h3 { margin-bottom: 0.5em; }
+
+/* Deploy status */
+.status-deploying { color: var(--warning); font-style: italic; }
+.status-deployed { color: var(--success); font-weight: bold; }
+.status-failed { color: var(--danger); }
+.btn-success {
+    background: var(--success); color: #fff;
+    border: none; padding: 0.3em 0.8em;
+    border-radius: 4px; cursor: pointer;
+}
+.btn-success:hover { opacity: 0.85; }
+.deploy-section { margin-top: 2em; }
+.deploy-section h3 { margin-bottom: 0.5em; }

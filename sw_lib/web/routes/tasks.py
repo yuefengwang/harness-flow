@@ -74,11 +74,17 @@ async def task_detail(request: Request, name: str):
     if log_file.exists():
         log_content = log_file.read_text(encoding="utf-8")[-5000:]
 
+    deploy_log = ""
+    deploy_log_file = task_dir / ".deploy_log"
+    if deploy_log_file.exists():
+        deploy_log = deploy_log_file.read_text(encoding="utf-8")[-5000:]
+
     return templates.TemplateResponse("detail.html", {
         "request": request,
         "task": state,
         "stage_files": stage_files,
         "log_content": log_content,
+        "deploy_log": deploy_log,
         "stage_labels": dict(zip(STAGES, STAGE_NAMES)),
     })
 

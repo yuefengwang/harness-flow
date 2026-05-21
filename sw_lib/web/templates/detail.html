@@ -47,4 +47,11 @@
     <h3>日志 (最近 5000 字符)</h3>
     <pre class="log-viewer">{{ log_content }}</pre>
 </div>
+
+{% if deploy_log %}
+<div class="detail-card deploy-section">
+    <h3>部署日志</h3>
+    <pre class="log-viewer">{{ deploy_log }}</pre>
+</div>
+{% endif %}
 {% endblock %}

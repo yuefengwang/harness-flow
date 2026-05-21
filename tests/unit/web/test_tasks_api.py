@@ -439,3 +439,90 @@ def test_full_lifecycle_smoke(client, clean_engine_mgr):
         for d in [task_dir, trash_dir]:
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
+
+
+# ── Deploy Tests ──
+
+class TestDeploy:
+    """部署功能测试"""
+
+    @pytest.fixture(autouse=True)
+    def setup_finished_task(self):
+        name = "web-deploy-test"
+        task_dir = TASKS / name
+        trash_dir = TASKS / ".trash" / name
+        target = TASKS.parent / "repo" / name
+        for d in [task_dir, trash_dir, target]:
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
+        _service.create_task(name, task_type="feature", target_dir=str(target))
+        st = read_state(name)
+        st["stage_status"] = "Finished"
+        write_state(name, st)
+        from sw_lib.core.state import upsert_task_summary
+        upsert_task_summary(name, stage_status="Finished")
+        yield name
+        for d in [task_dir, trash_dir, target]:
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+
+    def test_deploy_on_finished_task(self, setup_finished_task, client):
+        name = setup_finished_task
+        resp = client.post(f"/tasks/{name}/deploy")
+        assert resp.status_code == 200
+        ct = resp.headers.get("content-type", "")
+        assert "text/html" in ct
+        # deploy_status may be "deploying" or "deployed" (agent may finish quickly in tests)
+        st = read_state(name)
+        assert st["deploy_status"] in ("deploying", "deployed", "deploy_failed")
+
+    def test_deploy_on_unfinished_task(self, client):
+        name = "web-deploy-pending"
+        task_dir = TASKS / name
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        try:
+            _service.create_task(name, task_type="feature")
+            resp = client.post(f"/tasks/{name}/deploy")
+            assert resp.status_code == 400
+            assert "未完成" in resp.text or "无法" in resp.text
+        finally:
+            if task_dir.exists():
+                shutil.rmtree(task_dir, ignore_errors=True)
+
+    def test_deploy_already_deploying(self, setup_finished_task, client):
+        name = setup_finished_task
+        st = read_state(name)
+        st["deploy_status"] = "deploying"
+        write_state(name, st)
+        resp = client.post(f"/tasks/{name}/deploy")
+        assert resp.status_code == 400
+        assert "正在" in resp.text or "进行中" in resp.text
+
+    def test_deploy_missing_target_dir(self, setup_finished_task, client):
+        name = setup_finished_task
+        st = read_state(name)
+        st["target_dir"] = "/nonexistent/path999"
+        write_state(name, st)
+        resp = client.post(f"/tasks/{name}/deploy")
+        assert resp.status_code == 400
+
+    def test_deploy_button_visible_for_finished(self, setup_finished_task, client):
+        name = setup_finished_task
+        resp = client.get("/tasks/table")
+        assert f'hx-post="/tasks/{name}/deploy"' in resp.text
+
+    def test_deploy_button_hidden_for_pending(self, client):
+        name = "web-deploy-visible-test"
+        task_dir = TASKS / name
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        try:
+            _service.create_task(name, task_type="feature")
+            resp = client.get("/tasks/table")
+            assert f'hx-post="/tasks/{name}/deploy"' not in resp.text
+            assert "推进" in resp.text
+        finally:
+            if task_dir.exists():
+                shutil.rmtree(task_dir, ignore_errors=True)
