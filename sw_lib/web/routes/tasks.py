@@ -16,9 +16,6 @@ from ...core.config import STAGES, STAGE_NAMES, TASKS
 import threading
 from sw_lib.agents.base import AgentFactory
 from sw_lib.core.config import resolve_agent_type, resolve_agent_model
-import threading
-from sw_lib.agents.base import AgentFactory
-from sw_lib.core.config import resolve_agent_type, resolve_agent_model
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -135,55 +132,6 @@ async def task_restore(name: str):
         return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
-
-
-@router.post("/tasks/{name}/deploy")
-async def task_deploy(name: str):
-    try:
-        st = _service.deploy_task(name)
-    except TaskError as e:
-        return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
-
-    target_dir = st.get("target_dir", "")
-    threading.Thread(
-        target=_run_deploy_agent,
-        args=(name, target_dir),
-        daemon=True,
-    ).start()
-    return HTMLResponse(content=_task_table_html())
-
-
-def _run_deploy_agent(name: str, target_dir: str):
-    from sw_lib.core.utils import now
-    from sw_lib.core.config import TASKS
-    deploy_log_path = TASKS / name / ".deploy_log"
-    def log(msg):
-        with open(deploy_log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{now()}] {msg}\n")
-    try:
-        log(f"开始部署: {target_dir}")
-        agent_type = resolve_agent_type("03-coding")
-        model_name = resolve_agent_model("03-coding")
-        context = f"进入 {target_dir}，检测项目类型并启动服务。"
-        callbacks = {"add_log": lambda s, m: log(f"[{s}] {m}"), "is_running": lambda: True, "on_complete": lambda: None, "on_ask_user": lambda q, r: r.put([""] * len(q))}
-        agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
-        agent.start()
-        if hasattr(agent, 'send'):
-            agent.send(context, is_system=True)
-        from sw_lib.agents.pty import PtyAgent
-        import threading as _th
-        if isinstance(agent, PtyAgent):
-            _th.Thread(target=agent.reader_loop, daemon=True).start()
-        if hasattr(agent, 'wait'):
-            agent.wait()
-        log("部署完成")
-        _service.complete_deploy(name, success=True)
-    except Exception as e:
-        log(f"部署失败: {e}")
-        try:
-            _service.complete_deploy(name, success=False)
-        except Exception:
-            pass
 
 
 @router.post("/tasks/{name}/deploy")
