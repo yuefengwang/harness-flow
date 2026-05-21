@@ -207,8 +207,8 @@ def resolve_agent_model(stage: str, agent_override: Optional[str] = None) -> str
     if agent_override == "opencode": return "opencode"
     if agent_override and agent_override not in ("N/A", ""): return agent_override
 
-    # 5. 错误抛出
-    raise ValueError(f"无法为阶段 '{stage}' (角色 ID: {role_id}) 找到有效的模型配置。")
+    # 5. 完全匹配不到时的最终兜底
+    return "gemini-2.0-flash"
 
 def get_tools_for_stage(stage: str) -> List[str]:
     """获取当前阶段允许的工具列表"""

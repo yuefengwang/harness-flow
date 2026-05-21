@@ -91,7 +91,7 @@ async def task_create(
 ):
     try:
         _service.create_task(name, task_type=task_type, context=context or "")
-        return _task_table_html()
+        return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
 
@@ -108,7 +108,7 @@ async def task_advance(name: str):
                 status_code=400,
             )
         _service.advance_stage(name)
-        return _task_table_html()
+        return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
 
@@ -117,7 +117,7 @@ async def task_advance(name: str):
 async def task_remove(name: str):
     try:
         _service.remove_task(name)
-        return _task_table_html()
+        return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
 
@@ -126,7 +126,7 @@ async def task_remove(name: str):
 async def task_restore(name: str):
     try:
         _service.restore_task(name)
-        return _task_table_html()
+        return HTMLResponse(content=_task_table_html())
     except TaskError as e:
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
 
@@ -135,7 +135,10 @@ def _task_table_html() -> str:
     """渲染任务列表 HTML 片段"""
     data = _get_task_list_data()
     lines = []
-    lines.append('<div id="task-list">')
+    lines.append('<div id="task-list"'
+                 ' hx-get="/tasks/table"'
+                 ' hx-trigger="every 10s"'
+                 ' hx-swap="outerHTML">')
 
     if data["active_tasks"]:
         lines.append("<h3>活跃任务</h3>")

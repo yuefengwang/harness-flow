@@ -52,8 +52,21 @@ def sanitize_name(name: str) -> str:
     """清理任务名: 移除 macOS 下 Python 3.9 的 surrogate 字符, 只保留安全字符"""
     # 处理 surrogate escape (macOS Python 3.9 已知问题)
     name = name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-    # 只保留 ASCII 字母数字 + 短横 + 下划线 + 点
-    safe = "".join(c for c in name if c.isascii() and (c.isalnum() or c in "-_."))
+    # 空白字符替换为短横，再只保留 ASCII 字母数字 + 短横 + 下划线 + 点
+    name = "".join("-" if c.isspace() else c for c in name)
+    # 合并连续短横并过滤不安全字符
+    safe_chars = []
+    prev_dash = False
+    for c in name:
+        if c.isascii() and (c.isalnum() or c in "-_."):
+            if c == '-':
+                if not prev_dash:
+                    safe_chars.append(c)
+                prev_dash = True
+            else:
+                safe_chars.append(c)
+                prev_dash = False
+    safe = "".join(safe_chars)
     return safe.strip("-_. ") or "task"
 
 

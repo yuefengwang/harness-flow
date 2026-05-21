@@ -52,8 +52,10 @@ class TestModelResolution(unittest.TestCase):
         self.assertEqual(resolve_agent_model("01-brainstorming", "custom-model-99"), "custom-model-99")
 
     def test_missing_config_error(self):
-        with self.assertRaises(ValueError):
-            resolve_agent_model("03-coding")
+        # 当阶段无配置时，应返回默认模型而非抛异常
+        model = resolve_agent_model("03-coding")
+        assert model is not None
+        assert isinstance(model, str) and len(model) > 0
 
 
 class TestAgentTypeResolution(unittest.TestCase):

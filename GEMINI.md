@@ -82,6 +82,45 @@ python3 -m pytest tests/unit/ -v       # 全量 44 tests
 | SSE `StreamingResponse` 无法被 TestClient 消费 body | 分拆测试：路由注册测一次，session 逻辑测一次 |
 | `read_state()` 在 `state.py` 中，非 `config.py` | 导入路径确认 |
 
+## Generated Project Pattern: Spring Boot + Hexagonal (repo/cccc)
+
+A reference example of a greenfield Spring Boot 3 project generated under `repo/`. Useful as a template for future Java code generation tasks.
+
+**Project**: `repo/cccc/` — Hello World Web Service
+**Stack**: Java 21 + Spring Boot 3.3.6 + Maven + JUnit 5
+**Architecture**: Hexagonal (Domain → Application Port → Application Service → Infrastructure)
+
+```
+repo/cccc/
+├── pom.xml                              # Spring Boot 3.3.6 parent, Java 21
+├── Dockerfile                           # Multi-stage: maven:3.9-eclipse-temurin-21 build, eclipse-temurin:21-jre runtime
+├── src/main/java/com/harnessflow/cccc/
+│   ├── CcccApplication.java             # @SpringBootApplication entry
+│   ├── domain/model/Greeting.java       # Domain record (zero Spring imports)
+│   ├── application/port/in/GreetingUseCase.java  # Input port interface
+│   ├── application/service/GreetingService.java  # Pure logic use case impl
+│   └── infrastructure/
+│       ├── config/GreetingBeanConfig.java        # @Configuration to wire domain beans
+│       └── web/GreetingController.java           # @RestController (constructor injection)
+├── src/main/resources/application.yml
+└── src/test/java/com/harnessflow/cccc/
+    ├── CcccApplicationTests.java        # @SpringBootTest integration (3 tests)
+    └── application/service/GreetingServiceTest.java  # Pure unit test (4 tests)
+```
+
+**Key decisions**:
+- Domain/Application layers MUST have **zero Spring imports**; beans are registered via Infrastructure `@Configuration`
+- Use Java `record` for immutable domain models
+- Constructor injection only (no `@Autowired`)
+- Multi-stage Dockerfile produces slim JRE image
+- Test strategy: unit test for pure logic + `@SpringBootTest(webEnvironment = RANDOM_PORT)` for integration
+
+**Validation commands**:
+```bash
+cd repo/cccc && mvn clean verify     # compile + test + package
+cd repo/cccc && docker build -t cccc-hello .  # (requires Docker Hub access)
+```
+
 ## Cross-Reference Index
 
 | When you need... | See |

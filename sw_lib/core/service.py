@@ -291,19 +291,21 @@ class TaskService:
     def advance_stage(self, name: str) -> Dict[str, Any]:
         """
         执行阶段推进逻辑。
-        推进后状态默认为 'pending'，等待用户进入 monitor 或启动 Agent。
-        
-        Returns:
-            更新后的状态字典
+        若已是最后阶段 (archive)，标记为 Finished。
+        否则推进到下一阶段，状态默认为 'pending'。
         """
         st = self.get_task_state(name)
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
         
         if idx >= len(STAGES) - 1:
-            raise TaskError("任务已是最后阶段，无法继续推进")
+            st["stage_status"] = "Finished"
+            st["updated_at"] = now()
+            write_state(name, st)
+            upsert_task_summary(name, stage_status="Finished")
+            sw_log(name, "🏁 任务已完成 (Finished)", "sw")
+            return st
 
-        # 自动勾选 Gate（advance = 用户确认）
         from .engine import _auto_check_gate
         _auto_check_gate(name, cur_stage)
 
@@ -319,7 +321,7 @@ class TaskService:
         
         upsert_task_summary(name,
             stage=next_stage, stage_idx=next_idx, stage_status="pending")
-              
+               
         sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
         return st
 
