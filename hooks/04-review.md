@@ -27,7 +27,7 @@
 
 ## hook-04-06: Review Decision & Reroute Gate
 - **When**: post (before stage exit)
-- **Rule**: review must classify outcome into exactly one routing path
+- **Rule**: review must classify outcome into exactly one routing path. **Route 决策必须通过 ask_user 工具与用户交互确认** — agent 不得自行填写 Route 值，必须向用户汇报审查结论并请求选择路由方向。
 - **Decision Tree**:
 
 ```

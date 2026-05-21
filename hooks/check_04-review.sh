@@ -10,15 +10,17 @@ echo "[Hard Check] 04-review 门禁..."
 # Security audit (existing)
 grep -q "## Security" "$FILE" || { echo "❌ 缺少 Security 审计"; exit 1; }
 
-# Route field must be filled and valid
-ROUTE_LINE=$(grep '\*\*Route\*\*' "$FILE" || true)
+# Route field must be filled and valid.
+# 只匹配模板格式的行（以 "- **Route**: `" 开头），避免匹配 agent 输出中
+# 的其他 **Route** 引用。使用 -m 1 确保只取第一条匹配。
+ROUTE_LINE=$(grep -m 1 '^-\s*\*\*Route\*\*:\s*`' "$FILE" || true)
 if [ -z "$ROUTE_LINE" ]; then
-    echo "❌ 缺少 **Route** 字段"
+    echo "❌ 缺少 **Route** 字段（格式: - **Route**: \`目标阶段\`）"
     exit 1
 fi
 
-# Extract route value from backtick-quoted string: **Route**: `05-Archive`
-ROUTE_VAL=$(echo "$ROUTE_LINE" | sed -n 's/.*`\([^`]*\)`.*/\1/p')
+# 从反引号中提取 Route 值: - **Route**: `05-Archive`
+ROUTE_VAL=$(echo "$ROUTE_LINE" | sed -n 's/^.*`\([^`]*\)`.*$/\1/p')
 if [ -z "$ROUTE_VAL" ]; then
     echo "❌ **Route** 字段值不能为空（格式: **Route**: \`目标阶段\`）"
     exit 1
