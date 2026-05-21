@@ -172,8 +172,16 @@ class OutputExtractor:
         # 合并策略：如果已有 AI Output 标记则替换，否则在 Gate 前或末尾插入
         marker = "\n\n## 🤖 AI Output\n"
         if marker in existing:
-            parts = existing.split(marker)
-            new_content = parts[0] + marker + output
+            parts = existing.split(marker, 1)
+            after = parts[1] if len(parts) > 1 else ""
+            gate_pos = after.find("\n## Gate")
+            if gate_pos >= 0:
+                preserved = after[gate_pos:]
+            elif after.startswith("## Gate"):
+                preserved = after
+            else:
+                preserved = ""
+            new_content = parts[0] + marker + output + ("\n" + preserved if preserved else "")
         else:
             gate_marker = "\n## Gate"
             if gate_marker in existing:

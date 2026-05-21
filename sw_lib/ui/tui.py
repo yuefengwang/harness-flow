@@ -551,7 +551,6 @@ class MonitorTUI:
         self.state.log_scroll_offset = 0
         
         sw_log(self.state.name, msg[:500], source)
-        self._refresh_display()
 
     def _on_ask_user(self, questions: List[Dict[str, Any]], res_queue: queue.Queue):
         """引擎回调：收到结构化提问"""
@@ -598,12 +597,6 @@ class MonitorTUI:
         return True, ""
 
     def _dispatch(self, cmd: str):
-        """处理经过验证的完整指令"""
-        cmd = cmd.strip()
-        if not cmd: return
-        self.state.error_msg = ""
-        self._refresh_display()
-
         if cmd == "/q":
             self.running = False
             return
