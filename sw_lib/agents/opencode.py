@@ -35,6 +35,15 @@ from .base import BaseAgent
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+# opencode stderr 中可识别的致命错误模式 — 匹配到则立即终止等待
+_FATAL_STDERR_PATTERNS: List[re.Pattern] = [
+    re.compile(r"AI_APICallError"),
+    re.compile(r"Rate limit exceeded", re.IGNORECASE),
+    re.compile(r"Insufficient balance", re.IGNORECASE),
+    re.compile(r"Unauthorized", re.IGNORECASE),
+    re.compile(r"APIError", re.IGNORECASE),
+]
+
 
 class OpenCodeAgent(BaseAgent):
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode"):
@@ -52,11 +61,12 @@ class OpenCodeAgent(BaseAgent):
         self._reader_thread = None
         self._lock = threading.RLock()  # 使用递归锁，防止同一线程内的死lock
         self._no_output_timeout = float(os.environ.get("SW_OPENCODE_NO_OUTPUT_TIMEOUT", "180"))
+        self._startup_timeout = float(os.environ.get("SW_OPENCODE_STARTUP_TIMEOUT", "30"))
 
         self._env = self._load_env()
 
     def _load_env(self):
-        """从凭证文件加载环境变量"""
+        """从凭证文件加载环境变量，并清理可能导致 SSL 问题的无效变量"""
         import yaml
         env = os.environ.copy()
         paths = [
@@ -77,6 +87,13 @@ class OpenCodeAgent(BaseAgent):
                             env.update({str(k): str(v) for k, v in data.items()})
                 except Exception:
                     continue
+
+        cert_path = env.get("NODE_EXTRA_CA_CERTS")
+        if cert_path:
+            cert_file = Path(cert_path)
+            if not cert_file.exists() or cert_file.stat().st_size == 0:
+                env.pop("NODE_EXTRA_CA_CERTS", None)
+
         return env
 
     def _close_master(self):
@@ -356,6 +373,8 @@ class OpenCodeAgent(BaseAgent):
         agent_text_parts = []
         last_output_at = {"value": time.monotonic()}
         timed_out = {"value": False}
+        first_event_received = {"value": False}
+        fatal_error = {"value": None}
 
         # 启动 stderr 读取线程
         def _read_stderr(p):
@@ -364,10 +383,13 @@ class OpenCodeAgent(BaseAgent):
                     last_output_at["value"] = time.monotonic()
                     err_msg = _ANSI_ESCAPE_RE.sub("", line).strip()
                     if err_msg:
-                        # 过滤掉一些常见的证书警告，避免干扰
                         if "ca-bundle.crt" in err_msg and "load failed" in err_msg:
                             continue
                         self._add_log("error", f"opencode stderr: {err_msg}")
+                        for pattern in _FATAL_STDERR_PATTERNS:
+                            if pattern.search(err_msg):
+                                fatal_error["value"] = err_msg[:200]
+                                break
             except Exception:
                 pass
 
@@ -375,7 +397,24 @@ class OpenCodeAgent(BaseAgent):
 
         def _watchdog():
             while self.running and proc.poll() is None:
-                if time.monotonic() - last_output_at["value"] > self._no_output_timeout:
+                elapsed = time.monotonic() - last_output_at["value"]
+                if fatal_error["value"]:
+                    timed_out["value"] = True
+                    self._add_log("error", f"opencode API 致命错误: {fatal_error['value']}")
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    break
+                if not first_event_received["value"] and elapsed > self._startup_timeout:
+                    timed_out["value"] = True
+                    self._add_log("error", f"opencode 启动超时 ({int(self._startup_timeout)}s 无事件)，已终止")
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    break
+                if elapsed > self._no_output_timeout:
                     timed_out["value"] = True
                     self._add_log("error", f"opencode {int(self._no_output_timeout)} 秒无输出，已终止本次请求")
                     try:
@@ -388,7 +427,6 @@ class OpenCodeAgent(BaseAgent):
         threading.Thread(target=_watchdog, daemon=True).start()
 
         try:
-            # 直接迭代 stdout 即可获取行
             for line in proc.stdout:
                 last_output_at["value"] = time.monotonic()
                 if not self.running:
@@ -401,11 +439,11 @@ class OpenCodeAgent(BaseAgent):
 
                 event = self._parse_json_line(line)
                 if event is None:
-                    # 如果不是 JSON，记录到 sw 日志
                     if not line.startswith("{"):
                         self._add_log("sw", f"opencode stdout: {line}")
                     continue
 
+                first_event_received["value"] = True
                 self._handle_event(event, agent_text_parts, proc=proc, sent_message=message)
 
         except Exception as e:

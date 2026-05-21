@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Request, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from ...core.config import STAGES, STAGE_NAMES, TASKS
@@ -41,6 +41,25 @@ async def console_page(request: Request, name: str):
         "task": st,
         "log_content": log_content,
         "stage_labels": dict(zip(STAGES, STAGE_NAMES)),
+    })
+
+
+_STAGE_LABELS = dict(zip(STAGES, STAGE_NAMES))
+
+
+@router.get("/tasks/{name}/state")
+async def task_state(name: str):
+    try:
+        st = _service.get_task_state(name)
+    except TaskError:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    stage = st.get("stage", "")
+    return JSONResponse({
+        "stage": stage,
+        "stage_label": _STAGE_LABELS.get(stage, stage),
+        "stage_status": st.get("stage_status", "pending"),
+        "agent_status": st.get("agent_status", "idle"),
     })
 
 

@@ -39,9 +39,6 @@
                                 hx-target="#task-list" hx-swap="outerHTML">重试</button>
                         {% endif %}
                     {% else %}
-                    <button hx-post="/tasks/{{ t.id }}/advance"
-                            hx-target="#task-list"
-                            hx-swap="outerHTML">推进</button>
                     {% endif %}
                     <button class="danger"
                             hx-post="/tasks/{{ t.id }}/remove"

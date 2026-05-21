@@ -20,6 +20,30 @@
   var pendingQIdx = 0;
   var sse = null;
   var reconnectTimer = null;
+  var pollTimer = null;
+
+  // ── 2 秒轮询：刷新阶段名称和状态 ──
+
+  function startPolling() {
+    pollTaskState();
+    pollTimer = setInterval(pollTaskState, 2000);
+  }
+
+  function pollTaskState() {
+    fetch("/tasks/" + taskName + "/state")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) return;
+        var stageEl = document.querySelector(".console-stage");
+        if (stageEl && data.stage_label) {
+          stageEl.textContent = data.stage_label;
+        }
+        if (data.stage_status) {
+          setStatus(data.stage_status);
+        }
+      })
+      .catch(function () {});
+  }
 
   // ── 日志渲染 ──
 
@@ -284,5 +308,8 @@
       sendMessage();
     }
   });
+
+  // ── 启动 2 秒轮询 ──
+  startPolling();
 
 })();

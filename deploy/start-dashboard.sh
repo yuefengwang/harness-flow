@@ -13,6 +13,7 @@ PID_FILE="$PROJECT_ROOT/.dashboard.pid"
 CADDY_PID_FILE="$PROJECT_ROOT/.caddy.pid"
 CF_PID_FILE="$PROJECT_ROOT/.cloudflared.pid"
 CF_URL_FILE="$PROJECT_ROOT/.cloudflared.url"
+CF_MONITOR_PID_FILE="$PROJECT_ROOT/.cloudflared-monitor.pid"
 
 CADDYFILE="$SCRIPT_DIR/Caddyfile"
 DASHBOARD_HOST="127.0.0.1"
@@ -158,11 +159,36 @@ start_caddy() {
     fi
 }
 
+# ── 检查 Cloudflare Tunnel 是否健康 ──
+check_tunnel_healthy() {
+    local url=""
+    [[ -f "$CF_URL_FILE" ]] && url=$(cat "$CF_URL_FILE")
+    if [[ -z "$url" ]]; then
+        return 1
+    fi
+    # DNS 解析检查
+    if ! nslookup "$(echo "$url" | sed 's|https://||')" > /dev/null 2>&1; then
+        return 1
+    fi
+    # HTTP 可达性检查
+    if ! curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 "$url" 2>/dev/null | grep -qE '^(2|3|4)'; then
+        return 1
+    fi
+    return 0
+}
+
 # ── 启动 Cloudflare Tunnel ──
 start_cloudflared() {
     if [[ -f "$CF_PID_FILE" ]] && kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
-        warn "Cloudflare Tunnel 已在运行 (PID: $(cat "$CF_PID_FILE"))"
-        return 0
+        if check_tunnel_healthy; then
+            warn "Cloudflare Tunnel 已在运行 (PID: $(cat "$CF_PID_FILE"))"
+            return 0
+        else
+            warn "Tunnel 进程运行中但连接已断开，正在重启..."
+            kill "$(cat "$CF_PID_FILE")" 2>/dev/null || true
+            rm -f "$CF_PID_FILE" "$CF_URL_FILE"
+            sleep 1
+        fi
     fi
 
     log "启动 Cloudflare Tunnel (→ ${DASHBOARD_HOST}:${DASHBOARD_PORT})..."
@@ -200,6 +226,35 @@ start_cloudflared() {
     fi
 }
 
+# ── 后台监听隧道健康，自动恢复 ──
+monitor_tunnel() {
+    echo $$ > "$CF_MONITOR_PID_FILE"
+    local check_interval="${TUNNEL_CHECK_INTERVAL:-60}"
+
+    log "隧道健康监控已启动 (检查间隔: ${check_interval}s)"
+
+    while true; do
+        sleep "$check_interval"
+
+        # 检查 cloudflared 进程是否存在
+        if [[ ! -f "$CF_PID_FILE" ]] || ! kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
+            warn "Tunnel 进程丢失，正在重新创建..."
+            start_cloudflared
+            continue
+        fi
+
+        # 健康检查
+        if ! check_tunnel_healthy; then
+            warn "Tunnel 连接异常，正在自动恢复..."
+            # 杀掉旧进程
+            kill "$(cat "$CF_PID_FILE")" 2>/dev/null || true
+            rm -f "$CF_PID_FILE" "$CF_URL_FILE"
+            sleep 2
+            start_cloudflared
+        fi
+    done
+}
+
 # ── 停止所有服务 ──
 stop_all() {
     log "停止服务..."
@@ -220,6 +275,15 @@ stop_all() {
             log "Caddy 已停止 (PID: $pid)"
         fi
         rm -f "$CADDY_PID_FILE"
+    fi
+
+    if [[ -f "$CF_MONITOR_PID_FILE" ]]; then
+        local pid=$(cat "$CF_MONITOR_PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            log "Tunnel 监控 已停止 (PID: $pid)"
+        fi
+        rm -f "$CF_MONITOR_PID_FILE"
     fi
 
     if [[ -f "$CF_PID_FILE" ]]; then
@@ -282,6 +346,7 @@ case "${1:-start}" in
         start_dashboard
         start_caddy
         start_cloudflared
+        monitor_tunnel &
         echo ""
         show_status
         echo ""
@@ -292,6 +357,7 @@ case "${1:-start}" in
         check_deps tunnel
         start_dashboard
         start_cloudflared
+        monitor_tunnel &
         echo ""
         show_status
         echo ""
