@@ -28,7 +28,11 @@
                         <span class="status-deploying">部署中...</span>
                         {% elif t.deploy_status == "deployed" %}
                         <span class="status-deployed">已部署</span>
+                        {% if t.deploy_url %}
+                        <a href="{{ t.deploy_url }}" target="_blank" class="deploy-url">{{ t.deploy_url }}</a>
+                        {% else %}
                         <a href="/tasks/{{ t.id }}">日志</a>
+                        {% endif %}
                         {% elif t.deploy_status == "deploy_failed" %}
                         <span class="status-failed">部署失败</span>
                         <button class="btn-success" hx-post="/tasks/{{ t.id }}/deploy"

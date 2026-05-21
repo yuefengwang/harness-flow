@@ -162,6 +162,7 @@ class TaskService:
                 "updated_at": st.get("updated_at", "N/A"),
                 "removed_at": st.get("removed_at", "N/A") if from_trash else None,
                 "deploy_status": st.get("deploy_status", "idle"),
+                "deploy_url": st.get("deploy_url", ""),
             })
         return results
 
@@ -356,18 +357,13 @@ class TaskService:
 
         return st
 
-    def complete_deploy(self, name: str, success: bool):
-        """
-        完成部署：标记部署结果为成功或失败。
-
-        Args:
-            name: 任务名称
-            success: True 表示部署成功，False 表示部署失败
-        """
+    def complete_deploy(self, name: str, success: bool, deploy_url: str = ""):
+        """完成部署：标记部署结果为成功或失败，可选记录服务地址"""
         st = self.get_task_state(name)
-
         st["deploy_status"] = "deployed" if success else "deploy_failed"
         st["updated_at"] = now()
+        if deploy_url:
+            st["deploy_url"] = deploy_url
         write_state(name, st)
         upsert_task_summary(name, deploy_status=st["deploy_status"])
 

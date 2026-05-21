@@ -85,6 +85,7 @@ async def task_detail(request: Request, name: str):
         "stage_files": stage_files,
         "log_content": log_content,
         "deploy_log": deploy_log,
+        "deploy_url": state.get("deploy_url", ""),
         "stage_labels": dict(zip(STAGES, STAGE_NAMES)),
     })
 
@@ -156,18 +157,33 @@ async def task_deploy(name: str):
 
 
 def _run_deploy_agent(name: str, target_dir: str):
+    import re
     from sw_lib.core.utils import now
     from sw_lib.core.config import TASKS
     deploy_log_path = TASKS / name / ".deploy_log"
+    agent_output_lines = []
+
     def log(msg):
         with open(deploy_log_path, "a", encoding="utf-8") as f:
             f.write(f"[{now()}] {msg}\n")
+
     try:
         log(f"开始部署: {target_dir}")
         agent_type = resolve_agent_type("03-coding")
         model_name = resolve_agent_model("03-coding")
-        context = f"进入 {target_dir}，检测项目类型并启动服务。"
-        callbacks = {"add_log": lambda s, m: log(f"[{s}] {m}"), "is_running": lambda: True, "on_complete": lambda: None, "on_ask_user": lambda q, r: r.put([""] * len(q))}
+        context = (
+            "## 部署任务\n\n"
+            f"进入项目目录 {target_dir}，检测项目类型并启动服务。\n\n"
+            "完成部署后，请以以下格式输出服务访问地址：\n"
+            "SERVICE_URL: http://host:port\n"
+            "例如: SERVICE_URL: http://localhost:8080\n"
+        )
+        callbacks = {
+            "add_log": lambda s, m: (log(f"[{s}] {m}"), agent_output_lines.append(m)),
+            "is_running": lambda: True,
+            "on_complete": lambda: None,
+            "on_ask_user": lambda q, r: r.put([""] * len(q)),
+        }
         agent = AgentFactory.create(agent_type, callbacks, name, "deploy", -1, model_name)
         agent.start()
         if hasattr(agent, 'send'):
@@ -179,7 +195,15 @@ def _run_deploy_agent(name: str, target_dir: str):
         if hasattr(agent, 'wait'):
             agent.wait()
         log("部署完成")
-        _service.complete_deploy(name, success=True)
+
+        deploy_url = ""
+        for line in agent_output_lines:
+            m = re.search(r'SERVICE_URL:\s*(\S+)', line)
+            if m:
+                deploy_url = m.group(1)
+                log(f"检测到服务地址: {deploy_url}")
+                break
+        _service.complete_deploy(name, success=True, deploy_url=deploy_url)
     except Exception as e:
         log(f"部署失败: {e}")
         try:
@@ -194,7 +218,7 @@ def _task_table_html() -> str:
     lines = []
     lines.append('<div id="task-list"'
                  ' hx-get="/tasks/table"'
-                 ' hx-trigger="every 10s"'
+                 ' hx-trigger="every 2s"'
                  ' hx-swap="outerHTML">')
 
     if data["active_tasks"]:
@@ -214,7 +238,8 @@ def _task_table_html() -> str:
                     actions_html += '<span class="status-deploying">部署中...</span>'
                 elif ds == "deployed":
                     actions_html += '<span class="status-deployed">已部署</span> '
-                    actions_html += f'<a href="/tasks/{t["id"]}">日志</a>'
+                    if t.get("deploy_url"):
+                        actions_html += f'<a href="{t["deploy_url"]}" target="_blank" class="deploy-url">{t["deploy_url"]}</a> '
                 elif ds == "deploy_failed":
                     actions_html += '<span class="status-failed">部署失败</span> '
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重试</button>'

@@ -51,6 +51,9 @@
 {% if deploy_log %}
 <div class="detail-card deploy-section">
     <h3>部署日志</h3>
+    {% if deploy_url %}
+    <p><strong>服务地址：</strong><a href="{{ deploy_url }}" target="_blank">{{ deploy_url }}</a></p>
+    {% endif %}
     <pre class="log-viewer">{{ deploy_log }}</pre>
 </div>
 {% endif %}
