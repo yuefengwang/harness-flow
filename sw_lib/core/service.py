@@ -160,7 +160,8 @@ class TaskService:
                 "stage": st.get("stage", "N/A"),
                 "status": st.get("stage_status", "N/A"),
                 "updated_at": st.get("updated_at", "N/A"),
-                "removed_at": st.get("removed_at", "N/A") if from_trash else None
+                "removed_at": st.get("removed_at", "N/A") if from_trash else None,
+                "deploy_status": st.get("deploy_status", "idle"),
             })
         return results
 
@@ -324,6 +325,51 @@ class TaskService:
                
         sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
         return st
+
+    def deploy_task(self, name: str) -> Dict[str, Any]:
+        """
+        部署任务：将已完成的任务发布到目标目录。
+
+        Args:
+            name: 任务名称
+
+        Returns:
+            更新后的任务状态字典
+        """
+        st = self.get_task_state(name)
+
+        if st.get("stage_status") != "Finished":
+            raise TaskError(f"任务未完成，无法部署: {name}")
+
+        if st.get("deploy_status") == "deploying":
+            raise TaskError(f"任务正在部署中: {name}")
+
+        target_dir = st.get("target_dir", "")
+        if not target_dir or not Path(target_dir).is_dir():
+            raise TaskError(f"目标目录不存在或不可用: {target_dir}")
+
+        st["deploy_status"] = "deploying"
+        st["deploy_at"] = now()
+        st["updated_at"] = now()
+        write_state(name, st)
+        upsert_task_summary(name, deploy_status="deploying")
+
+        return st
+
+    def complete_deploy(self, name: str, success: bool):
+        """
+        完成部署：标记部署结果为成功或失败。
+
+        Args:
+            name: 任务名称
+            success: True 表示部署成功，False 表示部署失败
+        """
+        st = self.get_task_state(name)
+
+        st["deploy_status"] = "deployed" if success else "deploy_failed"
+        st["updated_at"] = now()
+        write_state(name, st)
+        upsert_task_summary(name, deploy_status=st["deploy_status"])
 
 
 _service = TaskService()
