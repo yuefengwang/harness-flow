@@ -13,6 +13,7 @@ from sw_lib.web.engine_manager import WebEngineManager
 from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
 from sw_lib.core.state import read_state, write_state
 from sw_lib.core.service import _service
+from sw_lib.core.config import get_repo_path
 
 
 TEST_TASK = "web-test-task"
@@ -97,6 +98,7 @@ def test_create_task_via_web_form(client):
         shutil.rmtree(task_dir, ignore_errors=True)
     if trash_dir.exists():
         shutil.rmtree(trash_dir, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-001").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-001", ignore_errors=True)
 
     try:
         resp = client.post("/tasks/create", data={
@@ -131,6 +133,8 @@ def test_create_task_via_web_form(client):
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+            (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-001").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-001", ignore_errors=True)
 
 
 def test_create_task_shows_in_list_immediately(client):
@@ -142,6 +146,7 @@ def test_create_task_shows_in_list_immediately(client):
         shutil.rmtree(task_dir, ignore_errors=True)
     if trash_dir.exists():
         shutil.rmtree(trash_dir, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
     try:
         # 创建
@@ -159,6 +164,8 @@ def test_create_task_shows_in_list_immediately(client):
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+            (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
 
 def test_create_task_with_whitespace_name(client):
@@ -205,6 +212,8 @@ class TestTaskAdvance:
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+            (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
         _service.create_task(name, task_type="feature")
         yield name
@@ -213,6 +222,7 @@ class TestTaskAdvance:
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
     def test_advance_blocks_on_unfilled_template(self, setup_task, client):
         """未填充模板时推进应被拒绝"""
@@ -258,6 +268,7 @@ class TestEngineIntegration:
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
         _service.create_task(name, task_type="feature", context="test engine")
         yield name
@@ -266,6 +277,7 @@ class TestEngineIntegration:
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
     def test_engine_start_creates_session(self, setup_task, client, clean_engine_mgr):
         name = setup_task
