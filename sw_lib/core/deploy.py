@@ -29,7 +29,7 @@ from ..web.cloudflared import start_tunnel, stop_tunnel
 class ProjectInfo:
     """项目检测结果"""
     type: str = "python"           # 语言类型 (python | java | node)
-    framework: str = "generic"     # fastapi | flask | django | generic | maven | node
+    framework: str = "generic"     # fastapi | flask | django | generic | maven | vite | nextjs | react-cra | spa | node
     entry: str = ""                # 入口文件路径 (如 "main.py")
     port: int = 8000               # 确定使用的端口
     has_requirements: bool = False # 是否有 requirements.txt
@@ -141,12 +141,31 @@ class DeployRunner:
             except Exception:
                 pass
 
-        # Node.js
+        # Node.js — 进一步检测前端框架类型
         if not info.entry and not info.has_pom_xml and (target / "package.json").is_file():
             info.has_package_json = True
             info.type = "node"
-            info.framework = "node"
             info.entry = "package.json"
+
+            try:
+                pkg = json.loads((target / "package.json").read_text())
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                scripts = pkg.get("scripts", {})
+
+                if "vite" in deps:
+                    info.framework = "vite"
+                elif "next" in deps:
+                    info.framework = "nextjs"
+                elif "react-scripts" in deps:
+                    info.framework = "react-cra"
+                elif "react" in deps or "vue" in deps or "angular" in scripts or "@angular/core" in deps:
+                    info.framework = "spa"
+                elif any("dev" in k or "start" in k or "build" in k for k in scripts):
+                    info.framework = "node-scripts"
+                else:
+                    info.framework = "node"
+            except Exception:
+                info.framework = "node"
 
         return info
 
@@ -187,7 +206,7 @@ class DeployRunner:
                 return False
 
         # Node.js 项目：安装依赖
-        if info.framework == "node":
+        if info.framework in ("node", "vite", "react-cra", "nextjs", "spa", "node-scripts"):
             self._log("Node.js 项目：安装 npm 依赖...")
             try:
                 subprocess.run(
@@ -309,8 +328,40 @@ class DeployRunner:
                 return ["java", "-cp", str(target / "target" / "classes"), info.java_main_class]
             return ["java", "-jar", str(target / "target" / "*.jar")]
 
-        # Node.js 项目
-        if info.framework == "node":
+        # Node.js / 前端框架项目
+        if info.framework in ("vite", "react-cra", "nextjs", "spa", "node-scripts", "node"):
+            target = self.target_dir.resolve()
+
+            # Vite 项目: npx vite --host --port <port>
+            if info.framework == "vite":
+                return ["npx", "vite", "--host", "--port", str(info.port)]
+
+            # Next.js 项目: npx next dev -p <port>
+            if info.framework == "nextjs":
+                return ["npx", "next", "dev", "-p", str(info.port)]
+
+            # CRA 项目: PORT=<port> npm start
+            if info.framework == "react-cra":
+                env = os.environ.copy()
+                env["PORT"] = str(info.port)
+                return ["npm", "start"]
+
+            # SPA / node-scripts: 尝试 npm run dev 或 npm start
+            if info.framework in ("spa", "node-scripts"):
+                try:
+                    pkg = json.loads((target / "package.json").read_text())
+                    scripts = pkg.get("scripts", {})
+                    if "dev" in scripts:
+                        return ["npm", "run", "dev", "--", "--port", str(info.port)]
+                    if "start" in scripts:
+                        env = os.environ.copy()
+                        env["PORT"] = str(info.port)
+                        return ["npm", "start"]
+                except Exception:
+                    pass
+                # Fall through to plain node
+
+            # 纯 Node.js: node <main field> 或 node index.js
             try:
                 pkg = json.loads((target / "package.json").read_text())
                 main = pkg.get("main", "index.js")
