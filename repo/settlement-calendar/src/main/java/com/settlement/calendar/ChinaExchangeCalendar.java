@@ -2,6 +2,8 @@ package com.settlement.calendar;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -62,8 +64,11 @@ public class ChinaExchangeCalendar implements TradingCalendar {
 
         Files.createDirectories(cacheDir);
         Path cacheFile = cacheDir.resolve("calendar-" + year + ".json");
-        String json = mapper.writerWithDefaultPrettyPrinter()
-                .writeValueAsString(fetched.stream().map(LocalDate::toString).toList());
+        ObjectNode root = mapper.createObjectNode();
+        root.put("year", year);
+        ArrayNode daysArray = root.putArray("trading_days");
+        fetched.stream().map(LocalDate::toString).forEach(daysArray::add);
+        String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
         Files.writeString(cacheFile, json);
     }
 
