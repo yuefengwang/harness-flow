@@ -136,6 +136,32 @@ class OpenCodeAgent(BaseAgent):
 
         return cmd
 
+    def _kill_orphaned_servers(self):
+        """清理所有 orphaned opencode serve 进程（端口冲突 + 资源泄漏防护）。
+
+        在启动新 server 之前调用，确保不会积累僵尸进程。
+        注意：仅 kill 非当前 agent 的 serve 进程（通过比对已记录端口）。
+        """
+        import signal
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "opencode serve"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return
+            pids = result.stdout.strip().split("\n")
+            for pid_str in pids:
+                pid = int(pid_str.strip())
+                if pid == os.getpid():
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        except Exception:
+            pass
+
     def _find_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -147,6 +173,9 @@ class OpenCodeAgent(BaseAgent):
         If server startup fails, logs a warning and falls back gracefully
         to non-attached mode (per-message subprocess spawn).
         """
+        # 启动前清理所有遗留的 opencode serve 孤儿进程
+        self._kill_orphaned_servers()
+
         try:
             self._server_port = self._find_free_port()
             self._server_url = f"http://127.0.0.1:{self._server_port}"
@@ -194,7 +223,11 @@ class OpenCodeAgent(BaseAgent):
             return
         try:
             self._server_proc.terminate()
-            self._server_proc.wait(timeout=5)
+            try:
+                self._server_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._server_proc.kill()
+                self._server_proc.wait(timeout=2)
         except Exception:
             try:
                 self._server_proc.kill()
@@ -763,6 +796,8 @@ class OpenCodeAgent(BaseAgent):
         self._current_proc = None
         self._http_session_id = None
         self._stop_server()
+        # 额外安全保障：清理可能残留的孤儿 serve 进程
+        self._kill_orphaned_servers()
 
     def restart(self):
         """重启 Agent（新会话）"""
