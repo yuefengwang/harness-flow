@@ -12,8 +12,32 @@ sw monitor --name=<task-id>
 ## Constraint
 - Never commit unless explicitly asked. Follow Conventional Commits.
 - Never log, print, or commit secrets (API keys, credentials).
-- Do not refactor unrelated code. Surgical updates only.
+- Do not refactor unrelated code. Surgical updates only (遵循 Karpathy 准则).
 - Chinese replies throughout.
+
+## Karpathy AI Coding Principles (核心准则)
+
+本项目遵循 Andrej Karpathy 提倡的 AI 编程四项核心准则，以减少过拟合与过度设计：
+
+### 1. Think Before Coding (三思而后行)
+- **核心理念**：不假设，不隐藏疑惑。
+- **行动计划**：在编码前明确所有假设，如有模糊点必须询问澄清。
+- **权衡分析**：提供多种实现方案并分析优劣，而非盲目选择。
+
+### 2. Simplicity First (简约至上)
+- **核心理念**：用最少的代码解决问题，拒绝过度设计。
+- **范围控制**：严格限制在需求范围内，不添加任何推测性的功能或抽象。
+- **重构导向**：如果 50 行代码能解决 200 行的事，务必重写。
+
+### 3. Surgical Changes (外科手术式改动)
+- **核心理念**：只动必须动的地方，只清理自己产生的垃圾。
+- **风格对齐**：严格匹配现有代码风格，即使你不喜欢。
+- **零干扰**：不改动无关代码、注释或格式。清理因你改动而产生的孤立变量/导入。
+
+### 4. Goal-Driven Execution (目标驱动执行)
+- **核心理念**：定义成功标准，循环验证直至达成。
+- **可验证目标**：将模糊任务转化为可测试的结果（如：编写失败测试 -> 修复 -> 测试通过）。
+- **迭代闭环**：通过强有力的成功标准实现自主迭代，避免陷入“让它工作”的模糊循环。
 
 ## Key Commands
 ```bash
@@ -25,13 +49,13 @@ python3 -m pytest -v       # run tests
 ## Project Layout
 ```
 GEMINI.md                          ← this file (entry point + cross-refs)
-sw                                 ← CLI entry script
+bin/sw                             ← CLI entry script
 sw_lib/                            ← core library (11 modules)
-workflow/templates/                ← stage deliverable templates
-workflow/hooks/                    ← stage guardrails (mandatory checks)
-workspace/STATUS.json                 ← task board
-harness/dispatch.sh                ← worktree dispatch
-harness/config.yaml                ← agent role config
+templates/                         ← stage deliverable templates
+hooks/                             ← stage guardrails (mandatory checks)
+workspace/STATUS.json              ← task board
+bin/dispatch.sh                   ← worktree dispatch
+config/config.yaml                 ← agent role config
 ```
 
 ## Web Console Module (新增)
@@ -120,6 +144,123 @@ repo/cccc/
 cd repo/cccc && mvn clean verify     # compile + test + package
 cd repo/cccc && docker build -t cccc-hello .  # (requires Docker Hub access)
 ```
+
+## Generated Project Pattern: React + FastAPI Mall App (repo/test)
+
+A reference example of a greenfield full-stack web application generated under `repo/`. Useful as a template for future JS+Python code generation tasks.
+
+**Project**: `repo/test/` — Mall (E-commerce App)
+**Stack**: React 18 + React Router 6 + Vite (frontend) | Python FastAPI (backend) | Vitest + React Testing Library + pytest (testing)
+**Architecture**: Minimal single-file backend + component-based frontend with Context API
+
+```
+repo/test/
+├── backend/
+│   ├── main.py               # FastAPI 单文件: 10 mock products + GET /api/products + GET /api/products/{id}
+│   ├── requirements.txt       # fastapi, uvicorn (+ pytest, httpx for test)
+│   └── test_main.py           # pytest: 4 tests (list, detail, 404, product shape)
+├── frontend/
+│   ├── package.json           # Vite + React Router 6 + Vitest + @testing-library/react
+│   ├── vite.config.js         # proxy /api → localhost:8000
+│   ├── index.html
+│   └── src/
+│       ├── main.jsx           # App entry
+│       ├── App.jsx            # React Router: / → HomePage, /product/:id → ProductDetail
+│       ├── App.css            # Global + component styles (~500 lines, responsive grid)
+│       ├── context/
+│       │   └── CartContext.jsx # React Context + useReducer + localStorage persistence
+│       ├── components/
+│       │   ├── Navbar.jsx     # Logo + cart icon + badge count
+│       │   ├── ProductCard.jsx # Image, name, price, "Add to cart" button
+│       │   ├── ProductGrid.jsx # 3-column responsive CSS grid
+│       │   └── CartDrawer.jsx # Side drawer: items, qty ±, total, remove
+│       ├── pages/
+│       │   ├── HomePage.jsx   # Fetch products → ProductGrid
+│       │   └── ProductDetail.jsx # Fetch single product + qty selector
+│       └── __tests__/
+│           └── CartContext.test.jsx # Vitest: 9 tests (add/remove/qty/clear/persistence)
+└── README.md
+```
+
+**Key decisions**:
+- Backend: Single `main.py` for rapid prototyping (方案 A / minimal architecture)
+- Frontend: `React Context + useReducer` for state (no Redux/Zustand)
+- Cart persistence: `localStorage` read/write on every state change (simple, sufficient)
+- Styling: Pure CSS (no Tailwind/MUI) to keep deps minimal
+- CORS: Locked to `http://localhost:5173` via FastAPI CORSMiddleware
+- `node_modules/` and `dist/` artifacts: `dist/` always removed before archiving; `node_modules/` kept in dev
+
+**Validation commands**:
+```bash
+cd repo/test/backend && python -m pytest -v     # 4 tests
+cd repo/test/frontend && npm test                # 9 tests
+cd repo/test/frontend && npm run build           # production build (verify success)
+```
+
+## Pytest Patterns & Test Infrastructure
+
+**Conftest fixtures** (`tests/conftest.py`):
+- `dummy_task`: Creates a temporary task `pytest-dummy-task` under `workspace/tasks/`, writes initial state, yields name for test, then `shutil.rmtree` cleanup. Used by multiple test modules.
+- `agent_callbacks`: Provides no-op callbacks (`add_log`, `is_running`) for agent testing.
+
+**Test structure** (`tests/`):
+```
+tests/
+├── conftest.py              # shared fixtures (dummy_task, agent_callbacks)
+├── unit/                    # unit tests (agents, core, tools, ui, web)
+│   ├── agents/              # test_lifecycle, test_opencode, test_pty
+│   ├── core/                # test_config, test_engine, test_routing
+│   ├── tools/               # test_toolbox
+│   ├── ui/                  # test_tui_utils
+│   └── web/                 # test_console_api, test_engine_manager, test_tasks_api
+├── integration/             # integration tests (test_sw_cli)
+└── e2e/                     # end-to-end tests (test_e2e.sh)
+```
+
+**Key patterns discovered**:
+- `MockAgent` enables full flow simulation without external AI — essential for CI
+- Web tests use `FastAPI TestClient` with `collections.deque`-based SSE polling (avoid `asyncio.Queue` cross-event-loop deadlock)
+- Task cleanup uses `shutil.rmtree` on teardown — safe because task dirs contain no git history
+- `repo/` target dirs must be cleaned in test teardown to avoid cross-test contamination
+
+**Known pitfalls**:
+- `asyncio.Queue` + TestClient = cross-event-loop deadlock → use `collections.deque` + polling
+- `read_state()` lives in `sw_lib/core/state.py`, not `config.py` — wrong import is a common mistake
+- `repo/` directories for dummy tasks accumulate over time — must clean in `pytest`/`module`/`session` scoped fixtures with `autouse=True`
+
+## Generated Project Pattern: Java HelloWorld Maven (repo/helloworld)
+
+A reference example of a minimal Java CLI application generated under `repo/`. Useful as a lightweight Java Maven template.
+
+**Project**: `repo/helloworld/` — Hello World CLI
+**Stack**: Java 25 + Maven 3.9 + JAR packaging
+**Architecture**: Single-class CLI with optional name argument
+
+```
+repo/helloworld/
+├── pom.xml                              # Maven 构建 (JAR + shade plugin)
+└── src/main/java/com/helloworld/
+    └── App.java                         # 主类 (12 lines)
+```
+
+**Key decisions**:
+- Single `App.java` with `main(String[] args)` — reads first arg or defaults to `"World"`
+- Maven `maven-jar-plugin` with `mainClass` configured for executable JAR
+- Java 25 (latest LTS-aligned version available on macOS)
+- No dependencies beyond JDK — zero external jars, minimal footprint
+- Package: `mvn package` → JAR at `target/helloworld-1.0.0.jar`
+
+**Validation commands**:
+```bash
+cd repo/helloworld && mvn clean verify     # compile + test + package
+java -jar repo/helloworld/target/helloworld-1.0.0.jar         # → Hello, World!
+java -jar repo/helloworld/target/helloworld-1.0.0.jar Harness # → Hello, Harness!
+```
+
+**Lessons learned**:
+- Java 25 `java --version` output format differs from Java 21 (2021 vs 2025 era), but Maven handles both identically
+- `mvn package` creates JAR with manifest; `mvn compile` alone is insufficient for `java -jar`
+- Build artifacts (`target/`) must be cleaned before archiving to avoid stale state
 
 ## Cross-Reference Index
 

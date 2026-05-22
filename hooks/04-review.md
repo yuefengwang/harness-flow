@@ -1,13 +1,13 @@
-# 04-Review Hooks
+# 04-Review Hooks (Goal-Driven & Surgical)
 
-## hook-04-01: Impact Analysis
+## hook-04-01: Surgical Impact Analysis (外科手术审计)
 - **When**: during
-- **Rule**: assess side effects on other components
+- **Rule**: assess side effects on other components. **严格检查是否动了无关代码**。
 - **Check**: API contract? Performance? Upstream/downstream?
 
-## hook-04-02: Security Audit
+## hook-04-02: Security & Simplicity Audit
 - **When**: during
-- **Rule**: no secrets, injection risk, or missing validation
+- **Rule**: no secrets, injection risk, or missing validation. **拒绝过度抽象，检查是否有单次使用的多余抽象**。
 - **Check**: all inputs validated, no hardcoded keys
 
 ## hook-04-03: Zero-Memory Review

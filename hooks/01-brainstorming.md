@@ -1,13 +1,13 @@
-# 01-Brainstorming Hooks
+# 01-Brainstorming Hooks (Think Before Coding)
 
-## hook-01-01: Ambiguity Score
+## hook-01-01: Ambiguity Score (三思而后行)
 - **When**: during analysis
-- **Rule**: Score < 8 → block Planning entry
+- **Rule**: Score < 8 → block Planning entry. **不带假设进入下一阶段**。
 - **Check**: goal is single+quantified, terms defined
 
 ## hook-01-02: 3 Interactive Questions
 - **When**: during option selection
-- **Rule**: ≥3 questions, each with ≥2 options + rationale + risk
+- **Rule**: ≥3 questions, each with ≥2 options + rationale + risk. **主动暴露不确定性**。
 - **Check**: template filled with options
 
 ## hook-01-03: Pre-mortem
