@@ -5,10 +5,11 @@
 - **Rule**: Score < 8 → block Planning entry. **不带假设进入下一阶段**。
 - **Check**: goal is single+quantified, terms defined
 
-## hook-01-02: 3 Interactive Questions
+## hook-01-02: 3 Interactive Questions (via ask_user tool)
 - **When**: during option selection
 - **Rule**: ≥3 questions, each with ≥2 options + rationale + risk. **主动暴露不确定性**。
 - **Check**: template filled with options
+- **Tool**: **必须**使用 `ask_user` 工具提问，**禁止**在正文中输出编号选项列表
 
 ## hook-01-03: Pre-mortem
 - **When**: after design proposal

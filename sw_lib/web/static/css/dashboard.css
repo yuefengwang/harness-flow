@@ -653,3 +653,104 @@ h3 {
     background: #2ea043;
     opacity: 0.95;
 }
+
+/* ── Deploy Step Indicators ── */
+.deploy-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 1rem;
+    padding: 0.75rem 0;
+    overflow-x: auto;
+}
+
+.step-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    padding: 0.3rem 0.5rem;
+    border-radius: 4px;
+    background: var(--bg);
+}
+
+.step-item.step-pending {
+    color: var(--text-dim);
+}
+
+.step-item.step-active,
+.step-item.step-进行中 {
+    color: var(--warning);
+    background: rgba(210, 153, 34, 0.1);
+}
+
+.step-item.step-完成,
+.step-item.step-done {
+    color: var(--success);
+    background: rgba(63, 185, 80, 0.1);
+}
+
+.step-icon {
+    font-size: 1rem;
+    font-weight: bold;
+}
+
+.step-connector {
+    width: 1.5rem;
+    height: 1px;
+    background: var(--border);
+    margin: 0 0.25rem;
+    flex-shrink: 0;
+}
+
+.deploy-log-container {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.5rem;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
+.deploy-log-line {
+    padding: 1px 0;
+    word-break: break-all;
+}
+
+.deploy-log-time {
+    color: #484f58;
+    margin-right: 0.5rem;
+}
+
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-left: 0.5rem;
+}
+
+.badge-idle {
+    background: var(--bg);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+}
+
+.badge-success {
+    background: rgba(63, 185, 80, 0.2);
+    color: var(--success);
+}
+
+.badge-error {
+    background: rgba(248, 81, 73, 0.2);
+    color: var(--danger);
+}
+
+.hidden {
+    display: none !important;
+}

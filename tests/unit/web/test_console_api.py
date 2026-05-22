@@ -85,7 +85,7 @@ def test_engine_command_with_session(dummy_task, client, clean_sessions):
 
 
 def test_sse_route_registered(client):
-    sse_routes = [r for r in client.app.routes if hasattr(r, "path") and "/sse" in r.path]
+    sse_routes = [r for r in client.app.routes if hasattr(r, "path") and "/sse" in r.path and "/deploy/" not in r.path]
     assert len(sse_routes) == 1
 
 

@@ -100,22 +100,43 @@ class WriteFileTool(BaseTool):
 
 
 class RunCommandTool(BaseTool):
+    # 单次输出最大字符数（防止 Agent 上下文被冲垮）
+    MAX_OUTPUT_CHARS = 5000
+
     @property
     def name(self) -> str: return "run_command"
     
     @property
-    def description(self) -> str: return "执行 Shell 命令。参数: command (str)。"
+    def description(self) -> str: return (
+        "执行 Shell 命令。参数: command (str), cwd (str, 可选, 工作目录), "
+        "timeout (int, 可选, 超时秒数, 默认 300), "
+        "restricted (bool, 可选, 是否限制修改系统文件, 默认 True)。"
+    )
 
-    def __call__(self, command: str) -> str:
+    def __call__(self, command: str, cwd: Optional[str] = None,
+                 timeout: Optional[int] = None,
+                 restricted: Optional[bool] = None) -> str:
         try:
-            # 禁止 Agent 通过命令行修改状态文件
-            if ".state" in command or "STATUS.json" in command or "sw advance" in command:
-                return "错误: 禁止通过命令行修改系统状态。请使用 /advance 命令。"
+            # 禁止 Agent 在 ROOT 层面修改系统状态文件（仅 restricted=True 时）
+            if restricted is None or restricted:
+                if ".state" in command or "STATUS.json" in command or "sw advance" in command:
+                    return "错误: 禁止通过命令行修改系统状态。请使用 /advance 命令。"
+            exec_timeout = timeout or 300
+            if cwd:
+                cwd_path = Path(cwd)
+                if not cwd_path.is_absolute():
+                    cwd_path = ROOT / cwd_path
+                cwd_str = str(cwd_path)
+            else:
+                cwd_str = str(ROOT)
             res = subprocess.run(
                 command, shell=True, capture_output=True,
-                text=True, cwd=str(ROOT), timeout=30
+                text=True, cwd=cwd_str, timeout=exec_timeout
             )
-            return f"Exit Code: {res.returncode}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
+            output = f"Exit Code: {res.returncode}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
+            if len(output) > self.MAX_OUTPUT_CHARS:
+                output = output[:self.MAX_OUTPUT_CHARS] + "\n... (输出已截断)"
+            return output
         except subprocess.TimeoutExpired:
             return "错误: 命令执行超时。"
         except Exception as e:

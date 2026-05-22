@@ -24,3 +24,7 @@
 - **When**: during
 - **Rule**: update doc/comments when logic changes
 - **Check**: code change includes doc updates
+
+## hook-03-06: User Interaction via Tool
+- **When**: 需要用户确认、选择或输入时
+- **Rule**: **必须**使用 `ask_user` / `question` 工具，**禁止**在正文中输出编号选项列表

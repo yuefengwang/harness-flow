@@ -85,6 +85,7 @@ def main():
     p_deploy.add_argument("--name", help="任务名称 (默认从 .sw-context 检测)")
     p_deploy.add_argument("--port", type=int, default=8000, help="首选端口 (默认 8000)")
     p_deploy.add_argument("--no-tunnel", action="store_true", help="跳过 Cloudflare Tunnel")
+    p_deploy.add_argument("--agent", help="指定 Agent 类型/角色 (如 opencode, gemini)")
 
     # dashboard
     p_dash = subparsers.add_parser("dashboard", help="启动 Web Dashboard")

@@ -230,6 +230,31 @@ def get_repo_path() -> str:
     """获取生成代码的默认输出目录"""
     return _manager.config.repo_path
 
+# ── Deploy 角色配置解析 ──
+
+DEPLOY_ROLE_ID = "ops"
+
+def resolve_deploy_agent_type() -> str:
+    """解析部署角色使用的 Agent 类型"""
+    cfg = _manager.config
+    if DEPLOY_ROLE_ID in cfg.roles:
+        return cfg.roles[DEPLOY_ROLE_ID].agent
+    return "opencode"
+
+def resolve_deploy_agent_model() -> str:
+    """解析部署角色使用的模型名称"""
+    cfg = _manager.config
+    if DEPLOY_ROLE_ID in cfg.roles:
+        return cfg.roles[DEPLOY_ROLE_ID].model
+    return "opencode/deepseek-v4-flash-free"
+
+def resolve_deploy_role_tools() -> list[str]:
+    """解析部署角色允许的工具列表"""
+    cfg = _manager.config
+    if DEPLOY_ROLE_ID in cfg.roles:
+        return cfg.roles[DEPLOY_ROLE_ID].tools
+    return ["list_files", "read_file", "write_file", "run_command"]
+
 # ── Rich 组件延迟加载 ──
 
 try:

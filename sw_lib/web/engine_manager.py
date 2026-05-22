@@ -43,7 +43,7 @@ class WebEngineSession:
 
     def _web_add_log(self, source: str, msg: str):
         self._push_event({"type": "log", "source": source, "msg": msg, "ts": now()})
-        sw_log(self.task_name, f"[web] {source}: {msg[:200]}", source)
+        sw_log(self.task_name, f"[web] {source}: {msg[:1000]}", source)
 
     def _web_is_running(self) -> bool:
         return self._alive

@@ -377,9 +377,12 @@ class OpenCodeAgent(BaseAgent):
 
         hint = (
             "\n\n=== OpenCode 交互兼容规则 ===\n"
-            "如果需要向用户提问，请优先使用 opencode 内置的 `question` 工具；"
-            "如果当前运行环境无法调用该工具，请直接输出清晰的问题和可选项，"
-            "等待用户在 Harness-Flow 面板中回复后再继续。"
+            "向用户提问、寻求选择或确认时，**必须**使用 opencode 内置的 `question` 工具。\n"
+            "格式: question(questions=[{question: '问题文本', options: ['A. 选项1', 'B. 选项2'], header: '标题'}])\n"
+            "**严禁**在正文中输出编号列表让用户选择（如 '1. xxx 2. yyy'），"
+            "这会被 Harness-Flow 框架的文本解析器误判为描述性内容而被忽略。\n"
+            "如果当前运行环境**确实**无法调用 `question` 工具（极少情况），"
+            "请用单行简洁文本提问，不要使用编号/字母列表格式。"
         )
         if "OpenCode 交互兼容规则" in message:
             return message

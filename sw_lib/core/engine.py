@@ -265,8 +265,12 @@ class ContextBuilder:
                 f"你是 Harness-Flow 平台的 AI Agent。\n"
                 f"当前任务: {task_name}\n"
                 f"当前阶段: {stage} ({stage_name})\n\n"
-                f"重要规则：一次只问一个问题。你必须使用 `ask_user` 工具来向用户提问。\n"
-                f"严禁在正文中直接输出问题。通过 `ask_user` 收集完所有必要信息后，再给出方案。"
+                f"重要规则：\n"
+                f"1. 一次只问一个问题。\n"
+                f"2. **必须**使用 `ask_user` 工具来向用户提问，**严禁**在正文中输出编号选项。\n"
+                f"   错误示例: '请选择：1. 方案A 2. 方案B'\n"
+                f"   正确做法: 调用 ask_user(questions=[{{question: '请选择方案', options: ['A. 方案A', 'B. 方案B']}}])\n"
+                f"3. 通过 `ask_user` 收集完所有必要信息后，再给出方案。"
             )
         else:
             parts.append(
@@ -287,7 +291,11 @@ class ContextBuilder:
             "   - workspace/tasks/*/.state (任务状态文件)\n"
             "   - workspace/STATUS.json (全局任务汇总看板)\n"
             "   这些文件由 Harness-Flow 框架自动管理，你不需要也不应该碰它们。\n"
-            "3. 如果你认为当前阶段的工作已经完成，请明确告知用户，并提示用户输入 `/advance` 来推进阶段。"
+            "3. 如果你认为当前阶段的工作已经完成，请明确告知用户，并提示用户输入 `/advance` 来推进阶段。\n"
+            "4. **提问与确认规则 (CRITICAL)**: 向用户提问、寻求选择、请求确认时，**必须**使用 "
+            "`ask_user` 或 `question` 工具。**严禁**在正文中输出编号列表（如 '1. xxx 2. yyy'）"
+            "让用户选择——这会被框架误解析。如果你无法调用这些工具，请输出单行简洁问题，"
+            "不要使用编号或字母列表格式。"
         )
 
         # 0.6 注入项目目录信息

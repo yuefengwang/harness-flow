@@ -13,8 +13,10 @@ from fastapi.templating import Jinja2Templates
 
 from ...core.service import _service, TaskError
 from ...core.config import STAGES, STAGE_NAMES, TASKS
-from ...core.deploy import run_deploy_agent
+from ...core.deploy_orchestrator import DeployOrchestrator
 import threading
+import json
+import asyncio
 from ..cloudflared import stop_tunnel as stop_cloudflared_tunnel
 
 router = APIRouter()
@@ -150,12 +152,88 @@ async def task_deploy(name: str):
         return HTMLResponse(f"<div class='error'>{e}</div>", status_code=400)
 
     target_dir = st.get("target_dir", "")
-    threading.Thread(
-        target=run_deploy_agent,
-        args=(name, target_dir),
-        daemon=True,
-    ).start()
+
+    def _run_deploy():
+        orchestrator = DeployOrchestrator(
+            name=name,
+            target_dir=target_dir,
+            log_callback=lambda msg: None,
+        )
+        orchestrator.run()
+
+    threading.Thread(target=_run_deploy, daemon=True).start()
     return HTMLResponse(content=_task_table_html())
+
+
+@router.get("/tasks/{name}/deploy/sse")
+async def task_deploy_sse(name: str, request: Request):
+    """SSE 端点：实时推送部署日志（JSON 格式事件）"""
+    from fastapi.responses import StreamingResponse
+
+    deploy_log = TASKS / name / ".deploy_log"
+
+    async def event_generator():
+        last_size = 0
+        if deploy_log.exists():
+            last_size = deploy_log.stat().st_size
+            # 发送初始内容
+            content = deploy_log.read_text(encoding="utf-8")
+            if content:
+                for line in content.splitlines():
+                    yield f"data: {json.dumps({'type': 'log', 'text': line})}\n\n"
+
+        # 轮询新内容直到部署完成
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                if deploy_log.exists():
+                    current_size = deploy_log.stat().st_size
+                    if current_size > last_size:
+                        with open(deploy_log, "r") as f:
+                            f.seek(last_size)
+                            new_data = f.read()
+                            if new_data:
+                                for line in new_data.splitlines():
+                                    yield f"data: {json.dumps({'type': 'log', 'text': line})}\n\n"
+                            last_size = f.tell()
+
+                # 检查部署是否完成
+                st = _service.get_task_state(name)
+                ds = st.get("deploy_status", "")
+                if ds in ("deployed", "deploy_failed"):
+                    url = st.get("deploy_url", "")
+                    yield f"data: {json.dumps({'type': 'done', 'status': ds, 'url': url})}\n\n"
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/tasks/{name}/deploy/status")
+async def task_deploy_status(name: str):
+    """返回当前部署状态"""
+    try:
+        st = _service.get_task_state(name)
+    except TaskError:
+        return HTMLResponse("任务不存在", status_code=404)
+
+    return {
+        "status": st.get("deploy_status", "idle"),
+        "url": st.get("deploy_url", ""),
+        "step": st.get("deploy_step", ""),
+        "task_name": name,
+    }
 
 
 def _task_table_html() -> str:
@@ -189,8 +267,6 @@ def _task_table_html() -> str:
                 elif ds == "deploy_failed":
                     actions_html += '<span class="status-failed">部署失败</span> '
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重试</button>'
-            else:
-                actions_html += f'<button hx-post="/tasks/{t["id"]}/advance" hx-target="#task-list" hx-swap="outerHTML">推进</button>'
             actions_html += f'<button class="danger" hx-post="/tasks/{t["id"]}/remove" hx-target="#task-list" hx-swap="outerHTML" hx-confirm="确认移除任务 {t["id"]}?">删除</button>'
             actions_html += '</td>'
             lines.append(

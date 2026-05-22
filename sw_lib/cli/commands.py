@@ -25,7 +25,7 @@ from pathlib import Path
 from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
 from ..web.app import create_app
 from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
-from ..core.deploy import run_deploy_agent
+from ..core.deploy_orchestrator import DeployOrchestrator
 from ..core.utils import (
     green, yellow, blue,
     ok, warn, hdr, die,
@@ -307,16 +307,18 @@ def cmd_deploy(args):
             print(f"Cloudflare Tunnel: 已禁用")
         print()
 
-        final_url = run_deploy_agent(
-            name, target_dir,
-            log_callback=print,
+        orchestrator = DeployOrchestrator(
+            name=name,
+            target_dir=target_dir,
             port=deploy_port,
             no_tunnel=no_tunnel,
+            log_callback=print,
         )
+        result = orchestrator.run()
 
-        if final_url:
+        if result.service_url:
             ok(f"部署成功!")
-            print(f"服务地址: {green(final_url)}")
+            print(f"服务地址: {green(result.service_url)}")
         else:
             warn("部署完成，但未检测到服务地址。请查看日志。")
             return
@@ -325,36 +327,12 @@ def cmd_deploy(args):
         from ..core.config import TASKS as _TASKS
 
         deploy_log = _TASKS / name / ".deploy_log"
-        pid_file = _TASKS / name / ".deploy.pid"
 
         def _cleanup(signum=None, frame=None):
             """清理子进程和 tunnel"""
             print()
             warn("正在停止服务...")
-
-            # 停止服务进程
-            if pid_file.exists():
-                try:
-                    pid = int(pid_file.read_text().strip())
-                    os.kill(pid, signal.SIGTERM)
-                    warn(f"已终止服务进程 (PID {pid})")
-                except (ValueError, ProcessLookupError, OSError):
-                    pass
-                pid_file.unlink(missing_ok=True)
-
-            # 停止 tunnel
-            try:
-                from ..web.cloudflared import stop_tunnel as _stop_tunnel
-                _stop_tunnel(name)
-            except Exception:
-                pass
-
-            # 更新部署状态
-            try:
-                _service.complete_deploy(name, success=False)
-            except Exception:
-                pass
-
+            orchestrator.stop()
             ok("服务已停止")
             sys.exit(0)
 
@@ -363,20 +341,18 @@ def cmd_deploy(args):
         signal.signal(signal.SIGTERM, _cleanup)
 
         hdr("服务运行中 (Ctrl+C 停止)")
-        print(f"本地地址: {green(final_url)}")
+        print(f"本地地址: {green(result.service_url)}")
         print()
 
         # 实时 tail 日志
         try:
             if deploy_log.exists():
-                # 从日志末尾开始 tail，但先显示最后几行上下文
                 with open(deploy_log, "r") as f:
                     lines = f.readlines()
                     tail_lines = lines[-5:] if len(lines) > 5 else lines
                     for line in tail_lines:
                         print(f"  {line.strip()}")
 
-            # 持续读取 deploy_log 更新并输出到 stdout
             last_size = deploy_log.stat().st_size if deploy_log.exists() else 0
             while True:
                 time.sleep(0.5)
@@ -390,11 +366,12 @@ def cmd_deploy(args):
                                 print(new_data, end="")
                             last_size = f.tell()
 
-                # 检查进程是否还活着
+                # 检查进程存活
+                pid_file = _TASKS / name / ".deploy.pid"
                 if pid_file.exists():
                     try:
                         pid = int(pid_file.read_text().strip())
-                        os.kill(pid, 0)  # 信号 0 仅用于检查进程存在
+                        os.kill(pid, 0)
                     except (ProcessLookupError, ValueError, OSError):
                         warn("服务进程已意外退出")
                         _cleanup()

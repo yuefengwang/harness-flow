@@ -46,10 +46,6 @@
         </ul>
         <div class="actions">
             <a href="/tasks/{{ task.id }}/console" class="btn btn-primary">进入对话</a>
-            <button class="btn"
-                    hx-post="/tasks/{{ task.id }}/advance"
-                    hx-target="#advance-result"
-                    hx-swap="innerHTML">推进阶段</button>
         </div>
         <div id="advance-result"></div>
     </div>
@@ -60,18 +56,69 @@
     <pre class="log-viewer">{{ log_content }}</pre>
 </div>
 
-{% if deploy_log %}
+<!-- 部署日志（实时 SSE 驱动） -->
 <div class="detail-card deploy-section">
-    <h3>部署日志</h3>
-    {% if deploy_url %}
-    <p><strong>服务地址：</strong><a href="{{ deploy_url }}" target="_blank">{{ deploy_url }}</a></p>
-    {% endif %}
-    <pre class="log-viewer">{{ deploy_log }}</pre>
+    <h3>
+        部署日志
+        <span id="deploy-status-badge" class="badge badge-idle">
+            {{ task.deploy_status if task.get('deploy_status') and task.deploy_status != 'idle' else '待部署' }}
+        </span>
+    </h3>
+
+    <!-- 部署成功横幅 -->
+    <div id="deploy-success-banner" class="deploy-access {% if not deploy_url %}hidden{% endif %}">
+        <div class="deploy-access-inner">
+            <span class="deploy-access-label">✓ 已部署</span>
+            <a href="{{ deploy_url or '#' }}" target="_blank" class="btn btn-success btn-lg deploy-url-link">
+                {{ deploy_url or '打开应用' }} ↗
+            </a>
+        </div>
+    </div>
+
+    <!-- 部署步骤指示器 -->
+    <div class="deploy-steps">
+        <div id="step-detect" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">检测项目</span>
+        </div>
+        <div class="step-connector"></div>
+        <div id="step-deps" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">安装依赖</span>
+        </div>
+        <div class="step-connector"></div>
+        <div id="step-port" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">选择端口</span>
+        </div>
+        <div class="step-connector"></div>
+        <div id="step-start" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">启动服务</span>
+        </div>
+        <div class="step-connector"></div>
+        <div id="step-tunnel" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">Tunnel</span>
+        </div>
+        <div class="step-connector"></div>
+        <div id="step-done" class="step-item step-pending">
+            <span class="step-icon">○</span>
+            <span class="step-label">完成</span>
+        </div>
+    </div>
+
+    <!-- 部署日志内容 -->
+    <div class="deploy-log-container">
+        <div id="deploy-log-content"></div>
+    </div>
+
+    <input type="hidden" id="deploy-task-name" value="{{ task.id }}">
 </div>
-{% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
+<script src="/static/js/deploy.js"></script>
 <script>
 (function() {
     var logViewer = document.querySelector('.log-viewer');
@@ -81,8 +128,8 @@
     var lastLineCount = 0;
     var logBuffer = '';
     var firstFetch = true;
-    var MAX_BUF = 10000;   // max accumulated chars before trim
-    var KEEP = 5000;       // keep this many after trim
+    var MAX_BUF = 10000;
+    var KEEP = 5000;
 
     function refreshLog() {
         var prevScrollTop = logViewer.scrollTop;
@@ -94,7 +141,6 @@
                 if (data.lines && data.lines.length > 0) {
                     var newRaw = data.lines.map(function(l) { return l.raw || ''; }).join('\n');
                     if (firstFetch) {
-                        // First fetch replaces potentially-truncated server content
                         logBuffer = newRaw;
                     } else {
                         logBuffer += (logBuffer ? '\n' : '') + newRaw;

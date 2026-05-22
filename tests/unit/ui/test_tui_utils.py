@@ -88,6 +88,24 @@ def test_question_mark_in_single_message_with_numbered_list_far():
     opts = extract_options(lines)
     assert opts == [], f"message with distant ? should NOT extract, got {opts}"
 
+def test_deployment_steps_with_keywords_not_options():
+    """部署步骤编号列表（含 → 箭头和关键词）— 不应提取为选项"""
+    lines = [
+        ("agent", "方案对比："),
+        ("agent", "方案 B 的工作流程，请选择确认："),
+        ("agent", "1. ls 扫描目录 → 判断项目类型"),
+        ("agent", "2. pip install 安装依赖 → 遇到 ModuleNotFoundError"),
+        ("agent", "3. 尝试启动 → 访问 http://localhost:8000 验证"),
+    ]
+    opts = extract_options(lines)
+    assert opts == [], f"deployment steps with arrows should NOT extract, got {opts}"
+
+def test_real_options_without_step_signals():
+    """确认不带步骤特征的选项仍然正常提取"""
+    lines = [("agent", "请选择方案："), ("agent", "1. 方案A"), ("agent", "2. 方案B"), ("agent", "3. 方案C")]
+    opts = extract_options(lines)
+    assert len(opts) == 3, f"clean options should extract, got {len(opts)}"
+
 # ── detect_input_mode ──
 
 def test_detect_input_mode_yesno():

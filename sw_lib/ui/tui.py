@@ -84,6 +84,23 @@ _OPTION_LINE_PATTERN = re.compile(
     re.UNICODE
 )
 
+# 描述性步骤特征：如果选项文本包含以下信号，说明这不是选项而是编号步骤
+_STEP_SIGNAL_PATTERNS = [
+    r'→',                          # flow arrow (最可靠信号)
+    r'`[^`]+`',                    # backtick code
+    r'\b(?:pip|npm|git|curl|docker|mvn|yarn|npx)\b',  # CLI commands
+    r'\b(?:install|deploy|build|configure|scan|detect|compile|run)\b', # build/exec verbs
+    r'\b(?:localhost|http[s]?://)', # URLs
+    r'\b(?:ModuleNotFoundError|ImportError|PermissionError)\b',  # error names
+]
+
+def _looks_like_step(text: str) -> bool:
+    """检查文本是否像描述性步骤而非选项标签"""
+    for pat in _STEP_SIGNAL_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return True
+    return False
+
 def _has_question_context(messages) -> bool:
     """检查消息块中是否包含提问信号（问号或选择类关键词）。
 
@@ -198,6 +215,12 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
                     break
     # 恢复为正向顺序（从上到下）
     options_reversed.reverse()
+
+    # 选项内容过滤器：排除看起来像"描述性步骤"的编号行
+    # 如果任何选项文本包含 → 箭头或 CLI 命令等步骤特征，则判定为描述性步骤
+    if options_reversed and any(_looks_like_step(text) for _, text in options_reversed):
+        return []
+
     return options_reversed
 
 
