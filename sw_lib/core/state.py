@@ -252,6 +252,20 @@ class StageValidator:
             else:
                 done.append("设计批准已填写")
 
+        elif stage == "04-review":
+            m = re.search(r'\*\*Route\*\*:\s*`([^`]+)`', content)
+            if m:
+                route_val = m.group(1).strip()
+                if route_val == "___":
+                    todo.append("**Route** 字段尚未填写")
+                else:
+                    if route_val.lower() in STAGES:
+                        done.append(f"**Route**: {route_val}")
+                    else:
+                        todo.append(f"**Route** '{route_val}' 无效，应为 05-Archive/03-Coding/02-Planning/01-Brainstorming")
+            else:
+                todo.append("缺少 **Route** 字段")
+
         # elif stage == "03-coding":
         #     try:
         #         result = subprocess.run(

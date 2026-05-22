@@ -107,20 +107,11 @@ class InitializationUI:
 
         # Step 3: 需求注入
         self._render_header("注入需求上下文", 3)
-        self.console.print("[bold white]请输入详细的任务需求描述 (多行输入):[/]")
-        self.console.print("[dim](提示: 支持粘贴。最后一行输入 'EOF' 或按 Ctrl+D 结束)[/]")
-        
-        context_lines = []
-        try:
-            while True:
-                line = input("  > ")
-                if line.strip().upper() == "EOF":
-                    break
-                context_lines.append(line)
-        except EOFError:
-            pass
-        
-        self.data["context"] = "\n".join(context_lines).strip()
+        self.console.print("[bold white]请输入详细的任务需求描述:[/]")
+        self.console.print("[dim](输入完成后按 Ctrl+D 结束，支持多行粘贴和方向键)[/]")
+
+        context = sys.stdin.read().strip()
+        self.data["context"] = context
         self.console.print()
 
         # Final: 最终确认

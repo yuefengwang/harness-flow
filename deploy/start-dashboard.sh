@@ -323,6 +323,15 @@ _show_tunnel_status() {
         else
             echo -e "  外网:       ${YELLOW}${url} (隧道进程已退出)${NC}"
         fi
+    elif [[ -f "$CF_PID_FILE" ]] && kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
+        # URL 文件丢失但进程存活：从日志中恢复 URL
+        if [[ -f /tmp/sw-cloudflared.log ]]; then
+            local recovered_url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/sw-cloudflared.log 2>/dev/null | tail -1)
+            if [[ -n "$recovered_url" ]]; then
+                echo "$recovered_url" > "$CF_URL_FILE"
+                echo -e "  外网:       ${CYAN}${recovered_url}${NC} (从日志恢复)"
+            fi
+        fi
     fi
 }
 
@@ -406,6 +415,14 @@ start_caddy() {
     log "Caddy 已启动"
 }
 
+_recover_url_from_log() {
+    # 从 cloudflared 日志中恢复 URL（进程运行时 URL 文件意外丢失）
+    [[ -f /tmp/sw-cloudflared.log ]] || return 1
+    local url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/sw-cloudflared.log 2>/dev/null | tail -1)
+    [[ -n "$url" ]] && { echo "$url" > "$CF_URL_FILE"; return 0; }
+    return 1
+}
+
 check_tunnel_healthy() {
     local url=""; [[ -f "$CF_URL_FILE" ]] && url=$(cat "$CF_URL_FILE")
     [[ -z "$url" ]] && return 1
@@ -418,6 +435,10 @@ start_cloudflared() {
     local cf_url=""
     # 如果已有健康运行的隧道，直接复用
     if [[ -f "$CF_PID_FILE" ]] && kill -0 "$(cat "$CF_PID_FILE")" 2>/dev/null; then
+        # URL 文件可能丢失（日志缓冲问题），尝试从日志恢复
+        if [[ ! -f "$CF_URL_FILE" ]] || [[ -z "$(cat "$CF_URL_FILE" 2>/dev/null)" ]]; then
+            _recover_url_from_log
+        fi
         if check_tunnel_healthy; then
             cf_url=$(cat "$CF_URL_FILE" 2>/dev/null || true)
             [[ -n "$cf_url" ]] && { warn "Cloudflare Tunnel 已在运行"; return 0; }
@@ -435,10 +456,16 @@ start_cloudflared() {
     log "启动 Cloudflare Tunnel..."
     rm -f "$CF_URL_FILE"
 
-    # 使用 --retries 让 cloudflared 在网络抖动时自动重连而非直接退出
-    cloudflared tunnel --protocol http2 --retries 5 \
-        --url "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}" \
-        > /tmp/sw-cloudflared.log 2>&1 &
+    # macOS: script 创建伪终端强制行缓冲，避免 URL 被缓冲导致 grep 读不到
+    local cf_cmd=(
+        cloudflared tunnel --protocol http2 --retries 5
+        --url "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+    )
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        script -q /dev/null "${cf_cmd[@]}" > /tmp/sw-cloudflared.log 2>&1 &
+    else
+        "${cf_cmd[@]}" > /tmp/sw-cloudflared.log 2>&1 &
+    fi
     local pid=$!; echo "$pid" > "$CF_PID_FILE"
 
     # 等待 URL 出现（最多 45s，比之前更宽容）

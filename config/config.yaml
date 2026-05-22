@@ -9,7 +9,7 @@ harness:
     mount_git_config: true
     mount_ssh: true
   mock_agent:
-    enabled: false
+    enabled: true
     response_delay: 2.0
     responses:
       01-brainstorming: "## \U0001F916 AI Output\n\n### \u6B67\u4E49\u5206\u6790\u7ED3\

@@ -44,6 +44,50 @@ def test_letter_labels_with_question():
     opts = extract_options(lines)
     assert len(opts) == 2
 
+def test_descriptive_numbered_list_with_incidental_question():
+    """描述性编号列表末尾有问句 — 不应提取为选项 (修复1.xxxx 2.xxxx 3.xxxx误判)"""
+    # Simulates: agent returned situation description "1.xxx. 2.xxx. 3.xxx."
+    # with an incidental question mark at the very end of a different message
+    lines = [
+        ("agent", "Here is the current status:"),
+        ("agent", "1. project created successfully."),
+        ("agent", "2. dependencies installed."),
+        ("agent", "3. configuration completed."),
+        ("agent", "Does this look correct?"),  # ? far from numbered items
+    ]
+    opts = extract_options(lines)
+    assert opts == [], f"descriptive list with distant ? should NOT extract, got {opts}"
+
+def test_descriptive_chinese_list_with_incidental_question():
+    """中文描述性编号列表末尾有问句 — 不应提取为选项"""
+    lines = [
+        ("agent", "当前情况说明："),
+        ("agent", "1. 项目目录已创建完成。"),
+        ("agent", "2. 依赖环境已安装。"),
+        ("agent", "3. 配置文件已生成。"),
+        ("agent", "您觉得这样可以吗？"),  # ？在单独一行，远离编号项
+    ]
+    opts = extract_options(lines)
+    assert opts == [], f"Chinese descriptive list with distant ？ should NOT extract, got {opts}"
+
+def test_keyword_in_same_line_as_option():
+    """弱信号关键词与选项在同一行 — 应正常提取"""
+    lines = [("agent", "1. 选项一"), ("agent", "2. 选项二")]
+    opts = extract_options(lines)
+    assert len(opts) == 2
+
+def test_keyword_adjacent_to_option():
+    """弱信号关键词在选项的上一行 — 应正常提取"""
+    lines = [("agent", "请从下面选择："), ("agent", "1. 方案A"), ("agent", "2. 方案B")]
+    opts = extract_options(lines)
+    assert len(opts) == 2
+
+def test_question_mark_in_single_message_with_numbered_list_far():
+    """同一消息中问号远离编号列表 — 不应提取"""
+    lines = [("agent", "1. Step one completed.\n2. Step two done.\n3. Step three finished.\n\nShould I continue?")]
+    opts = extract_options(lines)
+    assert opts == [], f"message with distant ? should NOT extract, got {opts}"
+
 # ── detect_input_mode ──
 
 def test_detect_input_mode_yesno():

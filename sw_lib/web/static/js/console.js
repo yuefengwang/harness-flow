@@ -20,9 +20,11 @@
   var pendingQIdx = 0;
   var sse = null;
   var reconnectTimer = null;
-  var pollTimer = null;
+  var logPollTimer = null;
+  var statePollTimer = null;
   var lastLineCount = 0;
   var sseConnected = false;
+  var sseAvailable = true;
 
   // ── 日志格式化（对齐 .log 文件格式：[ts] source | msg）──
 
@@ -50,6 +52,10 @@
   }
 
   function appendLog(source, msg, ts) {
+    var emptyHint = document.getElementById("log-empty-hint");
+    if (emptyHint && !emptyHint.classList.contains("hidden")) {
+      emptyHint.classList.add("hidden");
+    }
     var line = document.createElement("div");
     line.className = "log-line";
 
@@ -95,7 +101,9 @@
     return fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data.lines) {
+        if (data.lines && data.lines.length > 0) {
+          var emptyHint = document.getElementById("log-empty-hint");
+          if (emptyHint) emptyHint.classList.add("hidden");
           data.lines.forEach(function (item) {
             if (item.source) {
               appendLog(item.source, item.msg, item.ts);
@@ -107,30 +115,36 @@
         if (typeof data.total_lines === "number") {
           lastLineCount = data.total_lines;
         }
-        scrollToBottom();
       })
       .catch(function () {});
   }
 
   function startLogPolling() {
     stopLogPolling();
-    pollTimer = setInterval(function () {
+    logPollTimer = setInterval(function () {
       fetchLogs(lastLineCount);
     }, 2000);
   }
 
   function stopLogPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    if (logPollTimer) {
+      clearInterval(logPollTimer);
+      logPollTimer = null;
     }
   }
 
   // ── 状态轮询 ──
 
-  function startPolling() {
+  function startStatePolling() {
     pollTaskState();
-    pollTimer = setInterval(pollTaskState, 2000);
+    statePollTimer = setInterval(pollTaskState, 2000);
+  }
+
+  function stopStatePolling() {
+    if (statePollTimer) {
+      clearInterval(statePollTimer);
+      statePollTimer = null;
+    }
   }
 
   function pollTaskState() {
@@ -173,7 +187,7 @@
   // ── SSE 事件处理 ──
 
   function handleLogEvent(data) {
-    if (sseConnected) stopLogPolling();
+    // 日志轮询始终开启作为主刷新机制，SSE 仅用于实时追加增强
     appendLog(data.source, data.msg, data.ts);
   }
 
@@ -275,22 +289,48 @@
 
     sse.onopen = function () {
       sseConnected = true;
-      stopLogPolling();
+      sseAvailable = true;
       appendLog("sw", "SSE 实时连接已建立", new Date().toISOString());
     };
 
     sse.onerror = function () {
       sseConnected = false;
-      sse.close();
-      sse = null;
-      appendLog("sw", "⚠️ SSE 连接断开，切换到轮询模式", new Date().toISOString());
-      startLogPolling();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(function () {
-        appendLog("sw", "正在尝试重连 SSE...", new Date().toISOString());
-        connectSSE();
-      }, 5000);
+      if (sse) { sse.close(); sse = null; }
+      // 检查 SSE 端点是否可用，避免对 404 反复重连
+      fetch("/tasks/" + taskName + "/sse", { method: "HEAD" })
+        .then(function (res) {
+          if (res.status === 404) {
+            sseAvailable = false;
+            checkSSEAvailable();
+          } else {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(function () {
+              connectSSE();
+            }, 5000);
+          }
+        })
+        .catch(function () {
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(function () {
+            connectSSE();
+          }, 5000);
+        });
     };
+  }
+
+  function checkSSEAvailable() {
+    fetch("/tasks/" + taskName + "/sse", { method: "HEAD" })
+      .then(function (res) {
+        if (res.status !== 404) {
+          sseAvailable = true;
+          connectSSE();
+        } else {
+          setTimeout(checkSSEAvailable, 10000);
+        }
+      })
+      .catch(function () {
+        setTimeout(checkSSEAvailable, 10000);
+      });
   }
 
   // ── 引擎控制 ──
@@ -305,6 +345,7 @@
     }).then(function (r) { return r.text(); }).then(function () {
       btn.textContent = "已启动";
       appendLog("sw", "引擎已启动", new Date().toISOString());
+      sseAvailable = true;
       connectSSE();
     }).catch(function (err) {
       btn.textContent = "启动失败";
@@ -371,13 +412,18 @@
   function init() {
     fetchLogs(0).then(function () {
       scrollToBottom();
-      connectSSE();
     }).catch(function () {
+      // 日志文件可能尚不存在，轮询机制会后续自动拉取
+    }).finally(function () {
+      // Hide initial loading indicator
+      var loadingEl = document.getElementById("log-loading");
+      if (loadingEl) loadingEl.classList.add("hidden");
+      // 始终开启日志轮询作为主刷新机制
       startLogPolling();
       connectSSE();
     });
 
-    startPolling();
+    startStatePolling();
   }
 
   init();

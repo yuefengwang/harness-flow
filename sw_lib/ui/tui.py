@@ -55,18 +55,43 @@ OPTION_PATTERNS = [
 
 # ── 问题上下文检测关键词 ──
 # 只有 agent 消息中包含以下指标之一时，才会将其中的编号行视为结构化选项
-_QUESTION_CONTEXT_KEYWORDS = [
-    r'\?', r'\uff1f',                           # ? / ？
-    r'\u9009\u62e9', r'\u9009\u9879',            # 选择 / 选项
+
+# 强信号：明确的选项提问，不需要 proximity check
+_STRONG_QUESTION_KEYWORDS = [
     r'\u8bf7\u9009\u62e9',                        # 请选择
-    r'\bchoose\b', r'\bselect\b', r'\bpick\b',    # choose / select / pick
-    r'\bwhich\s+one\b', r'\boptions?\b',          # which one / option(s)
-    r'\u51b3\u5b9a',                               # 决定
-    r'^[-*]\s+\[[ xX]\]',                          # checklist marker (- [ ] or - [x])
+    r'\bchoose\s+(?:one|an|from|between)\b',       # choose one / choose from
+    r'\bselect\s+(?:one|an|from|between)\b',       # select one / select from
+    r'\bpick\s+(?:one|an)\b',                       # pick one
+    r'\bwhich\s+(?:one|option|approach|solution)\b', # which one/option/approach
+    r'\boptions?\s+(?:are|include|available)\b',    # options are / options include
+    r'(?:please|pls)\s+(?:choose|select|pick)\b',   # please choose/select/pick
+    r'^[-*]\s+\[[ xX]\]',                            # checklist marker (- [ ] or - [x])
+    r'\u8bf7\s*(?:\u9009\u62e9|\u9009\u62e9|\u56de\u7b54|\u8f93\u5165)\b',  # 请选择/请回答/请输入
 ]
+
+# 弱信号：需要接近编号列表才算有效提问上下文
+_WEAK_QUESTION_KEYWORDS = [
+    r'\?', r'\uff1f',                              # ? / ？
+    r'\u9009\u62e9', r'\u9009\u9879',               # 选择 / 选项
+    r'\bchoose\b', r'\bselect\b', r'\bpick\b',       # choose / select / pick (loose)
+    r'\boptions?\b',                                 # option(s) (loose)
+    r'\u51b3\u5b9a',                                 # 决定
+]
+
+# 用于 proximity check 的选项行模式（与 OPTION_PATTERNS 中的编号/字母模式对齐）
+_OPTION_LINE_PATTERN = re.compile(
+    r'^\s*(\d+|[A-Z])[.、)\uff09\u3001：:]\s+',
+    re.UNICODE
+)
 
 def _has_question_context(messages) -> bool:
     """检查消息块中是否包含提问信号（问号或选择类关键词）。
+
+    检测逻辑分两层：
+    1. 强信号（明确的选项请求）→ 直接返回 True，不需要 proximity 检查。
+    2. 弱信号（?、选择、choose 等）→ 只有出现在编号/字母列表行附近
+       （同一行或上下 2 行内）才算有效提问上下文，防止将描述性编号列表
+       （如 "1. 情况说明 2. 状态更新 3. 结论。这样可以吗？"）误判为选项。
 
     同时支持 List[Tuple[str,str]] (extract_options 调用) 和 List[str] 
     (detect_input_mode 调用) 两种输入格式。
@@ -74,12 +99,43 @@ def _has_question_context(messages) -> bool:
     if not messages:
         return False
     if isinstance(messages[0], tuple):
-        combined = "\n".join(msg for _, msg in messages)
+        msgs = [msg for _, msg in messages]
     else:
-        combined = "\n".join(messages)
-    for pat in _QUESTION_CONTEXT_KEYWORDS:
+        msgs = list(messages)
+
+    combined = "\n".join(msgs)
+
+    for pat in _STRONG_QUESTION_KEYWORDS:
         if re.search(pat, combined, re.IGNORECASE):
             return True
+
+    for pat in _WEAK_QUESTION_KEYWORDS:
+        if not re.search(pat, combined, re.IGNORECASE):
+            continue
+
+        all_lines: List[Tuple[int, int, str]] = []
+        for mi, msg in enumerate(msgs):
+            for li, line in enumerate(msg.splitlines()):
+                all_lines.append((mi, li, line.strip()))
+
+        first_option_idx = next(
+            (i for i, (_, _, line) in enumerate(all_lines) if _OPTION_LINE_PATTERN.match(line)),
+            None,
+        )
+
+        for idx, (mi, li, signal_line) in enumerate(all_lines):
+            if not signal_line:
+                continue
+            if not re.search(pat, signal_line, re.IGNORECASE):
+                continue
+
+            if _OPTION_LINE_PATTERN.match(signal_line):
+                return True
+
+            if first_option_idx is not None and idx < first_option_idx:
+                if first_option_idx - idx <= 3:
+                    return True
+
     return False
 
 
@@ -783,7 +839,9 @@ class MonitorTUI:
                     # 1. 如果正在接收转义序列
                     if esc_buf:
                         esc_buf += ch
-                        if (len(esc_buf) > 1 and ch.isalpha()) or ch == '~':
+                        # CSI: \x1b[ + 参数 + 结尾 alpha/~  |  SS3: \x1bO + 结尾 alpha (要求 >=3 字符避免 \x1bO 前缀误判)
+                        if (esc_buf.startswith('\x1b[') and (ch.isalpha() or ch == '~')) or \
+                           (len(esc_buf) >= 3 and esc_buf.startswith('\x1bO') and ch.isalpha()):
                             # 完成一个序列
                             self._handle_esc(esc_buf)
                             esc_buf = ""
@@ -829,11 +887,12 @@ class MonitorTUI:
         # 计算显示高度以供翻页参考
         visible_height = max(5, self.console.size.height - 11)
         
-        if seq == '\x1b[A': # Up
+        if seq in ('\x1b[A', '\x1bOA'): # Up (CSI / SS3)
             self.state.log_scroll_offset += 1
-        elif seq == '\x1b[B': # Down
+        elif seq in ('\x1b[B', '\x1bOB'): # Down (CSI / SS3)
             self.state.log_scroll_offset = max(0, self.state.log_scroll_offset - 1)
         elif seq == '\x1b[5~': # PageUp
             self.state.log_scroll_offset += visible_height
         elif seq == '\x1b[6~': # PageDown
             self.state.log_scroll_offset = max(0, self.state.log_scroll_offset - visible_height)
+        self._refresh_display()

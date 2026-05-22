@@ -6,6 +6,7 @@
     mock_agent:
       enabled: true
       response_delay: 2.0
+      review_route: "05-Archive"  # 04-review 评审结论: 05-Archive/03-Coding/02-Planning
       responses:
         "01-brainstorming": "可选的自定义回复内容"
 """
@@ -120,6 +121,8 @@ class MockAgent(BaseAgent):
                 self._scenario_brainstorming()
             elif stage_key == "02-planning":
                 self._scenario_planning()
+            elif stage_key == "04-review":
+                self._scenario_review()
             else:
                 self._scenario_generic(stage_key)
                 
@@ -248,6 +251,66 @@ class MockAgent(BaseAgent):
             "## Gate\n"
             "- [x] Architecture finalized\n"
             "- [x] Tasks itemized\n"
+        )
+        self._say(output)
+
+    def _scenario_review(self):
+        """04-review 专用场景：模拟代码审查并输出 Route 决策。
+
+        通过 config.yaml 中的 mock_agent.review_route 配置评审结论:
+        - "05-Archive" (默认) — 评审通过，正常归档
+        - "03-Coding" — 代码层问题，返工到编码阶段
+        - "02-Planning" — 规划层问题，返工到规划阶段
+        """
+        route = self._config.get("review_route", "05-Archive")
+        valid_routes = {"05-Archive", "03-Coding", "02-Planning"}
+        if route not in valid_routes:
+            route = "05-Archive"
+
+        route_descriptions = {
+            "05-Archive": ("评审通过", "代码完整、构建通过、测试绿色、安全合规，与设计规格一致。"),
+            "03-Coding": ("代码层问题", "存在未实现的计划任务、构建/测试失败、代码质量缺陷或安全漏洞，需返回编码阶段修复。"),
+            "02-Planning": ("规划层问题", "架构设计存在根本性缺陷、技术选型不可行、或重要任务遗漏导致无法交付，需返回规划阶段修订。"),
+        }
+        conclusion, reason = route_descriptions[route]
+
+        self._say(f"正在执行代码审查...")
+        time.sleep(1)
+        self._say(f"审查结论: {conclusion}")
+        self._say(reason)
+
+        is_pass = (route == "05-Archive")
+
+        output = (
+            f"## 🤖 AI Output\n\n"
+            f"### 审查结论\n"
+            f"- 代码完整性: {'✅ 通过' if is_pass else '❌ 未通过'}\n"
+            f"- 构建/测试: {'✅ 通过' if is_pass else '❌ 失败'}\n"
+            f"- 安全审计: {'✅ 无风险' if is_pass else '⚠️ 存在隐患'}\n"
+            f"- 与设计规格一致性: {'✅ 一致' if is_pass else '❌ 存在偏差'}\n\n"
+            f"**建议路由: {route}（{conclusion}）**\n"
+            f"- 理由: {reason}\n\n"
+        )
+
+        if is_pass:
+            output += (
+                "### Reroute Evidence\n"
+                "*(评审通过，无需返工)*\n\n"
+            )
+        else:
+            output += (
+                "### Reroute Evidence\n"
+                "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
+                "|---|------|---------|---------|-------------|\n"
+                "| 1 | 模拟发现的问题 | high | coding | 详见审查结论 |\n"
+                "| 2 | 需修复项 | med | coding | 详见审查结论 |\n\n"
+            )
+
+        output += (
+            "## Gate\n"
+            f"- [{'x' if is_pass else ' '}] Full build passes\n"
+            f"- [{'x' if is_pass else ' '}] Security audit clear\n"
+            f"- [{'x' if is_pass else ' '}] Lint/static analysis passes\n"
         )
         self._say(output)
 

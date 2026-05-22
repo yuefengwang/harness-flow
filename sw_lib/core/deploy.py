@@ -28,8 +28,8 @@ from ..web.cloudflared import start_tunnel, stop_tunnel
 @dataclass
 class ProjectInfo:
     """项目检测结果"""
-    type: str = "python"           # 语言类型
-    framework: str = "generic"     # fastapi | flask | django | generic
+    type: str = "python"           # 语言类型 (python | java | node)
+    framework: str = "generic"     # fastapi | flask | django | generic | maven | node
     entry: str = ""                # 入口文件路径 (如 "main.py")
     port: int = 8000               # 确定使用的端口
     has_requirements: bool = False # 是否有 requirements.txt
@@ -37,6 +37,9 @@ class ProjectInfo:
     has_pyproject: bool = False    # 是否有 pyproject.toml
     has_setup: bool = False        # 是否有 setup.py
     has_manage: bool = False       # 是否有 manage.py (Django)
+    has_pom_xml: bool = False      # 是否有 pom.xml (Maven)
+    has_package_json: bool = False # 是否有 package.json (Node.js)
+    java_main_class: str = ""      # Maven 主类 (从 pom.xml 提取)
 
 
 # ── 核心: DeployRunner ──
@@ -123,24 +126,90 @@ class DeployRunner:
                 except Exception:
                     pass
 
+        # 检测非 Python 项目
+        # Maven / Java
+        if not info.entry and (target / "pom.xml").is_file():
+            info.has_pom_xml = True
+            info.type = "java"
+            info.framework = "maven"
+            info.entry = "pom.xml"
+            try:
+                content = (target / "pom.xml").read_text(encoding="utf-8")
+                m = re.search(r'<mainClass>([^<]+)</mainClass>', content)
+                if m:
+                    info.java_main_class = m.group(1)
+            except Exception:
+                pass
+
+        # Node.js
+        if not info.entry and not info.has_pom_xml and (target / "package.json").is_file():
+            info.has_package_json = True
+            info.type = "node"
+            info.framework = "node"
+            info.entry = "package.json"
+
         return info
 
     # ── Step 2: 安装依赖 ──
 
     def install_deps(self, info: ProjectInfo) -> bool:
         """
-        安装 Python 依赖：
-        - 若 .venv 不存在则创建
-        - 若有 requirements.txt 则 pip install
+        安装项目依赖：
+        - Maven 项目: mvn package
+        - Node.js 项目: npm install
+        - Python 项目: 创建 venv + pip install
         - 超时 120s，失败告警不阻塞
 
         Returns: True if install succeeded (or skipped), False on failure
         """
         target = self.target_dir
         venv_path = target / ".venv"
+
+        # Maven 项目：编译打包
+        if info.framework == "maven":
+            self._log("Maven 项目：编译打包中...")
+            try:
+                subprocess.run(
+                    ["mvn", "package", "-q", "-DskipTests"],
+                    cwd=str(target),
+                    capture_output=True,
+                    timeout=120,
+                    check=True,
+                )
+                self._log("Maven 编译打包成功")
+                return True
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode(errors="replace")[-300:]
+                self._log(f"Maven 编译打包失败: {stderr}")
+                return False
+            except subprocess.TimeoutExpired:
+                self._log("Maven 编译打包超时 (>120s)")
+                return False
+
+        # Node.js 项目：安装依赖
+        if info.framework == "node":
+            self._log("Node.js 项目：安装 npm 依赖...")
+            try:
+                subprocess.run(
+                    ["npm", "install"],
+                    cwd=str(target),
+                    capture_output=True,
+                    timeout=120,
+                    check=True,
+                )
+                self._log("npm 依赖安装成功")
+                return True
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode(errors="replace")[-300:]
+                self._log(f"npm 依赖安装失败: {stderr}")
+                return False
+            except subprocess.TimeoutExpired:
+                self._log("npm 依赖安装超时 (>120s)")
+                return False
+
+        # Python 项目：创建 venv + pip install
         pip = str(venv_path / "bin" / "pip")
 
-        # 创建 venv
         if not info.has_venv:
             self._log("创建 Python 虚拟环境 (.venv)...")
             try:
@@ -181,6 +250,22 @@ class DeployRunner:
                 return False
         else:
             self._log("未检测到 requirements.txt，跳过依赖安装")
+            # 自动安装 uvicorn: 通用兜底项目可能需要 uvicorn
+            if info.framework in ("generic", "fastapi") and info.has_venv:
+                uvicorn_bin = str(venv_path / "bin" / "uvicorn")
+                if not os.path.exists(uvicorn_bin):
+                    self._log("检测到启动命令需要 uvicorn，自动安装...")
+                    try:
+                        subprocess.run(
+                            [pip, "install", "uvicorn"],
+                            cwd=str(target),
+                            capture_output=True,
+                            timeout=60,
+                            check=True,
+                        )
+                        self._log("uvicorn 自动安装成功")
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                        self._log(f"uvicorn 自动安装失败: {e}")
             return True
 
     # ── Step 3: 端口确定 ──
@@ -211,13 +296,31 @@ class DeployRunner:
 
     def _build_start_command(self, info: ProjectInfo) -> list[str]:
         """根据检测结果构建启动命令"""
-        target = self.target_dir
+        target = self.target_dir.resolve()
         venv_path = target / ".venv"
         python = str(venv_path / "bin" / "python3") if info.has_venv else "python3"
 
+        # Maven / Java 项目
+        if info.framework == "maven":
+            jar_files = sorted((target / "target").glob("*.jar"))
+            if jar_files:
+                return ["java", "-jar", str(jar_files[0])]
+            if info.java_main_class:
+                return ["java", "-cp", str(target / "target" / "classes"), info.java_main_class]
+            return ["java", "-jar", str(target / "target" / "*.jar")]
+
+        # Node.js 项目
+        if info.framework == "node":
+            try:
+                pkg = json.loads((target / "package.json").read_text())
+                main = pkg.get("main", "index.js")
+            except Exception:
+                main = "index.js"
+            return ["node", str(target / main)]
+
+        # Python 项目
         if info.framework == "fastapi":
             if info.entry == "main.py":
-                # 尝试从 main.py 推断 app 变量名
                 entry_path = target / "main.py"
                 app_var = "app"
                 try:

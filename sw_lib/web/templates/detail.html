@@ -70,3 +70,54 @@
 </div>
 {% endif %}
 {% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function() {
+    var logViewer = document.querySelector('.log-viewer');
+    if (!logViewer) return;
+
+    var taskName = window.location.pathname.split('/').pop();
+    var lastLineCount = 0;
+    var logBuffer = '';
+    var firstFetch = true;
+    var MAX_BUF = 10000;   // max accumulated chars before trim
+    var KEEP = 5000;       // keep this many after trim
+
+    function refreshLog() {
+        var prevScrollTop = logViewer.scrollTop;
+        var wasAtBottom = logViewer.scrollHeight - prevScrollTop - logViewer.clientHeight < 50;
+
+        fetch('/tasks/' + taskName + '/log?after_line=' + lastLineCount)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.lines && data.lines.length > 0) {
+                    var newRaw = data.lines.map(function(l) { return l.raw || ''; }).join('\n');
+                    if (firstFetch) {
+                        // First fetch replaces potentially-truncated server content
+                        logBuffer = newRaw;
+                    } else {
+                        logBuffer += (logBuffer ? '\n' : '') + newRaw;
+                    }
+                    if (logBuffer.length > MAX_BUF) {
+                        logBuffer = logBuffer.slice(-KEEP);
+                    }
+                    logViewer.textContent = logBuffer;
+                }
+                if (typeof data.total_lines === 'number') {
+                    lastLineCount = data.total_lines;
+                }
+                firstFetch = false;
+                if (wasAtBottom) {
+                    logViewer.scrollTop = logViewer.scrollHeight;
+                } else {
+                    logViewer.scrollTop = prevScrollTop;
+                }
+            })
+            .catch(function() {});
+    }
+
+    setInterval(refreshLog, 5000);
+})();
+</script>
+{% endblock %}

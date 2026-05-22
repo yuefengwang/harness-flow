@@ -309,7 +309,7 @@ class TaskService:
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
 
-        from .engine import _auto_check_gate, parse_route_field, inject_reroute_context, MAX_REROUTE
+        from .engine import _auto_check_gate, parse_route_field, inject_reroute_context, _reset_gate_checkboxes, MAX_REROUTE
         _auto_check_gate(name, cur_stage)
 
         # 路由决策：04-review 读取 Route 字段，其他阶段线性推进
@@ -344,6 +344,8 @@ class TaskService:
                 raise TaskError(f"返工已超过 {MAX_REROUTE} 次，需人工介入")
 
             inject_reroute_context(name, next_stage)
+            if next_stage == "01-brainstorming":
+                _reset_gate_checkboxes(name, next_stage)
             sw_log(name, f"reroute: {cur_stage} → {next_stage} (count={st['reroute_count']})", "sw")
 
         st["stage"] = next_stage

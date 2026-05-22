@@ -47,14 +47,15 @@ def _auto_check_gate(task_name: str, stage: str):
     content = "\n".join(lines) + "\n"
 
     # 04-review: 自动从 AI Output 回填 Route 字段
+    # 如果 AI Output 中包含 Route 决策→回填；若找不到→默认回退为 05-Archive
     if stage == "04-review" and "`___`" in content:
         route_from_output = _parse_route_from_ai_output(content)
-        if route_from_output:
-            content = content.replace(
-                "- **Route**: `___`",
-                f"- **Route**: `{route_from_output}`",
-                1
-            )
+        route_from_output = route_from_output or "05-Archive"
+        content = content.replace(
+            "- **Route**: `___`",
+            f"- **Route**: `{route_from_output}`",
+            1
+        )
 
     tpl.write_text(content, encoding="utf-8")
 
@@ -67,6 +68,8 @@ def _parse_route_from_ai_output(content: str) -> Optional[str]:
     - **建议路由：05-Archive（正常归档）**
     - **Route** 决策为 `05-Archive`
     - Route → 05-Archive
+    - 应返工至 03-Coding
+    - 路由决策为 01-Brainstorming
 
     Returns:
         Stage code 字符串 (如 "05-Archive") 或 None
@@ -83,9 +86,9 @@ def _parse_route_from_ai_output(content: str) -> Optional[str]:
     if m:
         return m.group(1)
 
-    # 匹配星号粗体格式: **建议路由：05-Archive** 或 **Route → 05-Archive**
+    # 匹配自然语言格式: 建议路由：X / Route → X / 应返工至 X / 路由决策为 X
     m = re.search(
-        r'(?:建议路由|Route|路由|路由决策)\s*[：:→>]\s*\*{0,2}\s*'
+        r'(?:建议路由|Route|路由|路由决策|应返工)\s*[：:→>为至]\s*\*{0,2}\s*'
         r'(05-Archive|03-Coding|02-Planning|01-Brainstorming)',
         ai_section
     )
@@ -161,6 +164,26 @@ def extract_evidence_table(task_name: str) -> Optional[str]:
         return None
 
     return "\n".join(table_lines)
+
+
+def _reset_gate_checkboxes(task_name: str, stage: str):
+    tpl = TASKS / task_name / f"{stage}.md"
+    if not tpl.exists():
+        return
+    content = tpl.read_text(encoding="utf-8")
+
+    in_gate = False
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## Gate"):
+            in_gate = True
+        elif in_gate and line.strip().startswith("##"):
+            break
+
+        if in_gate:
+            lines[i] = line.replace("[x]", "[ ]")
+
+    tpl.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def inject_reroute_context(task_name: str, target_stage: str):
@@ -706,6 +729,9 @@ class WorkflowEngine:
 
             # 注入返工上下文
             inject_reroute_context(self.name, next_stage)
+            # 返工到 brainstorming 时复位 Gate 勾选
+            if next_stage == "01-brainstorming":
+                _reset_gate_checkboxes(self.name, next_stage)
             sw_log(self.name, f"reroute: {self.stage} → {next_stage} (count={st['reroute_count']})", "sw")
 
         st["stage"] = next_stage
