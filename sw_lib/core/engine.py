@@ -47,15 +47,15 @@ def _auto_check_gate(task_name: str, stage: str):
     content = "\n".join(lines) + "\n"
 
     # 04-review: 自动从 AI Output 回填 Route 字段
-    # 如果 AI Output 中包含 Route 决策→回填；若找不到→默认回退为 05-Archive
+    # 仅当 AI Output 中明确包含 Route 决策时才回填；找不到则保持 ___ 让门禁拦截
     if stage == "04-review" and "`___`" in content:
         route_from_output = _parse_route_from_ai_output(content)
-        route_from_output = route_from_output or "05-Archive"
-        content = content.replace(
-            "- **Route**: `___`",
-            f"- **Route**: `{route_from_output}`",
-            1
-        )
+        if route_from_output:
+            content = content.replace(
+                "- **Route**: `___`",
+                f"- **Route**: `{route_from_output}`",
+                1
+            )
 
     tpl.write_text(content, encoding="utf-8")
 

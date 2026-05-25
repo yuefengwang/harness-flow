@@ -375,6 +375,12 @@ class OpenCodeAgent(BaseAgent):
         if not is_system:
             return message
 
+        # 部署 Agent 完全自主，不需要交互提示
+        if "OpenCode 交互兼容规则" in message:
+            return message
+        if "DO NOT ask questions" in message or self.stage == "deploy":
+            return message
+
         hint = (
             "\n\n=== OpenCode 交互兼容规则 ===\n"
             "向用户提问、寻求选择或确认时，**必须**使用 opencode 内置的 `question` 工具。\n"
@@ -384,8 +390,6 @@ class OpenCodeAgent(BaseAgent):
             "如果当前运行环境**确实**无法调用 `question` 工具（极少情况），"
             "请用单行简洁文本提问，不要使用编号/字母列表格式。"
         )
-        if "OpenCode 交互兼容规则" in message:
-            return message
         return message + hint
 
     def _event_type(self, event: Dict[str, Any]) -> str:

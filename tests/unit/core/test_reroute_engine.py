@@ -490,7 +490,7 @@ class TestWorkflowEngineAdvanceStage:
         assert st["stage"] == "04-review"  # unchanged
 
     def test_advance_review_empty_route(self, reroute_task, agent_callbacks):
-        """Empty route (___) → auto-fills to 05-Archive and advance succeeds."""
+        """Empty route (___) → advance returns False, gate blocks."""
         task_dir = TASKS / reroute_task
         _make_review_md(reroute_task, "___")
 
@@ -501,9 +501,9 @@ class TestWorkflowEngineAdvanceStage:
         with patch.object(engine, '_validate_post_hooks', return_value=True):
             result = engine.advance_stage()
 
-        assert result is True
+        assert result is False
         st = read_state(reroute_task)
-        assert st["stage"] == "05-archive"  # auto-routed to archive
+        assert st["stage"] == "04-review"  # unchanged — gate blocked
 
     def test_advance_reroute_exceeds_max(self, reroute_task, agent_callbacks):
         """reroute_count > MAX_REROUTE → blocked."""
@@ -781,7 +781,7 @@ class TestAutoCheckGateRouteAutoFill:
         assert "`05-Archive`" in content_after, "已填写的 Route 不应被修改"
 
     def test_no_ai_output_section_not_modified(self, dummy_task):
-        """无 AI Output section 时 Route ___ 自动回退为 05-Archive"""
+        """无 AI Output section 时 Route ___ 保持不动，由门禁拦截"""
         task_dir = TASKS / dummy_task
         content = (
             "# 04-Review\n"
@@ -796,8 +796,7 @@ class TestAutoCheckGateRouteAutoFill:
         _auto_check_gate(dummy_task, "04-review")
 
         result = (task_dir / "04-review.md").read_text(encoding="utf-8")
-        assert "`05-Archive`" in result, "无 AI Output 时，Route 应自动回退为 05-Archive"
-        assert "`___`" not in result, "___ 应已被替换"
+        assert "`___`" in result, "无 AI Output 时，Route 应保持 ___ 等待用户选择"
 
 
 # ── Tests: _parse_route_from_ai_output expanded patterns ──
