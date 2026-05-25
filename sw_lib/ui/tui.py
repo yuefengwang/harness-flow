@@ -661,8 +661,30 @@ class MonitorTUI:
                 opts.append((label, o))
             self.state.options = opts
             self.state.input_mode = "options"
+        elif self._is_review_routing_needed():
+            self.state.options = [
+                ("A", "归档 (05-Archive) — 代码通过，正常归档"),
+                ("B", "返工编码 (03-Coding) — 代码需修复"),
+                ("C", "返工规划 (02-Planning) — 设计需修订"),
+            ]
+            self.state.input_mode = "options"
         else:
             self.state.input_mode = detect_input_mode(self.state.log_lines, self.state.options)
+
+    def _is_review_routing_needed(self) -> bool:
+        """04-review 完成后，Route 未填写 → 需要用户选择路由"""
+        if self.state.stage != "04-review":
+            return False
+        if self.state.agent_status not in ("idle", "waiting"):
+            return False
+        if self.state.pending_questions:
+            return False
+        try:
+            from ..core.engine import parse_route_field
+            route = parse_route_field(self.state.name)
+            return route is None
+        except Exception:
+            return False
 
     def _add_log(self, source: str, msg: str):
         """引擎回调：添加日志"""
@@ -758,6 +780,21 @@ class MonitorTUI:
                 self._q_res_queue = None
             return
 
+        # 1.5 处理 04-review 路由选择（A/B/C — agent 完成、Route 未填时触发）
+        if self.state.stage == "04-review" and self.state.input_mode == "options" and not self.state.is_settled:
+            review_routes = {"A": "05-Archive", "B": "03-Coding", "C": "02-Planning"}
+            choice = cmd.strip().upper()
+            if choice in review_routes:
+                target = review_routes[choice]
+                route_labels = {"05-Archive": "归档", "03-Coding": "编码", "02-Planning": "规划"}
+                self._add_log("user", f"[{choice}] 返工到 {route_labels[target]} ({target})")
+                self._write_review_route(target)
+                self.state.input_mode = "none"
+                self.state.options = []
+                self._add_log("sw", f"✓ Route 已设置为 {target}。输入 /advance 推进。")
+                self._refresh_display()
+                return
+
         # 2. 处理普通 Agent 回复
         if self.state.is_settled:
             self._handle_settlement_choice(cmd)
@@ -766,6 +803,19 @@ class MonitorTUI:
         response = self._build_agent_response(cmd)
         self._add_log("user", response)
         self.engine.answer(response)
+
+    def _write_review_route(self, target: str):
+        """写入 04-review.md 中的 Route 字段"""
+        review_path = TASKS / self.state.name / "04-review.md"
+        if not review_path.exists():
+            return
+        content = review_path.read_text(encoding="utf-8")
+        content = content.replace(
+            "- **Route**: `___`",
+            f"- **Route**: `{target}`",
+            1
+        )
+        review_path.write_text(content, encoding="utf-8")
 
     def _handle_settlement_choice(self, choice: str):
         """执行最终结算动作"""

@@ -11,6 +11,7 @@ harness:
   mock_agent:
     enabled: true
     response_delay: 2.0
+    review_route: "02-Planning"
     responses:
       01-brainstorming: "## \U0001F916 AI Output\n\n### \u6B67\u4E49\u5206\u6790\u7ED3\
         \u679C\n- **\u7406\u89E3\u51C6\u786E\u5EA6**: \u9700\u6C42\u6E05\u6670\uFF0C\

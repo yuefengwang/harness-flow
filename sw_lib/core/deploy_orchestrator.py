@@ -36,7 +36,8 @@ Rules:
 3. command not found — install the missing tool automatically
 4. port conflict — use lsof to check what's using the port, then kill or change port
 5. Frontend projects (React, Vite, Vue, Next.js):
-   - Vite: npx vite --host --port {port}
+   - Vite: update vite.config.js to add `server.allowedHosts: ['.trycloudflare.com', 'localhost']` before starting
+   - Then start with: npx vite --host --port {port}
    - React CRA: PORT={port} npm start
    - Next.js: npx next dev -p {port}
    - General: try npm run dev first, then npm start
@@ -101,10 +102,14 @@ class DeployOrchestrator:
                 if self.log_callback:
                     self.log_callback(formatted)
 
+            import threading
+            import queue as _queue
+            agent_done = threading.Event()
+
             callbacks = {
                 "add_log": add_log,
                 "is_running": lambda: True,
-                "on_complete": lambda: None,
+                "on_complete": lambda: agent_done.set(),
                 "on_ask_user": lambda q, r: r.put([""] * len(q)),
             }
 
@@ -117,7 +122,6 @@ class DeployOrchestrator:
                 self.agent.send(system_prompt, is_system=True)
 
             from ..agents.pty import PtyAgent
-            import threading
 
             if isinstance(self.agent, PtyAgent):
                 t = threading.Thread(target=self.agent.reader_loop, daemon=True)
@@ -126,8 +130,17 @@ class DeployOrchestrator:
             if hasattr(self.agent, "wait"):
                 self.agent.wait()
 
+            # 等待 agent 完成：真实 agent（有真正的 _send_queue.Queue）通过
+            # on_complete 回调通知；mock agent 直接标记完成
+            if not isinstance(getattr(self.agent, "_send_queue", None), _queue.Queue):
+                agent_done.set()
+
+            agent_done.wait(timeout=300)
+
             result = self._parse_result(agent_output_lines)
             if not result:
+                self._log(f"Agent output lines ({len(agent_output_lines)}): " +
+                          "\n".join(agent_output_lines[-3:])[:500])
                 raise RuntimeError("Failed to parse deploy result from agent output")
 
             self._log(
