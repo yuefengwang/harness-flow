@@ -21,3 +21,5 @@ harness/credentials.yaml
 workflow/tasks/*
 
 workspace/*
+
+repo/*
