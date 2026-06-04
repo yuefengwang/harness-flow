@@ -93,12 +93,11 @@ def cmd_test(args):
                 continue
 
             if status == 'idle':
-                # Agent 空闲 → 当前阶段完成
                 engine.save_stage_output()
-                stage_completed += 1
-                print(f"    ✓ {STAGE_NAMES[current_idx]} 完成")
 
                 if current_idx >= max_stages - 1:
+                    stage_completed += 1
+                    print(f"    ✓ {STAGE_NAMES[current_idx]} 完成")
                     break  # archive complete
 
                 # 检查是否有错误（agent 输出中含 error）
@@ -106,8 +105,8 @@ def cmd_test(args):
                 if agent_errors:
                     print(f"    {red('⚠')} 阶段有 {len(agent_errors)} 个异常记录")
 
-                # /advance
-                engine.handle_command("advance")
+                prev_stage = current_stage
+                advanced = engine.handle_command("advance") or False
                 advance_count += 1
                 time.sleep(1)
 
@@ -115,6 +114,15 @@ def cmd_test(args):
                 st = read_state(task_name)
                 current_stage = st.get("stage", current_stage)
                 current_idx = int(st.get("stage_idx", current_idx))
+
+                if advanced or current_stage != prev_stage:
+                    stage_completed += 1
+                    print(f"    ✓ {STAGE_NAMES[current_idx]} 完成")
+                else:
+                    print(f"    {yellow('⚠')} {STAGE_NAMES[current_idx]} 推进失败（hooks 未通过），重试...")
+                    if engine.agent:
+                        engine.agent.status = "active"
+                    time.sleep(2)
                 continue
 
             if status == 'error':

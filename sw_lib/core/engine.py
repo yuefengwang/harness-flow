@@ -766,7 +766,7 @@ class WorkflowEngine:
         sub = parts[0]
 
         if sub == "advance":
-            self.advance_stage()
+            return self.advance_stage()
         elif sub == "status":
             st = read_state(self.name)
             self._add_log("sw", f"stage={st.get('stage','?')} status={st.get('stage_status','?')}")

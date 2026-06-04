@@ -95,18 +95,9 @@ class OpenCodeAgent(BaseAgent):
 
     def _start_server(self):
         self._kill_orphaned_servers()
-        debug = True
         try:
             self._server_port = self._find_free_port()
             self._server_url = f"http://127.0.0.1:{self._server_port}"
-
-            # Log env keys for debugging (without exposing secrets)
-            if debug:
-                for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-                          "NODE_EXTRA_CA_CERTS", "GOOGLE_API_KEY"):
-                    v = self._env.get(k, "")
-                    self._add_log("sw", f"  env[{k}] = {'[set]' if v else '[unset]'}")
-
             self._server_proc = subprocess.Popen(
                 ["opencode", "serve", "--port", str(self._server_port)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,

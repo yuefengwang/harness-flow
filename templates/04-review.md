@@ -15,8 +15,8 @@ Is the diff self-explanatory? ___
 - [ ] Access control OK
 
 ## Review Decision
-> ⚠️ **必须使用 ask_user 工具与用户交互确认 Route 决策**。不得自行填写。
-> 向用户汇报审查结论（通过/不通过项、影响分析），然后请用户选择：推进归档 或 返工到指定阶段。
+> ⚠️ **Route 决策**：根据分析判断直接填写 Route，无需等待用户确认。
+> 可用 ask_user 时优先交互确认；不可用时自行基于分析判断填写。默认为 05-Archive（归档）。
 >
 - **Route**: `___` (05-Archive / 03-Coding / 02-Planning / 01-Brainstorming)
 - **Reason**: ___
