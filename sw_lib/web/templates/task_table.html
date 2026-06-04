@@ -33,6 +33,13 @@
                         {% else %}
                         <a href="/tasks/{{ t.id }}">日志</a>
                         {% endif %}
+                        {% elif t.deploy_status == "deployed_unhealthy" %}
+                        <span class="status-unhealthy">服务异常</span>
+                        {% if t.deploy_url %}
+                        <a href="{{ t.deploy_url }}" target="_blank" class="deploy-url">{{ t.deploy_url }}</a>
+                        {% endif %}
+                        <button class="btn-success" hx-post="/tasks/{{ t.id }}/deploy"
+                                hx-target="#task-list" hx-swap="outerHTML">重新部署</button>
                         {% elif t.deploy_status == "deploy_failed" %}
                         <span class="status-failed">部署失败</span>
                         <button class="btn-success" hx-post="/tasks/{{ t.id }}/deploy"

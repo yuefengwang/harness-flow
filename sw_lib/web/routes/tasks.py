@@ -256,6 +256,7 @@ def _task_table_html() -> str:
             actions_html = '<td class="actions">'
             if t.get("status") == "Finished":
                 ds = t.get("deploy_status", "idle")
+                hs = t.get("health_status", "")
                 if ds == "idle":
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">部署</button>'
                 elif ds == "deploying":
@@ -264,6 +265,11 @@ def _task_table_html() -> str:
                     actions_html += '<span class="status-deployed">已部署</span> '
                     if t.get("deploy_url"):
                         actions_html += f'<a href="{t["deploy_url"]}" target="_blank" class="deploy-url">{t["deploy_url"]}</a> '
+                elif ds == "deployed_unhealthy":
+                    actions_html += '<span class="status-unhealthy">服务异常</span> '
+                    if t.get("deploy_url"):
+                        actions_html += f'<a href="{t["deploy_url"]}" target="_blank" class="deploy-url">{t["deploy_url"]}</a> '
+                    actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重新部署</button>'
                 elif ds == "deploy_failed":
                     actions_html += '<span class="status-failed">部署失败</span> '
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重试</button>'

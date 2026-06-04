@@ -31,3 +31,4 @@ Is the diff self-explanatory? ___
 - [ ] Full build: `___`
 - [ ] Lint/static analysis pass
 - [ ] Doc/config in sync
+- [ ] README.md CLI commands verified

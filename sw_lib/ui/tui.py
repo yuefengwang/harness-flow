@@ -193,26 +193,38 @@ def extract_options(lines: List[Tuple[str, str]], max_age: int = 20) -> List[Tup
     if not _has_question_context(latest_agent_block):
         return []
 
-    # 反向扫描选项：同一消息块中若包含多道题（标签相同），后出现的
-    # 选项（更新近的问题）优先覆盖先出现的，确保 footer 显示最
-    # 新的问题选项而非旧题的。
+    # 反向扫描选项（从消息末尾向前）：
+    # 1. 只保留最后一个连续选项区块（即最新问题对应的选项），
+    #    丢弃更早出现的编号列表（如任务描述中的 "1. 居中 2. 运镜 3. 字幕"）。
+    # 2. 同一区块内，后出现的选项（更新近的问题）优先覆盖先出现的。
     seen: set = set()
     options_reversed: List[Tuple[str, str]] = []
+    _block_sealed = False     # 遇到非选项行后封死，丢弃更早的选项组
+    _found_option = False     # 当前区块中至少发现了一个选项
     for _src, msg in reversed(latest_agent_block):
         for line in reversed(msg.splitlines()):
             line = line.strip()
             if not line:
                 continue
+            is_option = False
             for pat in OPTION_PATTERNS:
                 m = pat.match(line)
                 if m:
+                    if _block_sealed:
+                        is_option = True  # 标记已处理过，避免误触 seal
+                        break
                     label: str = m.group(1) or m.group(2)
                     text: str = m.group(m.lastindex)
                     text = text.rstrip('*').strip()
                     if label and text and label not in seen:
                         seen.add(label)
                         options_reversed.append((label, text))
+                        _found_option = True
+                    is_option = True
                     break
+            if not is_option and _found_option:
+                # 首次在选项行之后遇到非选项行 → 封死区块
+                _block_sealed = True
     # 恢复为正向顺序（从上到下）
     options_reversed.reverse()
 

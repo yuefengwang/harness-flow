@@ -78,7 +78,18 @@ def read_state(name: str) -> Dict[str, Any]:
         state["stage"] = STAGES[0]
     else:
         state["stage"] = state["stage"].strip('"')
-        
+
+    # health_config 默认值自动填充（向后兼容旧 .state 文件）
+    if "health_config" not in state:
+        state["health_config"] = {
+            "enabled": True,
+            "check_interval": 10,
+            "failure_threshold": 3,
+            "auto_redeploy": False,
+            "max_redeploys": 5,
+            "redeploy_window_sec": 300,
+        }
+
     return state
 
 

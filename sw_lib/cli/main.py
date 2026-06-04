@@ -14,7 +14,7 @@ from typing import List, Optional
 from .commands import (
     cmd_init, cmd_status, cmd_advance, cmd_resume,
     cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor,
-    cmd_dashboard, cmd_usage, cmd_deploy,
+    cmd_dashboard, cmd_usage, cmd_deploy, cmd_health,
 )
 
 
@@ -87,6 +87,12 @@ def main():
     p_deploy.add_argument("--no-tunnel", action="store_true", help="跳过 Cloudflare Tunnel")
     p_deploy.add_argument("--agent", help="指定 Agent 类型/角色 (如 opencode, gemini)")
 
+    # health
+    p_health = subparsers.add_parser("health", help="启动服务健康监控")
+    p_health.add_argument("--name", help="任务名称（默认从 .sw-context 检测）")
+    p_health.add_argument("--interval", type=int, default=0, help="健康检查间隔秒数 (覆盖 health_config 默认值)")
+    p_health.add_argument("--daemon", action="store_true", help="后台运行模式")
+
     # dashboard
     p_dash = subparsers.add_parser("dashboard", help="启动 Web Dashboard")
     p_dash.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
@@ -153,6 +159,9 @@ def main():
 
     elif cmd == "deploy":
         cmd_deploy(args)
+
+    elif cmd == "health":
+        cmd_health(args)
 
     elif cmd == "dashboard":
         cmd_dashboard(args)

@@ -163,6 +163,7 @@ class TaskService:
                 "removed_at": st.get("removed_at", "N/A") if from_trash else None,
                 "deploy_status": st.get("deploy_status", "idle"),
                 "deploy_url": st.get("deploy_url", ""),
+                "health_status": st.get("health_status", ""),
             })
         return results
 
@@ -344,8 +345,8 @@ class TaskService:
                 raise TaskError(f"返工已超过 {MAX_REROUTE} 次，需人工介入")
 
             inject_reroute_context(name, next_stage)
-            if next_stage == "01-brainstorming":
-                _reset_gate_checkboxes(name, next_stage)
+            # 复位目标阶段的 Gate 勾选，确保后置 hooks 能重新校验
+            _reset_gate_checkboxes(name, next_stage)
             sw_log(name, f"reroute: {cur_stage} → {next_stage} (count={st['reroute_count']})", "sw")
 
         st["stage"] = next_stage
@@ -397,10 +398,32 @@ class TaskService:
         st = self.get_task_state(name)
         st["deploy_status"] = "deployed" if success else "deploy_failed"
         st["updated_at"] = now()
-        if deploy_url:
-            st["deploy_url"] = deploy_url
+        if success:
+            st["health_status"] = "ok"
+            if deploy_url:
+                st["deploy_url"] = deploy_url
+            if "health_config" not in st:
+                st["health_config"] = {
+                    "enabled": True,
+                    "check_interval": 10,
+                    "failure_threshold": 3,
+                    "auto_redeploy": False,
+                    "max_redeploys": 5,
+                    "redeploy_window_sec": 300,
+                }
+        else:
+            if deploy_url:
+                st["deploy_url"] = deploy_url
+            elif "deploy_url" in st:
+                # 部署失败且无新 URL → 清除旧 URL，避免 HealthMonitor 检测失效域名
+                del st["deploy_url"]
         write_state(name, st)
         upsert_task_summary(name, deploy_status=st["deploy_status"])
+
+    def _write_state_safe(self, name: str, data: dict):
+        """安全写入状态（供 HealthMonitor 等外部调用），直接写 .state 文件。"""
+        from .state import state_path, write_state as _ws
+        _ws(name, data)
 
 
 _service = TaskService()

@@ -56,6 +56,9 @@ def _auto_check_gate(task_name: str, stage: str):
                 f"- **Route**: `{route_from_output}`",
                 1
             )
+            # 如果是返工路由，同时自动回填 Reroute Evidence 表
+            if route_from_output != "05-Archive":
+                content = _auto_fill_evidence_from_ai_output(content)
 
     tpl.write_text(content, encoding="utf-8")
 
@@ -96,6 +99,90 @@ def _parse_route_from_ai_output(content: str) -> Optional[str]:
         return m.group(1)
 
     return None
+
+
+def _auto_fill_evidence_from_ai_output(content: str) -> str:
+    """从 AI Output 的审查结论表格中提取未通过的项，自动填入 Reroute Evidence 表。
+
+    只在 Evidence 表的数据行全为占位符 (___) 时才会自动填充，
+    已有人工内容时不做修改。
+    """
+    import re
+
+    # 找到 Reroute Evidence 段
+    ev_start = content.find("### Reroute Evidence")
+    if ev_start < 0:
+        return content
+    # 找到下一个 ## 标题作为结束
+    next_section = content.find("\n##", ev_start + 10)
+    ev_end = next_section if next_section > ev_start else len(content)
+    ev_section = content[ev_start:ev_end]
+
+    # 检查数据行是否全为占位符
+    data_lines = [l for l in ev_section.splitlines()
+                  if l.strip().startswith("|") and l.strip().count("|") >= 5]
+    data_lines = data_lines[2:]  # 跳过表头和分隔行
+    has_real = any("___" not in l for l in data_lines)
+    if has_real:
+        return content  # 已有真实数据，不覆盖
+
+    # 从 AI Output 提取未通过的审查项
+    marker = "## 🤖 AI Output"
+    ai_idx = content.find(marker)
+    if ai_idx < 0:
+        return content
+    ai_section = content[ai_idx + len(marker):]
+    # 截断到下一个 H2 标题（但排除 ### 子标题）
+    ai_end = ai_section.find("\n## ")
+    if ai_end > 0:
+        ai_section = ai_section[:ai_end]
+    elif ai_section.startswith("\n## "):
+        ai_section = ""
+
+    issues: list = []
+    saw_table_header = False
+    # 识别形如 | 门禁 | 状态 | 或 | 项目 | 结论 | 的审查表格
+    for line in ai_section.splitlines():
+        stripped = line.strip()
+        if "|" not in stripped:
+            continue
+        # 检测表头行
+        if not saw_table_header and ("门禁" in stripped or "状态" in stripped
+                                      or "项目" in stripped or "Gate" in stripped):
+            saw_table_header = True
+            continue
+        if stripped.startswith("|---"):
+            continue
+        if not saw_table_header:
+            continue
+        # 数据行：找 ⚠️ ❌ ⛔ 或非 ✅ 的状态
+        if any(sym in stripped for sym in ('⚠️', '❌', '⛔', '⚠', '⛔')):
+            parts = [p.strip() for p in stripped.split("|")]
+            if len(parts) >= 3:
+                gate_name = parts[1]
+                status = parts[2] if len(parts) > 2 else ""
+                issues.append((gate_name, status))
+
+    if not issues:
+        # 无明确问题行 → 不做任何改动
+        return content
+
+    # 用第一个问题构造 evidence 行
+    gate_name, note = issues[0]
+    row = f"| 1 | {gate_name} | medium | coding | 审查发现: {note} |"
+
+    # 替换第一个占位符数据行 (| 1 | ___ | ...)
+    pattern = r'(\|\s*)1(\s*\|\s*)___(\s*\|.*)'
+    if re.search(pattern, content):
+        content = re.sub(pattern, row, content, count=1)
+    else:
+        # 后备：在表头之后插入新行
+        ev_idx = content.find("|---|------|---------|---------|-------------|")
+        if ev_idx > 0:
+            insert_pos = content.index("\n", ev_idx) + 1
+            content = content[:insert_pos] + row + "\n" + content[insert_pos:]
+
+    return content
 
 
 MAX_REROUTE = 3
@@ -737,9 +824,8 @@ class WorkflowEngine:
 
             # 注入返工上下文
             inject_reroute_context(self.name, next_stage)
-            # 返工到 brainstorming 时复位 Gate 勾选
-            if next_stage == "01-brainstorming":
-                _reset_gate_checkboxes(self.name, next_stage)
+            # 复位目标阶段的 Gate 勾选，确保后置 hooks 能重新校验
+            _reset_gate_checkboxes(self.name, next_stage)
             sw_log(self.name, f"reroute: {self.stage} → {next_stage} (count={st['reroute_count']})", "sw")
 
         st["stage"] = next_stage

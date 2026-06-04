@@ -26,6 +26,7 @@ from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harn
 from ..web.app import create_app
 from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
 from ..core.deploy_orchestrator import DeployOrchestrator
+from ..core.health import HealthMonitor, HealthConfig
 from ..core.utils import (
     green, yellow, blue,
     ok, warn, hdr, die,
@@ -183,8 +184,19 @@ def cmd_advance(args):
         new_st = _service.advance_stage(name)
         new_label = STAGE_NAMES[new_st['stage_idx']]
         hdr(f"阶段推进 → {new_label}")
-        print(f"  状态: Pending (等待运行)")
-        print(f"  下一步: ./sw monitor")
+
+        # 返工时自动启动目标阶段（无需用户手动 ./sw monitor）
+        if new_st.get("reroute_count", 0) > 0:
+            if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("SW_NON_INTERACTIVE") != "1":
+                print(f"  🔄 返工至 {new_label}，自动启动中...")
+                args.name = name
+                cmd_monitor(args)
+                return
+            else:
+                print(f"  状态: Running (已就绪，可运行 ./sw monitor 查看)")
+        else:
+            print(f"  状态: Pending (等待运行)")
+            print(f"  下一步: ./sw monitor")
 
     except TaskError as e:
         die(str(e))
@@ -265,6 +277,87 @@ def cmd_dashboard(args):
     app = create_app()
     print(f"🌐 Harness-Flow Dashboard: http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+def cmd_health(args):
+    """启动服务健康监控"""
+    name = getattr(args, "name", "") or ""
+    if not name:
+        ctx = find_context_from_cwd()
+        if ctx and ctx.get("project"):
+            name = ctx["project"]
+        else:
+            name = get_active_from_status()
+        if not name or name == "无":
+            die("未指定任务名。请使用 --name 指定。")
+
+    try:
+        st = _service.get_task_state(name)
+    except TaskError as e:
+        die(str(e))
+
+    health_config = st.get("health_config", {})
+    target_dir = st.get("target_dir", "")
+
+    if not target_dir:
+        die(f"任务 {name} 未设置目标目录")
+
+    # 从 deploy_url 解析端口
+    deploy_url = st.get("deploy_url", "")
+    port = 8000
+    if deploy_url and ":" in deploy_url:
+        try:
+            port = int(deploy_url.rsplit(":", 1)[-1].rstrip("/"))
+        except (ValueError, IndexError):
+            pass
+
+    # CLI 参数覆盖 health_config 中的间隔
+    cli_interval = getattr(args, "interval", 0)
+    config = HealthConfig(
+        enabled=health_config.get("enabled", True),
+        check_interval=cli_interval if cli_interval > 0 else health_config.get("check_interval", 10),
+        failure_threshold=health_config.get("failure_threshold", 3),
+        auto_redeploy=health_config.get("auto_redeploy", False),
+        max_redeploys=health_config.get("max_redeploys", 5),
+        redeploy_window_sec=health_config.get("redeploy_window_sec", 300),
+    )
+
+    check_url = deploy_url if deploy_url.startswith("http") else ""
+
+    hdr(f"服务健康监控: {name}")
+    print(f"目标目录: {target_dir}")
+    print(f"服务端口: {port}")
+    print(f"检查间隔: {config.check_interval}s")
+    print(f"自动恢复: {'开启' if config.auto_redeploy else '关闭'}")
+    if check_url:
+        print(f"HTTP 检测: {check_url}")
+    print()
+
+    monitor = HealthMonitor(
+        name=name,
+        target_dir=target_dir,
+        port=port,
+        config=config,
+        log_callback=print,
+        check_url=check_url,
+    )
+
+    import signal as _signal
+
+    def _handle_stop(signum=None, frame=None):
+        print()
+        warn("正在停止健康监控...")
+        monitor.stop()
+
+    _signal.signal(_signal.SIGINT, _handle_stop)
+    _signal.signal(_signal.SIGTERM, _handle_stop)
+
+    try:
+        monitor.run()
+    except KeyboardInterrupt:
+        monitor.stop()
+
+    ok("健康监控已停止")
 
 
 def cmd_deploy(args):

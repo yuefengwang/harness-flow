@@ -534,6 +534,134 @@ class TestWorkflowEngineAdvanceStage:
         st = read_state(reroute_task)
         assert st["stage_status"] == "blocked"
 
+    def test_advance_reroute_to_coding_resets_gate(self, reroute_task, agent_callbacks):
+        """Reroute to coding should reset [x]→[ ] in Gate section (was only for brainstorming before)."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
+            "1 | 输入校验缺失 | high | coding | src/api/users.py:42",
+        ])
+        # Write coding.md with pre-checked gate items to simulate completed stage
+        (task_dir / "03-coding.md").write_text(
+            "# 03-Coding\n\n"
+            "## Gate\n"
+            "- [x] Code builds & tests pass\n"
+            "- [x] All tasks implemented\n"
+            "\n"
+            "## 🤖 AI Output\n"
+            "- [x] Some old checkbox\n",
+            encoding="utf-8",
+        )
+
+        callbacks = dict(agent_callbacks)
+        callbacks["add_log"] = MagicMock()
+        callbacks["on_settlement"] = MagicMock()
+
+        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+        with patch.object(engine, '_validate_post_hooks', return_value=True):
+            with patch.object(engine, '_create_agent'):
+                with patch.object(engine, 'run_stage'):
+                    result = engine.advance_stage()
+
+        assert result is True
+        content = (task_dir / "03-coding.md").read_text(encoding="utf-8")
+        # Gate section must have [x]→[ ] reset
+        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
+        assert "[x]" not in gate_section, f"Gate section should be reset: {gate_section}"
+        # AI Output section should keep its [x]
+        assert "[x] Some old checkbox" in content, "AI Output [x] should not be reset"
+
+    def test_advance_reroute_to_planning_resets_gate(self, reroute_task, agent_callbacks):
+        """Reroute to planning should also reset [x]→[ ] in Gate section."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "02-Planning", evidence_rows=[
+            "1 | 架构设计不合理 | high | planning | docs/arch.md",
+        ])
+        (task_dir / "02-planning.md").write_text(
+            "# 02-Planning\n\n"
+            "## Gate\n"
+            "- [x] Architecture finalized\n"
+            "- [x] Tasks itemized\n"
+            "- [x] Tests pass\n"
+            "\n"
+            "## 🤖 AI Output\n"
+            "- [x] Some planning note\n",
+            encoding="utf-8",
+        )
+
+        callbacks = dict(agent_callbacks)
+        callbacks["add_log"] = MagicMock()
+        callbacks["on_settlement"] = MagicMock()
+
+        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+        with patch.object(engine, '_validate_post_hooks', return_value=True):
+            with patch.object(engine, '_create_agent'):
+                with patch.object(engine, 'run_stage'):
+                    result = engine.advance_stage()
+
+        assert result is True
+        content = (task_dir / "02-planning.md").read_text(encoding="utf-8")
+        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
+        assert "[x]" not in gate_section, f"Gate section should be reset: {gate_section}"
+        assert "[x] Some planning note" in content, "AI Output [x] should not be reset"
+
+    def test_advance_reroute_run_stage_is_called(self, reroute_task, agent_callbacks):
+        """Reroute must call run_stage() so the target stage auto-starts."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
+            "1 | 问题 | high | coding | f.py",
+        ])
+        _make_coding_md(reroute_task)
+
+        callbacks = dict(agent_callbacks)
+        callbacks["add_log"] = MagicMock()
+        callbacks["on_settlement"] = MagicMock()
+
+        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+        with patch.object(engine, '_validate_post_hooks', return_value=True):
+            with patch.object(engine, '_create_agent'):
+                with patch.object(engine, 'run_stage') as mock_run:
+                    engine.advance_stage()
+
+        # run_stage should have been called (auto-start the rerouted-to stage)
+        mock_run.assert_called_once()
+
+    def test_advance_reroute_to_coding_routing_integrity(self, reroute_task, agent_callbacks):
+        """Reroute to coding: stage + context injection + gate reset all happen atomically."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
+            "1 | 缺少校验 | high | coding | src/app.py:10",
+        ])
+        (task_dir / "03-coding.md").write_text(
+            "# 03-Coding\n\n"
+            "## Gate\n"
+            "- [x] Code builds\n",
+            encoding="utf-8",
+        )
+
+        callbacks = dict(agent_callbacks)
+        callbacks["add_log"] = MagicMock()
+        callbacks["on_settlement"] = MagicMock()
+
+        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+        with patch.object(engine, '_validate_post_hooks', return_value=True):
+            with patch.object(engine, '_create_agent'):
+                with patch.object(engine, 'run_stage'):
+                    engine.advance_stage()
+
+        st = read_state(reroute_task)
+        assert st["stage"] == "03-coding"
+        assert st["stage_idx"] == 2
+        assert st["reroute_count"] == 1
+
+        # Gate must be reset (not left as [x] from previous pass)
+        coding_md = (task_dir / "03-coding.md").read_text(encoding="utf-8")
+        gate_section = coding_md.split("## Gate")[1].split("##")[0] if "## Gate" in coding_md else ""
+        assert "[x]" not in gate_section, f"Gate still has [x]: {gate_section}"
+
+        # Context must be injected
+        assert "返工上下文" in coding_md
+        assert "缺少校验" in coding_md
+
     def test_advance_reroute_count_tracking(self, reroute_task, agent_callbacks):
         """Multiple reroutes increment reroute_count."""
         task_dir = TASKS / reroute_task
@@ -662,6 +790,57 @@ class TestTaskServiceAdvanceStage:
 
         assert result["stage"] == "04-review"
         assert result["stage_idx"] == 3
+
+    def test_service_reroute_to_coding_resets_gate(self, reroute_task):
+        """TaskService: reroute to coding must reset [x]→[ ] in Gate section."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
+            "1 | 测试 | high | coding | f.py",
+        ])
+        (task_dir / "03-coding.md").write_text(
+            "# 03-Coding\n\n"
+            "## Gate\n"
+            "- [x] Code builds\n"
+            "- [x] Tests pass\n"
+            "\n"
+            "## 🤖 AI Output\n"
+            "- [x] Detail\n",
+            encoding="utf-8",
+        )
+
+        svc = TaskService()
+        with patch('sw_lib.core.engine._auto_check_gate'):
+            svc.advance_stage(reroute_task)
+
+        content = (task_dir / "03-coding.md").read_text(encoding="utf-8")
+        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
+        assert "[x]" not in gate_section, f"Gate should be reset: {gate_section}"
+        assert "[x] Detail" in content, "AI Output [x] should be preserved"
+
+    def test_service_reroute_to_planning_resets_gate(self, reroute_task):
+        """TaskService: reroute to planning must reset [x]→[ ] in Gate section."""
+        task_dir = TASKS / reroute_task
+        _make_review_md(reroute_task, "02-Planning", evidence_rows=[
+            "1 | 架构问题 | high | planning | arch.md",
+        ])
+        (task_dir / "02-planning.md").write_text(
+            "# 02-Planning\n\n"
+            "## Gate\n"
+            "- [x] Design done\n"
+            "\n"
+            "## 🤖 AI Output\n"
+            "- [x] Task list\n",
+            encoding="utf-8",
+        )
+
+        svc = TaskService()
+        with patch('sw_lib.core.engine._auto_check_gate'):
+            svc.advance_stage(reroute_task)
+
+        content = (task_dir / "02-planning.md").read_text(encoding="utf-8")
+        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
+        assert "[x]" not in gate_section, f"Gate should be reset: {gate_section}"
+        assert "[x] Task list" in content, "AI Output [x] should be preserved"
 
     def test_service_last_stage(self, reroute_task):
         """TaskService: last stage → marked Finished."""
@@ -856,3 +1035,119 @@ class TestParseRouteFromAiOutput:
         """No AI Output section → None"""
         content = "# 04-Review\n\n## Gate\n"
         assert _parse_route_from_ai_output(content) is None
+
+
+# ── Tests: _auto_check_gate auto-fills Reroute Evidence ──
+
+class TestAutoCheckGateEvidenceAutoFill:
+    """验证 _auto_check_gate 在回填 Route 的同时自动回填 Reroute Evidence。"""
+
+    def _make_review_with_gate_table(self, task_name: str, route_in_output: str,
+                                      gate_rows: list):
+        """创建包含门禁表格的 AI Output 04-review.md，模拟真实场景。"""
+        task_dir = TASKS / task_name
+        # 模板部分 — Route 和 Evidence 均为占位符
+        template = (
+            "# 04-Review\n\n"
+            "## Review Decision\n"
+            "- **Route**: `___` (05-Archive / 03-Coding / 02-Planning / 01-Brainstorming)\n"
+            "- **Reason**: ___\n"
+            "\n"
+            "### Reroute Evidence (仅在返工时填写)\n"
+            "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
+            "|---|------|---------|---------|-------------|\n"
+            "| 1 | ___ | high/med/low | coding/planning/brainstorming | ___ |\n"
+            "| 2 | ___ | high/med/low | coding/planning/brainstorming | ___ |\n"
+            "\n"
+            "## Gate\n"
+            "- [ ] Full build: `pytest`\n"
+        )
+        # AI Output — 包含审查结论表格
+        ai_lines = [
+            "\n## 🤖 AI Output\n\n",
+            "### 审查结论\n\n",
+            "| 门禁 | 状态 |\n",
+            "|------|------|\n",
+        ]
+        for gate, status in gate_rows:
+            ai_lines.append(f"| {gate} | {status} |\n")
+        ai_lines.extend([
+            "\n",
+            f"**建议路由：{route_in_output}（因上述门禁未通过需返工）**\n",
+        ])
+        content = template + "".join(ai_lines)
+        (task_dir / "04-review.md").write_text(content, encoding="utf-8")
+
+    def test_reroute_evidence_auto_filled_from_failed_gates(self, dummy_task):
+        """Route 回填 coding + 有两个门禁未通过 → 自动填充 Evidence 第一行"""
+        self._make_review_with_gate_table(dummy_task, "03-Coding", [
+            ("交付物一致性", "⚠️ README 缺文档"),
+            ("文档内容校验", "⚠️ 新 CLI 参数未入 README"),
+        ])
+
+        _auto_check_gate(dummy_task, "04-review")
+
+        content = (TASKS / dummy_task / "04-review.md").read_text(encoding="utf-8")
+        assert "`03-Coding`" in content, "Route 应被回填"
+
+        # Evidence 表中至少有一行不含 ___
+        evidence_section = content.split("### Reroute Evidence")[1].split("## Gate")[0]
+        data_rows = [l for l in evidence_section.splitlines()
+                     if l.strip().startswith("|") and "---" not in l]
+        # 跳表头（分隔行已在过滤中移除）
+        data_rows = data_rows[1:]
+        non_placeholder_rows = [r for r in data_rows if "___" not in r]
+        assert len(non_placeholder_rows) >= 1, (
+            f"Evidence 表应有至少一行非占位符: {evidence_section}"
+        )
+
+    def test_reroute_evidence_not_overwritten_if_already_filled(self, dummy_task):
+        """Evidence 表已填写时不被覆盖"""
+        task_dir = TASKS / dummy_task
+        content = (
+            "# 04-Review\n\n"
+            "## Review Decision\n"
+            "- **Route**: `03-Coding`\n"
+            "\n"
+            "### Reroute Evidence\n"
+            "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
+            "|---|------|---------|---------|-------------|\n"
+            "| 1 | 已填问题 | high | coding | file.py:10 |\n"
+            "\n"
+            "## Gate\n"
+            "- [ ] Full build\n"
+        )
+        (task_dir / "04-review.md").write_text(content, encoding="utf-8")
+
+        _auto_check_gate(dummy_task, "04-review")
+
+        result = (task_dir / "04-review.md").read_text(encoding="utf-8")
+        assert "已填问题" in result, "已填的 Evidence 不应被覆盖"
+
+    def test_archive_route_does_not_fill_evidence(self, dummy_task):
+        """Route=05-Archive 时不应自动填 Evidence"""
+        task_dir = TASKS / dummy_task
+        content = (
+            "# 04-Review\n\n"
+            "## Review Decision\n"
+            "- **Route**: `___`\n"
+            "\n"
+            "### Reroute Evidence (仅在返工时填写)\n"
+            "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
+            "|---|------|---------|---------|-------------|\n"
+            "| 1 | ___ | high/med/low | coding/planning/brainstorming | ___ |\n"
+            "\n"
+            "## 🤖 AI Output\n\n"
+            "**建议路由：05-Archive（正常归档）**\n"
+            "\n"
+            "## Gate\n"
+            "- [ ] Full build\n"
+        )
+        (task_dir / "04-review.md").write_text(content, encoding="utf-8")
+
+        _auto_check_gate(dummy_task, "04-review")
+
+        result = (task_dir / "04-review.md").read_text(encoding="utf-8")
+        # Evidence 行仍保持占位符（归档不需要返工证据）
+        data_rows = result.split("### Reroute Evidence")[1].split("## Gate")[0]
+        assert "| 1 | ___" in data_rows or data_rows.strip() == "", "Archive 不应填 evidence"
