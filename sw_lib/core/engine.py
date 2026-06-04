@@ -601,6 +601,9 @@ class WorkflowEngine:
             "is_running": self._is_running,
             "on_complete": self._on_agent_complete,
             "on_ask_user": self._on_ask_user,
+            # Route agent text output and reasoning into output_lines for save_stage_output()
+            "on_text": lambda t: self._add_log("agent", t),
+            "on_reasoning": lambda t: self._add_log("agent", t),
         }
         if "on_settlement" in self.callbacks:
             callbacks["on_settlement"] = self.callbacks["on_settlement"]
