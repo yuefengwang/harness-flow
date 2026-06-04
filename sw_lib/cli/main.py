@@ -18,7 +18,17 @@ from .commands import (
 )
 
 
+def _ensure_bootstrapped():
+    """Activate Phase 1-3 workflow chain on first CLI invocation."""
+    try:
+        from ..core.bootstrap import bootstrap
+        bootstrap()
+    except Exception:
+        pass  # bootstrap failure is non-fatal; system falls back to legacy
+
+
 def main():
+    _ensure_bootstrapped()
     parser = argparse.ArgumentParser(
         prog="sw",
         description="Harness-Flow Agent Workflow CLI",

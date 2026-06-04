@@ -292,16 +292,11 @@ class TaskService:
         return StageValidator.check(task_dir, cur_stage, idx)
 
     def advance_stage(self, name: str) -> Dict[str, Any]:
-        """
-        执行阶段推进逻辑。
-        若已是最后阶段 (archive)，标记为 Finished。
-        否则推进到下一阶段，状态默认为 'pending'。
-        04-review 阶段支持路由决策（读取 **Route**: `目标阶段` 字段）。
-        """
+        """执行阶段推进 — 委托给 WorkflowChain 进行路由决策。"""
         st = self.get_task_state(name)
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
-        
+
         if idx >= len(STAGES) - 1:
             st["stage_status"] = "Finished"
             st["updated_at"] = now()
@@ -310,56 +305,28 @@ class TaskService:
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
 
-        from .engine import _auto_check_gate, parse_route_field, inject_reroute_context, _reset_gate_checkboxes, MAX_REROUTE
+        from .engine import _auto_check_gate, WorkflowEngine
         _auto_check_gate(name, cur_stage)
 
-        # 路由决策：04-review 读取 Route 字段，其他阶段线性推进
-        if cur_stage == "04-review":
-            target = parse_route_field(name)
-            if target and target in STAGES:
-                next_idx = STAGES.index(target)
-            else:
-                raise TaskError("Route 字段无效或未填写，无法推进。请在 Review Decision 中填写 **Route**: `目标阶段`")
-        else:
-            next_idx = idx + 1
+        from ..runnable.base import StageInput
+        chain = WorkflowEngine._workflow_chain
+        if chain is None:
+            raise TaskError("WorkflowChain 未初始化，请先执行 bootstrap()")
 
-        next_stage = STAGES[next_idx]
-
-        # 返工处理
-        _is_reroute = (cur_stage == "04-review" and next_stage != "05-archive")
-        if _is_reroute:
-            st["reroute_count"] = st.get("reroute_count", 0) + 1
-            st.setdefault("reroute_history", []).append({
-                "from": cur_stage,
-                "to": next_stage,
-                "at": now(),
-                "count": st["reroute_count"],
-            })
-
-            if st["reroute_count"] > MAX_REROUTE:
-                st["stage_status"] = "blocked"
-                st["updated_at"] = now()
-                write_state(name, st)
-                upsert_task_summary(name, stage_status="blocked")
-                sw_log(name, f"reroute blocked: exceeded {MAX_REROUTE} reroutes", "sw")
-                raise TaskError(f"返工已超过 {MAX_REROUTE} 次，需人工介入")
-
-            inject_reroute_context(name, next_stage)
-            # 复位目标阶段的 Gate 勾选，确保后置 hooks 能重新校验
-            _reset_gate_checkboxes(name, next_stage)
-            sw_log(name, f"reroute: {cur_stage} → {next_stage} (count={st['reroute_count']})", "sw")
+        result = chain.invoke(StageInput(
+            task_name=name, stage=cur_stage, stage_idx=idx,
+        ))
+        next_stage = result.stage
 
         st["stage"] = next_stage
-        st["stage_idx"] = next_idx
+        st["stage_idx"] = [s for s in chain._stage_map.values()
+                            if s.stage == next_stage][0].stage_idx if next_stage else idx
         st["stage_status"] = "pending"
         st["updated_at"] = now()
-        
         write_state(name, st)
-        
-        upsert_task_summary(name,
-            stage=next_stage, stage_idx=next_idx, stage_status="pending")
-               
-        sw_log(name, f"advanced to stage {next_idx}: {next_stage} (pending)", "sw")
+        upsert_task_summary(name, stage=next_stage, stage_idx=st["stage_idx"],
+                             stage_status="pending")
+        sw_log(name, f"advanced to {next_stage} (via chain)", "sw")
         return st
 
     def deploy_task(self, name: str, force: bool = False) -> Dict[str, Any]:

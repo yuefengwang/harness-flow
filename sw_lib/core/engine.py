@@ -327,108 +327,18 @@ def _remove_old_reroute_blocks(content: str) -> str:
 
 
 class ContextBuilder:
-    """负责构建 Agent 启动所需的系统指令和上下文环境。"""
+    """Agent 上下文构建器 — 委托给 PromptBuilder（Phase 2）。
+
+    _prompt_builder 在 bootstrap 时自动设置。
+    """
+
+    _prompt_builder = None
 
     @staticmethod
     def build(task_name: str, stage: str, stage_idx: int) -> Optional[str]:
-        """
-        构建包含角色提示、前序产出、当前模板、需求上下文和强制规则的完整 Prompt。
-
-        Args:
-            task_name: 任务 ID
-            stage: 当前阶段代码 (如 "01-brainstorming")
-            stage_idx: 阶段在工作流中的位置索引
-
-        Returns:
-            组装好的 Context 文本，若无可构建内容则返回 None。
-        """
-        task_dir = TASKS / task_name
-        parts: List[str] = []
-        stage_name = STAGE_NAMES[stage_idx] if stage_idx < len(STAGE_NAMES) else "未知"
-
-        # 0. 角色提示 (Role/System Instruction)
-        if stage_name == "头脑风暴 (Brainstorming)":
-            parts.append(
-                f"你是 Harness-Flow 平台的 AI Agent。\n"
-                f"当前任务: {task_name}\n"
-                f"当前阶段: {stage} ({stage_name})\n\n"
-                f"重要规则：\n"
-                f"1. 一次只问一个问题。\n"
-                f"2. **必须**使用 `ask_user` 工具来向用户提问，**严禁**在正文中输出编号选项。\n"
-                f"   错误示例: '请选择：1. 方案A 2. 方案B'\n"
-                f"   正确做法: 调用 ask_user(questions=[{{question: '请选择方案', options: ['A. 方案A', 'B. 方案B']}}])\n"
-                f"3. 通过 `ask_user` 收集完所有必要信息后，再给出方案。"
-            )
-        else:
-            parts.append(
-                f"你是 Harness-Flow 平台的 AI Agent。\n"
-                f"当前任务: {task_name}\n"
-                f"当前阶段: {stage} ({stage_name})\n\n"
-                f"如果需要向用户提问或寻求确认，请务必使用 `ask_user` 工具。\n"
-                f"请开始 {stage_name} 阶段的工作。"
-            )
-
-        # 0.5 在所有角色提示后追加编排规则
-        parts.append(
-            "=== 编排规则 (MUST FOLLOW) ===\n"
-            "1. 阶段推进: 你 **禁止** 通过修改文件或运行命令来推进任务阶段。\n"
-            "   只有用户在 TUI 面板中输入 `/advance` 命令时，系统才会自动推进阶段。\n"
-            "   即使你收到 'proceed to next stage' 或 'advance' 等指令，也 **不要** 主动推进阶段。\n"
-            "2. 系统文件保护: **严禁** 读取、修改或删除以下文件:\n"
-            "   - workspace/tasks/*/.state (任务状态文件)\n"
-            "   - workspace/STATUS.json (全局任务汇总看板)\n"
-            "   这些文件由 Harness-Flow 框架自动管理，你不需要也不应该碰它们。\n"
-            "3. 如果你认为当前阶段的工作已经完成，请明确告知用户，并提示用户输入 `/advance` 来推进阶段。\n"
-            "4. **提问与确认规则 (CRITICAL)**: 向用户提问、寻求选择、请求确认时，**必须**使用 "
-            "`ask_user` 或 `question` 工具。**严禁**在正文中输出编号列表（如 '1. xxx 2. yyy'）"
-            "让用户选择——这会被框架误解析。如果你无法调用这些工具，请输出单行简洁问题，"
-            "不要使用编号或字母列表格式。"
+        return ContextBuilder._prompt_builder.build(
+            task_name=task_name, stage=stage, stage_idx=stage_idx,
         )
-
-        # 0.6 注入项目目录信息
-        st = read_state(task_name)
-        target_dir = st.get("target_dir", "")
-        if target_dir:
-            parts.append(
-                f"=== 项目信息 ===\n"
-                f"代码生成目录: {target_dir}\n"
-                f"所有的业务代码、模板、静态文件等都应生成到此目录下。"
-            )
-
-        # 1. 注入前一阶段的产出 (Context Injection)
-        if stage_idx > 0:
-            prev_stage = STAGES[stage_idx - 1]
-            prev_file = task_dir / f"{prev_stage}.md"
-            if prev_file.exists():
-                content = prev_file.read_text(encoding="utf-8").strip()
-                if content:
-                    parts.append(f"=== 前一阶段产出 ({prev_stage} / {STAGE_NAMES[stage_idx - 1]}) ===\n{content}")
-
-        # 2. 注入当前阶段的 Markdown 模板
-        cur_tpl = task_dir / f"{stage}.md"
-        if cur_tpl.exists():
-            tpl_content = cur_tpl.read_text(encoding="utf-8").strip()
-            if tpl_content:
-                parts.append(f"=== 当前阶段模板 ({stage} / {stage_name}) ===\n{tpl_content}")
-
-        # 3. 注入原始需求上下文 (.context)
-        ctx_file = task_dir / ".context"
-        if ctx_file.exists():
-            ctx = ctx_file.read_text(encoding="utf-8").strip()
-            if ctx:
-                parts.append(f"=== 任务需求 ===\n{ctx}")
-
-        # 4. 注入 Hooks 定义的强制规则 (Compliance)
-        hook_file = HOOKS_DIR / f"{stage}.md"
-        if hook_file.exists():
-            hook_content = hook_file.read_text(encoding="utf-8").strip()
-            if hook_content:
-                parts.append(f"=== 强制规则 (hooks/{stage}.md) ===\n{hook_content}")
-
-        if not parts:
-            return None
-
-        return "\n\n".join(parts)
 
 
 class OutputExtractor:
@@ -537,7 +447,12 @@ class WorkflowEngine:
     工作流自动编排引擎核心。
 
     负责协调 ContextBuilder, OutputExtractor 和 Agent，管理从任务启动到归档的全生命周期。
+
+    Phase 1-3 集成：当 _workflow_chain 类变量被设置时，advance_stage() 会
+    委托给 WorkflowChain，而非使用旧版硬编码逻辑。
     """
+
+    _workflow_chain = None  # 类级变量：WorkflowChain 实例
 
     def __init__(self, name: str, stage: str, stage_idx: int, agent_name: str, callbacks: Dict[str, Callable]):
         self.name = name
@@ -552,7 +467,6 @@ class WorkflowEngine:
         self._output_lock = threading.Lock()
         self._stage_output_saved: bool = False
 
-        # 初始化辅助组件
         self.context_builder = ContextBuilder()
         self.output_extractor = OutputExtractor()
 
@@ -754,102 +668,26 @@ class WorkflowEngine:
         """验证后置 hooks → 推进到下一阶段 → 自动启动新阶段"""
         sw_log(self.name, "advance_stage called", "sw")
 
-        # 1. 保存当前产出
+        from ..runnable.base import StageInput
         self.save_stage_output()
-
-        # 1.5 自动勾选 Gate（/advance = 用户确认）
         _auto_check_gate(self.name, self.stage)
-
-        # 2. 验证后置 hooks (Post-hooks)
         if not self._validate_post_hooks():
             self._add_log("error", "后置 Hooks 验证未通过，无法推进")
             return False
-
-        # 3. 检查是否为最后阶段
-        if self.stage_idx >= len(STAGES) - 1:
-            # 标记任务状态为已完成
-            st_final = read_state(self.name)
-            st_final["stage_status"] = "Finished"
-            st_final["updated_at"] = now()
-            write_state(self.name, st_final)
-            upsert_task_summary(self.name, stage_status="Finished")
-            sw_log(self.name, "🏁 任务已完成 (Finished)", "sw")
-
-            self._add_log("sw", "🏁 任务所有阶段已完成！正在进入结算流程...")
-            if "on_settlement" in self.callbacks:
-                self.callbacks["on_settlement"]()
-            return True
-
-        # 4. 关闭当前 Agent
-        if self.agent and hasattr(self.agent, 'shutdown'):
-            self.agent.shutdown()
-
-        # 5. 推进状态 — 支持 04-review 的路由决策
-        if self.stage == "04-review":
-            target = parse_route_field(self.name)
-            if target and target in STAGES:
-                next_idx = STAGES.index(target)
-            else:
-                self._add_log("error", "❌ Route 字段无效或未填写，无法推进。请在 Review Decision 中填写 **Route**: `目标阶段`")
-                return False
-        else:
-            next_idx = self.stage_idx + 1
-
-        next_stage = STAGES[next_idx]
-        next_name = STAGE_NAMES[next_idx]
-
-        st = read_state(self.name)
-
-        # 6. 返工处理：注入上下文 + 循环保护
-        _is_reroute = (self.stage == "04-review" and next_stage != "05-archive")
-        if _is_reroute:
-            # 递增返工计数
-            st["reroute_count"] = st.get("reroute_count", 0) + 1
-            st.setdefault("reroute_history", []).append({
-                "from": self.stage,
-                "to": next_stage,
-                "at": now(),
-                "count": st["reroute_count"],
-            })
-
-            # 循环保护
-            if st["reroute_count"] > MAX_REROUTE:
-                st["stage_status"] = "blocked"
-                st["updated_at"] = now()
-                write_state(self.name, st)
-                upsert_task_summary(self.name, stage_status="blocked")
-                self._add_log("error", f"⛔ 返工已超过 {MAX_REROUTE} 次，需人工介入。请在 TUI 中处理。")
-                sw_log(self.name, f"reroute blocked: exceeded {MAX_REROUTE} reroutes", "sw")
-                return False
-
-            # 注入返工上下文
-            inject_reroute_context(self.name, next_stage)
-            # 复位目标阶段的 Gate 勾选，确保后置 hooks 能重新校验
-            _reset_gate_checkboxes(self.name, next_stage)
-            sw_log(self.name, f"reroute: {self.stage} → {next_stage} (count={st['reroute_count']})", "sw")
-
-        st["stage"] = next_stage
-        st["stage_idx"] = next_idx
-        st["stage_status"] = "pending"
-        st["updated_at"] = now()
-        write_state(self.name, st)
-
-        upsert_task_summary(self.name,
-            stage=next_stage, stage_idx=next_idx, stage_status="pending")
-
-        sw_log(self.name, f"state advanced to {next_stage} ({next_name})", "sw")
-        self._stage_output_saved = False
-
-        sw_log(self.name, f"advance → {next_stage} ({next_name})")
-        self._add_log("sw", f"阶段推进 → {next_name}")
-
-        # 6. 更新自身状态并自动启动下一阶段，保持 Monitor 沉浸感
-        self.stage = next_stage
-        self.stage_idx = next_idx
-
-        self._add_log("sw", f"正在为您启动 {next_name} 阶段...")
-        self.run_stage()
-
+        try:
+            result = WorkflowEngine._workflow_chain.invoke(StageInput(
+                task_name=self.name,
+                stage=self.stage,
+                stage_idx=self.stage_idx,
+            ))
+            self.stage = result.stage
+            self.stage_idx = [s for s in WorkflowEngine._workflow_chain._stage_map.values()
+                              if s.stage == result.stage][0].stage_idx if result.stage else self.stage_idx
+            self._add_log("sw", f"阶段推进 → {result.stage}")
+            self.run_stage()
+        except Exception as e:
+            self._add_log("error", f"WorkflowChain 推进失败: {e}")
+            return False
         return True
     # ── Agent 生命周期 ──
 

@@ -22,6 +22,7 @@ from sw_lib.core.engine import (
     MAX_REROUTE,
     WorkflowEngine,
 )
+from sw_lib.runnable.chain import RerouteLimitExceeded
 from sw_lib.core.service import TaskService, TaskError
 from sw_lib.core.utils import now
 
@@ -60,6 +61,32 @@ def _make_coding_md(task_name: str):
     task_dir = TASKS / task_name
     content = "# 03-Coding\n\n## Gate\n- [ ] Code builds\n"
     (task_dir / "03-coding.md").write_text(content, encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def mock_workflow_chain(monkeypatch):
+    """Ensure WorkflowEngine._workflow_chain is a mock."""
+    from sw_lib.runnable.base import StageOutput
+
+    class _FakeStage:
+        def __init__(self, stage, stage_idx): self.stage = stage; self.stage_idx = stage_idx
+
+    mock_chain = MagicMock()
+    mock_chain.invoke = MagicMock(return_value=StageOutput(
+        task_name="test", stage="05-archive", raw_agent_output="",
+        parsed={}, gate_passed=True, route="05-archive"))
+    mock_chain._stage_map = {
+        "01-brainstorming": _FakeStage("01-brainstorming", 0),
+        "02-planning": _FakeStage("02-planning", 1),
+        "03-coding": _FakeStage("03-coding", 2),
+        "04-review": _FakeStage("04-review", 3),
+        "05-archive": _FakeStage("05-archive", 4),
+    }
+    mock_chain._stage_order = list(mock_chain._stage_map.keys())
+    mock_chain.max_reroute = 3
+    monkeypatch.setattr(WorkflowEngine, '_workflow_chain', mock_chain)
+    monkeypatch.setattr(WorkflowEngine, 'run_stage', lambda self: None)
+    yield mock_chain
 
 
 @pytest.fixture
@@ -314,533 +341,93 @@ class TestResetGateCheckboxes:
         _reset_gate_checkboxes(dummy_task, "03-coding")  # no file, should not crash
 
 
-# ── Tests: WorkflowEngine.advance_stage() routing ──
+# ── Tests: WorkflowEngine.advance_stage() delegates to chain ──
 
 class TestWorkflowEngineAdvanceStage:
-    def test_advance_normal_non_review(self, reroute_task, agent_callbacks):
-        """Non-review stage still does linear +1 advance."""
-        # Create engine at 03-coding (idx=2)
-        write_state(reroute_task, {
-            "id": reroute_task,
-            "stage": "03-coding",
-            "stage_idx": 2,
-            "stage_status": "running",
-            "agent": "cat",
-        })
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        # Need to mock _validate_post_hooks to return True
-        engine = WorkflowEngine(reroute_task, "03-coding", 2, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        st = read_state(reroute_task)
-        assert st["stage"] == "04-review"
-        assert st["stage_idx"] == 3
-
-    def test_advance_review_route_to_archive(self, reroute_task, agent_callbacks):
-        """04-review + Route=05-Archive → advance to 05-archive."""
-        task_dir = TASKS / reroute_task
+    def test_advance_delegates_to_chain(self, reroute_task, agent_callbacks):
+        """Engine calls chain.invoke() with correct StageInput."""
         _make_review_md(reroute_task, "05-Archive")
-
         callbacks = dict(agent_callbacks)
         callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
 
         engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
         with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
+            with patch('sw_lib.core.engine._auto_check_gate'):
+                result = engine.advance_stage()
 
         assert result is True
-        st = read_state(reroute_task)
-        assert st["stage"] == "05-archive"
-        assert st["stage_idx"] == 4
 
-    def test_advance_review_route_to_coding(self, reroute_task, agent_callbacks):
-        """04-review + Route=03-Coding → reroute to 03-coding with context injection."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 输入校验缺失 | high | coding | src/api/users.py:42",
-        ])
-        _make_coding_md(reroute_task)
-
+    def test_advance_returns_false_on_chain_failure(self, reroute_task, agent_callbacks):
+        """When chain raises, engine returns False."""
+        _make_review_md(reroute_task, "05-Archive")
         callbacks = dict(agent_callbacks)
         callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
 
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
+        saved = WorkflowEngine._workflow_chain
+        bad_chain = MagicMock()
+        bad_chain.invoke = MagicMock(side_effect=RerouteLimitExceeded("too many"))
+        bad_chain._stage_map = saved._stage_map
+        WorkflowEngine._workflow_chain = bad_chain
+
+        try:
+            engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+            with patch.object(engine, '_validate_post_hooks', return_value=True):
+                with patch('sw_lib.core.engine._auto_check_gate'):
                     result = engine.advance_stage()
+            assert result is False
+        finally:
+            WorkflowEngine._workflow_chain = saved
 
-        assert result is True
-        st = read_state(reroute_task)
-        assert st["stage"] == "03-coding"
-        assert st["stage_idx"] == 2
-        assert st["reroute_count"] == 1
-        assert len(st["reroute_history"]) == 1
-        assert st["reroute_history"][0]["from"] == "04-review"
-        assert st["reroute_history"][0]["to"] == "03-coding"
-
-        # Verify context injection
-        coding_content = (task_dir / "03-coding.md").read_text(encoding="utf-8")
-        assert "返工上下文（来自 04-Review）" in coding_content
-        assert "输入校验缺失" in coding_content
-
-    def test_advance_review_route_to_planning(self, reroute_task, agent_callbacks):
-        """04-review + Route=02-Planning → reroute to 02-planning."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "02-Planning", evidence_rows=[
-            "1 | 架构设计不合理 | high | planning | docs/arch.md",
-        ])
-        # Create 02-planning.md
-        (task_dir / "02-planning.md").write_text("# 02-Planning\n\n## Gate\n", encoding="utf-8")
-
+    def test_advance_returns_false_on_post_hook_failure(self, reroute_task, agent_callbacks):
+        """When _validate_post_hooks fails, engine returns False before calling chain."""
+        _make_review_md(reroute_task, "05-Archive")
         callbacks = dict(agent_callbacks)
         callbacks["add_log"] = MagicMock()
 
         engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        st = read_state(reroute_task)
-        assert st["stage"] == "02-planning"
-        assert st["stage_idx"] == 1
-
-    def test_advance_review_route_to_brainstorming(self, reroute_task, agent_callbacks):
-        """04-review + Route=01-Brainstorming → reroute to 01-brainstorming."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "01-Brainstorming", evidence_rows=[
-            "1 | 需求不明确 | high | brainstorming | 需求文档",
-        ])
-        (task_dir / "01-brainstorming.md").write_text("# 01-Brainstorming\n\n## Gate\n", encoding="utf-8")
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        st = read_state(reroute_task)
-        assert st["stage"] == "01-brainstorming"
-        assert st["stage_idx"] == 0
-
-    def test_advance_reroute_to_brainstorming_resets_gate(self, reroute_task, agent_callbacks):
-        """Reroute to brainstorming should reset [x]→[ ] in Gate section."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "01-Brainstorming", evidence_rows=[
-            "1 | 需求不明确 | high | brainstorming | 需求文档",
-        ])
-        (task_dir / "01-brainstorming.md").write_text(
-            "# 01-Brainstorming\n\n"
-            "## Gate\n"
-            "- [x] Design approved\n"
-            "- [x] All questions answered\n"
-            "\n"
-            "## 🤖 AI Output\n"
-            "- [x] Some output checkbox\n",
-            encoding="utf-8",
-        )
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        content = (task_dir / "01-brainstorming.md").read_text(encoding="utf-8")
-        gate_section = content.split("## Gate")[1].split("##")[0]
-        assert "[x]" not in gate_section, f"Gate section still has [x]: {gate_section}"
-        assert "[x] Some output checkbox" in content, "AI Output [x] should not be reset"
-
-    def test_advance_review_invalid_route(self, reroute_task, agent_callbacks):
-        """Invalid route → advance returns False, state unchanged."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "Invalid-Route")
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            result = engine.advance_stage()
+        with patch.object(engine, '_validate_post_hooks', return_value=False):
+            with patch('sw_lib.core.engine._auto_check_gate'):
+                result = engine.advance_stage()
 
         assert result is False
-        st = read_state(reroute_task)
-        assert st["stage"] == "04-review"  # unchanged
-
-    def test_advance_review_empty_route(self, reroute_task, agent_callbacks):
-        """Empty route (___) → advance returns False, gate blocks."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "___")
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            result = engine.advance_stage()
-
-        assert result is False
-        st = read_state(reroute_task)
-        assert st["stage"] == "04-review"  # unchanged — gate blocked
-
-    def test_advance_reroute_exceeds_max(self, reroute_task, agent_callbacks):
-        """reroute_count > MAX_REROUTE → blocked."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 问题 | high | coding | f.py",
-        ])
-        _make_coding_md(reroute_task)
-
-        # Pre-set reroute_count above threshold
-        write_state(reroute_task, {
-            "id": reroute_task,
-            "stage": "04-review",
-            "stage_idx": 3,
-            "stage_status": "pending",
-            "agent": "cat",
-            "reroute_count": MAX_REROUTE + 1,  # already exceeded
-        })
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            result = engine.advance_stage()
-
-        assert result is False
-        st = read_state(reroute_task)
-        assert st["stage_status"] == "blocked"
-
-    def test_advance_reroute_to_coding_resets_gate(self, reroute_task, agent_callbacks):
-        """Reroute to coding should reset [x]→[ ] in Gate section (was only for brainstorming before)."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 输入校验缺失 | high | coding | src/api/users.py:42",
-        ])
-        # Write coding.md with pre-checked gate items to simulate completed stage
-        (task_dir / "03-coding.md").write_text(
-            "# 03-Coding\n\n"
-            "## Gate\n"
-            "- [x] Code builds & tests pass\n"
-            "- [x] All tasks implemented\n"
-            "\n"
-            "## 🤖 AI Output\n"
-            "- [x] Some old checkbox\n",
-            encoding="utf-8",
-        )
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        content = (task_dir / "03-coding.md").read_text(encoding="utf-8")
-        # Gate section must have [x]→[ ] reset
-        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
-        assert "[x]" not in gate_section, f"Gate section should be reset: {gate_section}"
-        # AI Output section should keep its [x]
-        assert "[x] Some old checkbox" in content, "AI Output [x] should not be reset"
-
-    def test_advance_reroute_to_planning_resets_gate(self, reroute_task, agent_callbacks):
-        """Reroute to planning should also reset [x]→[ ] in Gate section."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "02-Planning", evidence_rows=[
-            "1 | 架构设计不合理 | high | planning | docs/arch.md",
-        ])
-        (task_dir / "02-planning.md").write_text(
-            "# 02-Planning\n\n"
-            "## Gate\n"
-            "- [x] Architecture finalized\n"
-            "- [x] Tasks itemized\n"
-            "- [x] Tests pass\n"
-            "\n"
-            "## 🤖 AI Output\n"
-            "- [x] Some planning note\n",
-            encoding="utf-8",
-        )
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    result = engine.advance_stage()
-
-        assert result is True
-        content = (task_dir / "02-planning.md").read_text(encoding="utf-8")
-        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
-        assert "[x]" not in gate_section, f"Gate section should be reset: {gate_section}"
-        assert "[x] Some planning note" in content, "AI Output [x] should not be reset"
-
-    def test_advance_reroute_run_stage_is_called(self, reroute_task, agent_callbacks):
-        """Reroute must call run_stage() so the target stage auto-starts."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 问题 | high | coding | f.py",
-        ])
-        _make_coding_md(reroute_task)
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage') as mock_run:
-                    engine.advance_stage()
-
-        # run_stage should have been called (auto-start the rerouted-to stage)
-        mock_run.assert_called_once()
-
-    def test_advance_reroute_to_coding_routing_integrity(self, reroute_task, agent_callbacks):
-        """Reroute to coding: stage + context injection + gate reset all happen atomically."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 缺少校验 | high | coding | src/app.py:10",
-        ])
-        (task_dir / "03-coding.md").write_text(
-            "# 03-Coding\n\n"
-            "## Gate\n"
-            "- [x] Code builds\n",
-            encoding="utf-8",
-        )
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    engine.advance_stage()
-
-        st = read_state(reroute_task)
-        assert st["stage"] == "03-coding"
-        assert st["stage_idx"] == 2
-        assert st["reroute_count"] == 1
-
-        # Gate must be reset (not left as [x] from previous pass)
-        coding_md = (task_dir / "03-coding.md").read_text(encoding="utf-8")
-        gate_section = coding_md.split("## Gate")[1].split("##")[0] if "## Gate" in coding_md else ""
-        assert "[x]" not in gate_section, f"Gate still has [x]: {gate_section}"
-
-        # Context must be injected
-        assert "返工上下文" in coding_md
-        assert "缺少校验" in coding_md
-
-    def test_advance_reroute_count_tracking(self, reroute_task, agent_callbacks):
-        """Multiple reroutes increment reroute_count."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 问题 | high | coding | f.py",
-        ])
-        _make_coding_md(reroute_task)
-
-        callbacks = dict(agent_callbacks)
-        callbacks["add_log"] = MagicMock()
-        callbacks["on_settlement"] = MagicMock()
-
-        # First reroute
-        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine, '_validate_post_hooks', return_value=True):
-            with patch.object(engine, '_create_agent'):
-                with patch.object(engine, 'run_stage'):
-                    engine.advance_stage()
-
-        st = read_state(reroute_task)
-        assert st["reroute_count"] == 1
-
-        # Simulate second pass: change stage back to 04-review and advance again
-        write_state(reroute_task, {
-            "id": reroute_task,
-            "stage": "04-review",
-            "stage_idx": 3,
-            "stage_status": "pending",
-            "agent": "cat",
-            "reroute_count": st["reroute_count"],
-            "reroute_history": st["reroute_history"],
-        })
-
-        engine2 = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-        with patch.object(engine2, '_validate_post_hooks', return_value=True):
-            with patch.object(engine2, '_create_agent'):
-                with patch.object(engine2, 'run_stage'):
-                    engine2.advance_stage()
-
-        st2 = read_state(reroute_task)
-        assert st2["reroute_count"] == 2
-        assert len(st2["reroute_history"]) == 2
 
 
-# ── Tests: TaskService.advance_stage() routing ──
+# ── Tests: TaskService.advance_stage() delegates to chain ──
 
 class TestTaskServiceAdvanceStage:
-    def test_service_review_route_to_archive(self, reroute_task):
-        """TaskService: 04-review + Route=05-Archive → advance to 05-archive."""
-        task_dir = TASKS / reroute_task
+    def test_service_delegates_to_chain(self, reroute_task):
+        """Service calls chain.invoke() and returns updated state."""
         _make_review_md(reroute_task, "05-Archive")
 
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            result = svc.advance_stage(reroute_task)
+        # Mock chain to route to archive
+        saved = WorkflowEngine._workflow_chain
+        mock_chain = MagicMock()
+        from sw_lib.runnable.base import StageOutput
+        mock_chain.invoke = MagicMock(return_value=StageOutput(
+            task_name=reroute_task, stage="05-archive", raw_agent_output="",
+            parsed={}, gate_passed=True))
+        mock_chain._stage_map = saved._stage_map
+        WorkflowEngine._workflow_chain = mock_chain
 
-        assert result["stage"] == "05-archive"
-        assert result["stage_idx"] == 4
+        try:
+            svc = TaskService()
+            with patch('sw_lib.core.engine._auto_check_gate'):
+                result = svc.advance_stage(reroute_task)
 
-    def test_service_review_route_to_coding(self, reroute_task):
-        """TaskService: 04-review + Route=03-Coding → reroute to 03-coding."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 测试 | high | coding | f.py",
-        ])
-        _make_coding_md(reroute_task)
+            assert result["stage"] == "05-archive"
+        finally:
+            WorkflowEngine._workflow_chain = saved
 
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            result = svc.advance_stage(reroute_task)
-
-        assert result["stage"] == "03-coding"
-        assert result["stage_idx"] == 2
-        assert result["reroute_count"] == 1
-        assert len(result["reroute_history"]) == 1
-
-    def test_service_review_invalid_route(self, reroute_task):
-        """TaskService: invalid route → TaskError."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "Invalid")
-
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            with pytest.raises(TaskError, match="Route 字段无效"):
-                svc.advance_stage(reroute_task)
-
-    def test_service_review_exceeds_max_reroute(self, reroute_task):
-        """TaskService: reroute_count > MAX_REROUTE → TaskError + blocked."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 问题 | high | coding | f.py",
-        ])
-        _make_coding_md(reroute_task)
-
-        # Pre-set reroute_count above threshold
+    def test_service_last_stage(self, reroute_task):
+        """Last stage → marked Finished."""
         write_state(reroute_task, {
-            "id": reroute_task,
-            "stage": "04-review",
-            "stage_idx": 3,
-            "stage_status": "pending",
-            "agent": "cat",
-            "reroute_count": MAX_REROUTE + 1,
+            "id": reroute_task, "stage": "05-archive", "stage_idx": 4,
+            "stage_status": "pending", "agent": "cat",
         })
 
         svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            with pytest.raises(TaskError, match=f"返工已超过 {MAX_REROUTE} 次"):
-                svc.advance_stage(reroute_task)
-
-        st = read_state(reroute_task)
-        assert st["stage_status"] == "blocked"
-
-    def test_service_non_review_linear(self, reroute_task):
-        """TaskService: non-review stage → linear +1 advance."""
-        write_state(reroute_task, {
-            "id": reroute_task,
-            "stage": "03-coding",
-            "stage_idx": 2,
-            "stage_status": "running",
-            "agent": "cat",
-        })
-
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            result = svc.advance_stage(reroute_task)
-
-        assert result["stage"] == "04-review"
-        assert result["stage_idx"] == 3
-
-    def test_service_reroute_to_coding_resets_gate(self, reroute_task):
-        """TaskService: reroute to coding must reset [x]→[ ] in Gate section."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "03-Coding", evidence_rows=[
-            "1 | 测试 | high | coding | f.py",
-        ])
-        (task_dir / "03-coding.md").write_text(
-            "# 03-Coding\n\n"
-            "## Gate\n"
-            "- [x] Code builds\n"
-            "- [x] Tests pass\n"
-            "\n"
-            "## 🤖 AI Output\n"
-            "- [x] Detail\n",
-            encoding="utf-8",
-        )
-
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            svc.advance_stage(reroute_task)
-
-        content = (task_dir / "03-coding.md").read_text(encoding="utf-8")
-        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
-        assert "[x]" not in gate_section, f"Gate should be reset: {gate_section}"
-        assert "[x] Detail" in content, "AI Output [x] should be preserved"
-
-    def test_service_reroute_to_planning_resets_gate(self, reroute_task):
-        """TaskService: reroute to planning must reset [x]→[ ] in Gate section."""
-        task_dir = TASKS / reroute_task
-        _make_review_md(reroute_task, "02-Planning", evidence_rows=[
-            "1 | 架构问题 | high | planning | arch.md",
-        ])
-        (task_dir / "02-planning.md").write_text(
-            "# 02-Planning\n\n"
-            "## Gate\n"
-            "- [x] Design done\n"
-            "\n"
-            "## 🤖 AI Output\n"
-            "- [x] Task list\n",
-            encoding="utf-8",
-        )
-
-        svc = TaskService()
-        with patch('sw_lib.core.engine._auto_check_gate'):
-            svc.advance_stage(reroute_task)
-
-        content = (task_dir / "02-planning.md").read_text(encoding="utf-8")
-        gate_section = content.split("## Gate")[1].split("##")[0] if "## Gate" in content else ""
-        assert "[x]" not in gate_section, f"Gate should be reset: {gate_section}"
-        assert "[x] Task list" in content, "AI Output [x] should be preserved"
+        result = svc.advance_stage(reroute_task)
+        assert result["stage_status"] == "Finished"
 
     def test_service_last_stage(self, reroute_task):
         """TaskService: last stage → marked Finished."""

@@ -1,0 +1,126 @@
+"""PromptBuilder — builds agent context from YAML templates.
+
+Replaces ContextBuilder.build() with template-driven prompt construction.
+All prompt text lives in YAML files under sw_lib/prompts/templates/.
+"""
+
+from typing import Optional, Dict, Any
+
+from .registry import PromptRegistry
+from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR
+from ..core.state import read_state
+
+
+class PromptBuilder:
+    """Builds the full agent prompt by composing YAML templates with runtime data.
+
+    Usage:
+        registry = PromptRegistry(templates_dir)
+        builder = PromptBuilder(registry)
+        prompt = builder.build(
+            task_name="my-task",
+            stage="01-brainstorming",
+            stage_idx=0,
+            previous_output={"ambiguity_score": 8},
+        )
+    """
+
+    def __init__(self, registry: PromptRegistry):
+        self.registry = registry
+
+    def build(
+        self,
+        task_name: str,
+        stage: str,
+        stage_idx: int,
+        previous_output: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Build the complete agent prompt for a stage.
+
+        Returns None if no content can be assembled.
+        """
+        stage_name = STAGE_NAMES[stage_idx] if stage_idx < len(STAGE_NAMES) else "未知"
+        template = self.registry.get(stage)
+        parts = []
+
+        system_prompt = template["system_prompt"].format(
+            task_name=task_name,
+            stage=stage,
+            stage_name=stage_name,
+        )
+        parts.append(system_prompt)
+
+        orchestration = self.registry.get_system_rules()
+        if orchestration:
+            parts.append(orchestration)
+
+        project_info = self._build_project_info(task_name)
+        if project_info:
+            parts.append(project_info)
+
+        previous = self._read_previous_stage(task_name, stage_idx)
+        if previous:
+            parts.append(previous)
+
+        current_tpl = self._read_current_template(task_name, stage, stage_name)
+        if current_tpl:
+            parts.append(current_tpl)
+
+        task_ctx = self._read_task_context(task_name)
+        if task_ctx:
+            parts.append(task_ctx)
+
+        hook_rules = self._read_hook_rules(stage)
+        if hook_rules:
+            parts.append(hook_rules)
+
+        if not parts:
+            return None
+
+        return "\n\n".join(parts)
+
+    def _build_project_info(self, task_name: str) -> Optional[str]:
+        st = read_state(task_name)
+        target_dir = st.get("target_dir", "")
+        if not target_dir:
+            return None
+        return (
+            "=== 项目信息 ===\n"
+            f"代码生成目录: {target_dir}\n"
+            "所有的业务代码、模板、静态文件等都应生成到此目录下。"
+        )
+
+    def _read_previous_stage(self, task_name: str, stage_idx: int) -> Optional[str]:
+        if stage_idx == 0:
+            return None
+        prev_stage = STAGES[stage_idx - 1]
+        path = TASKS / task_name / f"{prev_stage}.md"
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return f"=== 前一阶段产出 ({prev_stage} / {STAGE_NAMES[stage_idx - 1]}) ===\n{content}"
+        return None
+
+    def _read_current_template(self, task_name: str, stage: str, stage_name: str) -> Optional[str]:
+        path = TASKS / task_name / f"{stage}.md"
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return f"=== 当前阶段模板 ({stage} / {stage_name}) ===\n{content}"
+        return None
+
+    def _read_task_context(self, task_name: str) -> Optional[str]:
+        path = TASKS / task_name / ".context"
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return f"=== 任务需求 ===\n{content}"
+        return None
+
+    def _read_hook_rules(self, stage: str) -> Optional[str]:
+        path = HOOKS_DIR / f"{stage}.md"
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return f"=== 强制规则 (hooks/{stage}.md) ===\n{content}"
+        return None
