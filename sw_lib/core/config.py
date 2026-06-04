@@ -44,6 +44,7 @@ class MockAgentConfig:
     enabled: bool = False
     response_delay: float = 1.0
     responses: Dict[str, str] = field(default_factory=dict)
+    review_route: str = "05-Archive"
 
 @dataclass
 class HarnessConfigModel:

@@ -16,6 +16,7 @@ from .commands import (
     cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor,
     cmd_dashboard, cmd_usage, cmd_deploy, cmd_health,
 )
+from .test_cmd import cmd_test
 
 
 def _ensure_bootstrapped():
@@ -108,6 +109,11 @@ def main():
     p_dash.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
     p_dash.add_argument("--port", default=8080, type=int, help="监听端口 (默认 8080)")
 
+    p_test = subparsers.add_parser("test", help="运行端到端集成测试")
+    p_test.add_argument("--name", help="指定测试任务名 (默认自动生成)")
+    p_test.add_argument("--no-mock", action="store_true", help="使用真实 Agent（默认用 MockAgent 快速验证）")
+    p_test.add_argument("--mock", action="store_true", help="使用 MockAgent（默认）")
+
     # 兼容性处理：如果没有任何参数，打印 usage
     if len(sys.argv) < 2:
         cmd_usage()
@@ -175,6 +181,9 @@ def main():
 
     elif cmd == "dashboard":
         cmd_dashboard(args)
+
+    elif cmd == "test":
+        cmd_test(args)
 
     else:
         cmd_usage()

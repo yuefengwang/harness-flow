@@ -668,26 +668,64 @@ class WorkflowEngine:
         """验证后置 hooks → 推进到下一阶段 → 自动启动新阶段"""
         sw_log(self.name, "advance_stage called", "sw")
 
-        from ..runnable.base import StageInput
         self.save_stage_output()
         _auto_check_gate(self.name, self.stage)
         if not self._validate_post_hooks():
             self._add_log("error", "后置 Hooks 验证未通过，无法推进")
             return False
+
+        from ..runnable.base import StageInput
+
+        # 用 chain 确定下一阶段（利用其路由逻辑），但只执行一步
+        chain = WorkflowEngine._workflow_chain
+        next_stage = self.stage
+        next_idx = self.stage_idx
+
         try:
-            result = WorkflowEngine._workflow_chain.invoke(StageInput(
-                task_name=self.name,
-                stage=self.stage,
-                stage_idx=self.stage_idx,
-            ))
-            self.stage = result.stage
-            self.stage_idx = [s for s in WorkflowEngine._workflow_chain._stage_map.values()
-                              if s.stage == result.stage][0].stage_idx if result.stage else self.stage_idx
-            self._add_log("sw", f"阶段推进 → {result.stage}")
-            self.run_stage()
-        except Exception as e:
-            self._add_log("error", f"WorkflowChain 推进失败: {e}")
-            return False
+            # 线性推进：下一阶段 = stage_order 中当前阶段的下一个
+            if self.stage in chain._stage_order:
+                cur = chain._stage_order.index(self.stage)
+                if cur + 1 < len(chain._stage_order):
+                    next_stage = chain._stage_order[cur + 1]
+                    s = chain._stage_map[next_stage]
+                    next_idx = s.stage_idx
+            # Review 阶段：从 state 读取 Route 决策
+            if self.stage == "04-review":
+                target = parse_route_field(self.name)
+                if target and target in chain._stage_map:
+                    next_stage = target
+                    next_idx = chain._stage_map[target].stage_idx
+        except (ValueError, IndexError, KeyError):
+            pass  # fall through: stay on current stage
+
+        if next_stage == self.stage:
+            st = read_state(self.name)
+            st["stage_status"] = "Finished"
+            st["updated_at"] = now()
+            write_state(self.name, st)
+            upsert_task_summary(self.name, stage_status="Finished")
+            sw_log(self.name, "🏁 任务已完成 (Finished)", "sw")
+            self._add_log("sw", "🏁 任务所有阶段已完成！")
+            if "on_settlement" in self.callbacks:
+                self.callbacks["on_settlement"]()
+            return True
+
+        # 更新状态
+        st = read_state(self.name)
+        st["stage"] = next_stage
+        st["stage_idx"] = next_idx
+        st["stage_status"] = "pending"
+        st["updated_at"] = now()
+        write_state(self.name, st)
+        upsert_task_summary(self.name, stage=next_stage, stage_idx=next_idx, stage_status="pending")
+
+        if self.agent and hasattr(self.agent, 'shutdown'):
+            self.agent.shutdown()
+
+        self.stage = next_stage
+        self.stage_idx = next_idx
+        self._add_log("sw", f"阶段推进 → {next_stage}")
+        self.run_stage()
         return True
     # ── Agent 生命周期 ──
 

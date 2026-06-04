@@ -263,6 +263,12 @@ class MockAgent(BaseAgent):
         - "02-Planning" — 规划层问题，返工到规划阶段
         """
         route = self._config.get("review_route", "05-Archive")
+        # Also check global config manager in case it was overridden programmatically
+        try:
+            from ..core.config import _manager
+            route = _manager.config.mock_agent.review_route
+        except Exception:
+            pass
         valid_routes = {"05-Archive", "03-Coding", "02-Planning"}
         if route not in valid_routes:
             route = "05-Archive"

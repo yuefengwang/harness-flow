@@ -357,26 +357,18 @@ class TestWorkflowEngineAdvanceStage:
 
         assert result is True
 
-    def test_advance_returns_false_on_chain_failure(self, reroute_task, agent_callbacks):
-        """When chain raises, engine returns False."""
+    def test_advance_returns_false_on_hook_failure(self, reroute_task, agent_callbacks):
+        """When _validate_post_hooks fails, engine returns False before modifying state."""
         _make_review_md(reroute_task, "05-Archive")
         callbacks = dict(agent_callbacks)
         callbacks["add_log"] = MagicMock()
 
-        saved = WorkflowEngine._workflow_chain
-        bad_chain = MagicMock()
-        bad_chain.invoke = MagicMock(side_effect=RerouteLimitExceeded("too many"))
-        bad_chain._stage_map = saved._stage_map
-        WorkflowEngine._workflow_chain = bad_chain
+        engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
+        with patch.object(engine, '_validate_post_hooks', return_value=False):
+            with patch('sw_lib.core.engine._auto_check_gate'):
+                result = engine.advance_stage()
 
-        try:
-            engine = WorkflowEngine(reroute_task, "04-review", 3, "", callbacks)
-            with patch.object(engine, '_validate_post_hooks', return_value=True):
-                with patch('sw_lib.core.engine._auto_check_gate'):
-                    result = engine.advance_stage()
-            assert result is False
-        finally:
-            WorkflowEngine._workflow_chain = saved
+        assert result is False
 
     def test_advance_returns_false_on_post_hook_failure(self, reroute_task, agent_callbacks):
         """When _validate_post_hooks fails, engine returns False before calling chain."""

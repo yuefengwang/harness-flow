@@ -70,19 +70,15 @@ class TestBootstrapWiring:
             import shutil
             shutil.rmtree(task_dir, ignore_errors=True)
 
-    def test_workflow_engine_advance_delegates_to_chain(self):
-        """When _workflow_chain is set, advance_stage() delegates to chain."""
+    def test_workflow_engine_advance_uses_chain_routing(self):
+        """advance_stage() reads from chain._stage_order for linear advance."""
         task_name = "chain-advance-test"
         task_dir = TASKS / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
 
-        # Set up task at 03-coding
         write_state(task_name, {
-            "id": task_name,
-            "stage": "03-coding",
-            "stage_idx": 2,
-            "stage_status": "running",
-            "agent": "mock",
+            "id": task_name, "stage": "03-coding", "stage_idx": 2,
+            "stage_status": "running", "agent": "mock",
         })
         (task_dir / "03-coding.md").write_text(
             "# 03-Coding\n\n## Gate\n- [x] Code builds\n",
@@ -90,16 +86,6 @@ class TestBootstrapWiring:
         )
 
         try:
-            saved_chain = WorkflowEngine._workflow_chain
-
-            from sw_lib.runnable.base import StageOutput
-            mock_chain = MagicMock()
-            mock_chain.invoke = MagicMock(return_value=StageOutput(
-                task_name=task_name, stage="04-review", raw_agent_output="",
-                parsed={}, gate_passed=True))
-            mock_chain._stage_map = WorkflowEngine._workflow_chain._stage_map
-            WorkflowEngine._workflow_chain = mock_chain
-
             callbacks = {"add_log": MagicMock(), "is_running": lambda: True}
             engine = WorkflowEngine(task_name, "03-coding", 2, "", callbacks)
 
@@ -109,12 +95,10 @@ class TestBootstrapWiring:
                         result = engine.advance_stage()
 
             assert result is True
-            mock_chain.invoke.assert_called_once()
-            chain_input = mock_chain.invoke.call_args[0][0]
-            assert chain_input.task_name == task_name
-            assert chain_input.stage == "03-coding"
+            # Verify state advanced to 04-review (next in chain)
+            st = read_state(task_name)
+            assert st["stage"] == "04-review"
         finally:
-            WorkflowEngine._workflow_chain = saved_chain
             import shutil
             shutil.rmtree(task_dir, ignore_errors=True)
 
