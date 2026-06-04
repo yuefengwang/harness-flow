@@ -126,18 +126,18 @@ class MockAgent(BaseAgent):
             else:
                 self._scenario_generic(stage_key)
                 
-            # 3. 完成阶段
-            if self.running:
-                self.status = self.STATUS_IDLE
-                if "on_complete" in self.callbacks:
-                    self.callbacks["on_complete"]()
-                    
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             self._add_log("error", f"Mock 场景执行异常: {e}")
             # 记录详细堆栈到本地日志
             sw_log(self.name, f"mock_scenario traceback:\n{tb}", "error")
+        finally:
+            # 3. 完成阶段
+            if self.running:
+                self.status = self.STATUS_IDLE
+                if "on_complete" in self.callbacks:
+                    self.callbacks["on_complete"]()
 
     def _safe_get(self, lst: List[Any], index: int, default: Any = "默认回复") -> Any:
         """安全获取列表元素"""

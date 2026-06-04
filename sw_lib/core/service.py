@@ -292,7 +292,7 @@ class TaskService:
         return StageValidator.check(task_dir, cur_stage, idx)
 
     def advance_stage(self, name: str) -> Dict[str, Any]:
-        """执行阶段推进 — 委托给 WorkflowChain 进行路由决策。"""
+        """执行阶段推进 — 使用 WorkflowChain 的路由逻辑确定下一阶段。"""
         st = self.get_task_state(name)
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
@@ -305,28 +305,46 @@ class TaskService:
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
 
-        from .engine import _auto_check_gate, WorkflowEngine
+        from .engine import _auto_check_gate, WorkflowEngine, parse_route_field
         _auto_check_gate(name, cur_stage)
 
-        from ..runnable.base import StageInput
         chain = WorkflowEngine._workflow_chain
         if chain is None:
             raise TaskError("WorkflowChain 未初始化，请先执行 bootstrap()")
 
-        result = chain.invoke(StageInput(
-            task_name=name, stage=cur_stage, stage_idx=idx,
-        ))
-        next_stage = result.stage
+        next_stage = cur_stage
+        next_idx = idx
+
+        # 1. 优先处理 Review 阶段的路由
+        if cur_stage == "04-review":
+            target = parse_route_field(name)
+            if target and target in chain._stage_map:
+                next_stage = target
+                next_idx = chain._stage_map[target].stage_idx
+
+        # 2. 如果没有路由决策或非 Review 阶段，则线性推进
+        if next_stage == cur_stage:
+            cur_idx_in_chain = chain._stage_order.index(cur_stage)
+            if cur_idx_in_chain + 1 < len(chain._stage_order):
+                next_stage = chain._stage_order[cur_idx_in_chain + 1]
+                next_idx = chain._stage_map[next_stage].stage_idx
+
+        if next_stage == cur_stage:
+             # 无处可去，标记为结束
+            st["stage_status"] = "Finished"
+            st["updated_at"] = now()
+            write_state(name, st)
+            upsert_task_summary(name, stage_status="Finished")
+            return st
 
         st["stage"] = next_stage
-        st["stage_idx"] = [s for s in chain._stage_map.values()
-                            if s.stage == next_stage][0].stage_idx if next_stage else idx
+        st["stage_idx"] = next_idx
         st["stage_status"] = "pending"
         st["updated_at"] = now()
         write_state(name, st)
         upsert_task_summary(name, stage=next_stage, stage_idx=st["stage_idx"],
-                             stage_status="pending")
-        sw_log(name, f"advanced to {next_stage} (via chain)", "sw")
+                              stage_status="pending")
+        sw_log(name, f"advanced to {next_stage} (via chain logic)", "sw")
         return st
 
     def deploy_task(self, name: str, force: bool = False) -> Dict[str, Any]:

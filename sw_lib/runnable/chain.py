@@ -33,6 +33,7 @@ class WorkflowChain(HarnessRunnable):
         self._stage_map: Dict[str, StageRunnable] = {s.stage: s for s in stages}
         self._stage_order: List[str] = [s.stage for s in stages]
         self.max_reroute = max_reroute
+        self.active_stage: Optional[StageRunnable] = None
 
     def invoke(self, input: StageInput) -> StageOutput:
         """Execute stages in order, handling reroute loops.
@@ -50,31 +51,42 @@ class WorkflowChain(HarnessRunnable):
         previous_output = input.previous_output
         last_output: StageOutput = None
 
-        while current_idx < len(self._stage_order):
-            stage_key = self._stage_order[current_idx]
-            stage = self._stage_map[stage_key]
+        try:
+            while current_idx < len(self._stage_order):
+                stage_key = self._stage_order[current_idx]
+                stage = self._stage_map[stage_key]
+                self.active_stage = stage
 
-            stage_input = StageInput(
-                task_name=input.task_name,
-                stage=stage_key,
-                stage_idx=stage.stage_idx,
-                previous_output=previous_output,
-                metadata={"reroute_count": reroute_count},
-            )
-            output = stage.invoke(stage_input)
-            last_output = output
-            previous_output = output.parsed
+                stage_metadata = input.metadata.copy()
+                stage_metadata["reroute_count"] = reroute_count
+                stage_input = StageInput(
+                    task_name=input.task_name,
+                    stage=stage_key,
+                    stage_idx=stage.stage_idx,
+                    previous_output=previous_output,
+                    metadata=stage_metadata,
+                )
+                output = stage.invoke(stage_input)
+                last_output = output
+                previous_output = output.parsed
 
-            if output.route and self._is_reroute(output.route, current_idx):
-                reroute_count += 1
-                if reroute_count > self.max_reroute:
-                    raise RerouteLimitExceeded(
-                        f"返工已超过 {self.max_reroute} 次，需人工介入", output=output
-                    )
-                current_idx = self._resolve_route(output.route)
-                continue
+                # If reroute is requested, follow it regardless of gate status
+                if output.route and self._is_reroute(output.route, current_idx):
+                    reroute_count += 1
+                    if reroute_count > self.max_reroute:
+                        raise RerouteLimitExceeded(
+                            f"返工已超过 {self.max_reroute} 次，需人工介入", output=output
+                        )
+                    current_idx = self._resolve_route(output.route)
+                    continue
 
-            current_idx += 1
+                # If gate failed and no reroute back, pause execution and return
+                if not output.gate_passed:
+                    break
+
+                current_idx += 1
+        finally:
+            self.active_stage = None
 
         return last_output
 

@@ -254,6 +254,7 @@ def _task_table_html() -> str:
             stage_label = data["stage_labels"].get(t["stage"], t["stage"])
             status_class = "status-" + t.get("status", "unknown")
             actions_html = '<td class="actions">'
+            actions_html += f'<a href="/tasks/{t["id"]}/console" class="btn">对话</a> '
             if t.get("status") == "Finished":
                 ds = t.get("deploy_status", "idle")
                 hs = t.get("health_status", "")

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from sw_lib.web.app import create_app
 from sw_lib.web.engine_manager import WebEngineManager
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
+from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES, get_repo_path
 from sw_lib.core.state import read_state, write_state
 from sw_lib.core.service import _service
 
@@ -541,7 +541,7 @@ class TestDeploy:
             _service.create_task(name, task_type="feature")
             resp = client.get("/tasks/table")
             assert f'hx-post="/tasks/{name}/deploy"' not in resp.text
-            assert "推进" in resp.text
+            assert "对话" in resp.text
         finally:
             if task_dir.exists():
                 shutil.rmtree(task_dir, ignore_errors=True)

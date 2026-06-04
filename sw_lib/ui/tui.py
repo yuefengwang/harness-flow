@@ -22,6 +22,7 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
 from ..core.engine import WorkflowEngine
+from ..runnable.base import StageInput
 from ..core.state import read_state
 from ..core.utils import sw_log, now
 
@@ -404,12 +405,23 @@ class MonitorTUI:
 
             # 初始化 Rich 布局
             self.layout = self._create_layout()
-            
+
             with Live(self.layout, refresh_per_second=20, screen=True, console=self.console) as live:
                 self.live = live
-                
-                # 启动引擎
-                self.engine.run_stage()
+
+                # 启动引擎 (Phase 1-3 集成: 优先使用 WorkflowChain)
+                chain = WorkflowEngine._workflow_chain
+                if chain:
+                    stage_input = StageInput(
+                        task_name=self.state.name,
+                        stage=self.state.stage,
+                        stage_idx=self.state.stage_idx,
+                        metadata={"callbacks": self.engine.callbacks}
+                    )
+                    threading.Thread(target=chain.invoke, args=(stage_input,), daemon=True).start()
+                else:
+                    self.engine.run_stage()
+
                 self.state.model_name = self.engine.model_name
 
                 # 启动输入线程
@@ -643,7 +655,17 @@ class MonitorTUI:
     # ── 逻辑更新 ──
 
     def _update_agent_status(self):
-        agent = self.engine.agent
+        # 优先从 WorkflowChain 获取当前活跃 Agent 状态 (需匹配当前任务名)
+        chain = WorkflowEngine._workflow_chain
+        agent = None
+        if chain and chain.active_stage:
+            potential_agent = chain.active_stage.active_agent
+            if potential_agent and getattr(potential_agent, 'name', None) == self.state.name:
+                agent = potential_agent
+        
+        if not agent:
+            agent = self.engine.agent
+
         if agent and hasattr(agent, 'status'):
             self.state.agent_status = agent.status
         

@@ -1,6 +1,16 @@
 import asyncio
 import pytest
 from sw_lib.web.engine_manager import WebEngineManager, WebEngineSession
+from sw_lib.core.engine import WorkflowEngine
+
+
+@pytest.fixture(autouse=True)
+def reset_chain():
+    """Ensure WorkflowEngine._workflow_chain is None for these tests."""
+    saved = WorkflowEngine._workflow_chain
+    WorkflowEngine._workflow_chain = None
+    yield
+    WorkflowEngine._workflow_chain = saved
 
 
 def test_engine_manager_singleton():

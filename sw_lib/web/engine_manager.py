@@ -79,9 +79,24 @@ class WebEngineSession:
     def start_engine(self):
         if not self._alive:
             return
-        self._background_thread = threading.Thread(
-            target=self.engine.run_stage, daemon=True,
-        )
+        
+        chain = WorkflowEngine._workflow_chain
+        if chain:
+            from ..runnable.base import StageInput
+            st = read_state(self.task_name)
+            stage_input = StageInput(
+                task_name=self.task_name,
+                stage=st.get("stage", "01-brainstorming"),
+                stage_idx=int(st.get("stage_idx", 0)),
+                metadata={"callbacks": self.engine.callbacks}
+            )
+            self._background_thread = threading.Thread(
+                target=chain.invoke, args=(stage_input,), daemon=True,
+            )
+        else:
+            self._background_thread = threading.Thread(
+                target=self.engine.run_stage, daemon=True,
+            )
         self._background_thread.start()
 
     def submit_answer(self, text: str):
@@ -103,8 +118,19 @@ class WebEngineSession:
 
     @property
     def status(self) -> str:
-        if self.engine and self.engine.agent:
-            return self.engine.agent.status
+        chain = WorkflowEngine._workflow_chain
+        agent = None
+        if chain and chain.active_stage:
+            # Only use the chain's agent if it's working on THIS task
+            potential_agent = chain.active_stage.active_agent
+            if potential_agent and getattr(potential_agent, 'name', None) == self.task_name:
+                agent = potential_agent
+        
+        if not agent and self.engine:
+            agent = self.engine.agent
+
+        if agent and hasattr(agent, 'status'):
+            return agent.status
         return "idle"
 
     async def get_event(self) -> Optional[Dict[str, Any]]:

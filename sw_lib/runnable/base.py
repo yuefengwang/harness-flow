@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR
 from ..core.state import read_state
-from ..core.utils import sw_log
+from ..core.utils import sw_log, now
 
 
 # ── Data models ──
@@ -104,6 +104,7 @@ class StageRunnable(HarnessRunnable):
 
         self._agent_output_lines: List[Tuple[str, str]] = []
         self._agent_complete = threading.Event()
+        self.active_agent: Optional[Any] = None
 
     # ── Public API ──
 
@@ -118,10 +119,33 @@ class StageRunnable(HarnessRunnable):
             previous_output=input.previous_output,
         )
 
-        raw_output = self._run_agent(context)
+        # 1. Update state to 'running'
+        st = read_state(input.task_name)
+        if st:
+            st["stage_status"] = "running"
+            st["updated_at"] = now()
+            from ..core.state import write_state
+            write_state(input.task_name, st)
+
+        # 2. Record injected context to .input (for offline playback/debugging)
+        task_dir = TASKS / input.task_name
+        input_file = task_dir / ".input"
+        with open(input_file, "a", encoding="utf-8") as f:
+            f.write(f"\n[{now()}] system | === 启动运行: {self.stage} ===\n")
+            f.write(str(context))
+            f.write(f"\n[{now()}] system | --- END ---\n")
+
+        raw_output = self._run_agent(context, input)
         parsed = self._parse_output(raw_output)
         gate_passed = self.gate_validator.check(input.task_name, self.stage)
         self._save_stage_output(input.task_name, raw_output)
+
+        # 3. Update state back to 'pending' (or 'Finished' if archive)
+        st = read_state(input.task_name)
+        if st:
+            st["stage_status"] = "pending"
+            st["updated_at"] = now()
+            write_state(input.task_name, st)
 
         parsed_dict = parsed.model_dump() if parsed and hasattr(parsed, 'model_dump') else parsed
         route = parsed_dict.get("route") if isinstance(parsed_dict, dict) else None
@@ -142,31 +166,55 @@ class StageRunnable(HarnessRunnable):
 
     # ── Internal: Agent lifecycle ──
 
-    def _run_agent(self, context: str) -> str:
+    def _run_agent(self, context: str, input: StageInput) -> str:
         """Create agent, start it, send context, collect output, shutdown."""
         agent = self.agent_factory(
             stage=self.stage,
-            task_name=None,  # will be resolved by factory from callbacks
+            task_name=input.task_name,  # Pass task_name down
         )
+        self.active_agent = agent
 
         self._agent_output_lines.clear()
         self._agent_complete.clear()
 
-        original_callbacks = agent.callbacks
-        agent.callbacks = {
-            "add_log": self._on_agent_log,
-            "is_running": lambda: True,
-            "on_complete": lambda: self._agent_complete.set(),
-        }
+        original_callbacks = agent.callbacks.copy() if hasattr(agent, "callbacks") else {}
+        injected_callbacks = input.metadata.get("callbacks", {})
+        original_callbacks.update(injected_callbacks)
+        
+        def composed_add_log(source: str, msg: str):
+            self._on_agent_log(source, msg)
+            if "add_log" in original_callbacks:
+                original_callbacks["add_log"](source, msg)
+                
+        def composed_on_complete():
+            self._agent_complete.set()
+            if "on_complete" in original_callbacks:
+                original_callbacks["on_complete"]()
+
+        new_callbacks = original_callbacks.copy()
+        new_callbacks["add_log"] = composed_add_log
+        new_callbacks["on_complete"] = composed_on_complete
+        if "is_running" not in new_callbacks:
+            new_callbacks["is_running"] = lambda: True
+
+        agent.callbacks = new_callbacks
 
         agent.start()
         if hasattr(agent, 'send'):
             agent.send(context, is_system=True)
 
-        self._agent_complete.wait(timeout=300)
-        agent.shutdown()
+        # PtyAgent requires reader_loop thread
+        from ..agents.pty import PtyAgent
+        if isinstance(agent, PtyAgent):
+            threading.Thread(target=agent.reader_loop, daemon=True).start()
 
-        agent.callbacks = original_callbacks
+        try:
+            self._agent_complete.wait(timeout=300)
+        finally:
+            agent.shutdown()
+            agent.callbacks = original_callbacks
+            self.active_agent = None
+
         return self._collect_agent_output()
 
     def _on_agent_log(self, source: str, msg: str):

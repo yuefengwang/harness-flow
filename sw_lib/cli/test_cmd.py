@@ -31,6 +31,15 @@ def _make_auto_answer():
     return auto_answer
 
 
+def _mock_gate_pass(task_name: str, stage: str):
+    """模拟用户勾选 Gate 下的所有复选框。"""
+    path = TASKS / task_name / f"{stage}.md"
+    if path.exists():
+        content = path.read_text(encoding="utf-8")
+        if "[ ]" in content:
+            path.write_text(content.replace("[ ]", "[x]"), encoding="utf-8")
+
+
 def cmd_test(args):
     """sw test: 黑盒端到端测试 — 模拟 sw monitor 交互"""
     task_name = getattr(args, "name", "") or f"e2e-{int(time.time())}"
@@ -64,6 +73,8 @@ def cmd_test(args):
 
     try:
         from ..core.engine import WorkflowEngine
+        from ..runnable.base import StageInput
+        import threading
 
         st = read_state(task_name)
         current_stage = st.get("stage", "01-brainstorming")
@@ -74,60 +85,87 @@ def cmd_test(args):
             "is_running": lambda: True,
             "on_ask_user": _make_auto_answer(),
         }
-        engine = WorkflowEngine(task_name, current_stage, current_idx, "", callbacks)
 
         # ── 2. sw monitor (主循环) ──
         print(f"  sw monitor...")
-        engine.run_stage()
+        
+        chain = WorkflowEngine._workflow_chain
+        if not chain:
+            die("WorkflowChain 未初始化")
+
+        # Start the first stage
+        stage_input = StageInput(
+            task_name=task_name,
+            stage=current_stage,
+            stage_idx=current_idx,
+            metadata={"callbacks": callbacks}
+        )
+        threading.Thread(target=chain.invoke, args=(stage_input,), daemon=True).start()
 
         advance_count = 0
         while advance_count < max_advances and stage_completed < max_stages:
             time.sleep(1)
 
-            status = getattr(engine.agent, 'status', 'idle') if engine.agent else 'idle'
+            # Get status from active agent in the chain
+            agent = chain.active_stage.active_agent if chain.active_stage else None
+            status = getattr(agent, 'status', 'idle') if agent else 'idle'
 
             if status == 'waiting':
-                # Agent 在等待用户回答 → auto-answer "A"
-                engine.answer("A")
+                # Agent 在等待用户回答 → auto-answer
+                _service.add_answer(task_name, "A")
                 time.sleep(1)
                 continue
 
             if status == 'idle':
-                engine.save_stage_output()
+                # Check if current stage is done
+                st = read_state(task_name)
+                current_stage = st.get("stage")
+                current_idx = int(st.get("stage_idx", 0))
+                stage_status = st.get("stage_status")
 
-                if current_idx >= max_stages - 1:
-                    stage_completed += 1
+                if current_idx >= max_stages - 1 and stage_status == "Finished":
+                    stage_completed = max_stages
                     print(f"    ✓ {STAGE_NAMES[current_idx]} 完成")
                     break  # archive complete
 
-                # 检查是否有错误（agent 输出中含 error）
+                # 检查是否有错误
                 agent_errors = [e for e in errors if 'error' in e.lower()]
                 if agent_errors:
                     print(f"    {red('⚠')} 阶段有 {len(agent_errors)} 个异常记录")
 
-                prev_stage = current_stage
-                advanced = engine.handle_command("advance") or False
+                print(f"    ✓ {STAGE_NAMES[current_idx]} 完成，准备推进...")
+                
+                # Mock checkboxes for the gate
+                _mock_gate_pass(task_name, current_stage)
+                
+                try:
+                    _service.advance_stage(task_name)
+                except Exception as e:
+                    print(f"    {red('✗')} 推进失败: {e}")
+                    break
+
                 advance_count += 1
-                time.sleep(1)
-
-                # 更新当前阶段
+                stage_completed += 1
+                
+                # Restart chain for the next stage
                 st = read_state(task_name)
-                current_stage = st.get("stage", current_stage)
-                current_idx = int(st.get("stage_idx", current_idx))
-
-                if advanced or current_stage != prev_stage:
-                    stage_completed += 1
-                    print(f"    ✓ {STAGE_NAMES[current_idx]} 完成")
-                else:
-                    print(f"    {yellow('⚠')} {STAGE_NAMES[current_idx]} 推进失败（hooks 未通过），重试...")
-                    if engine.agent:
-                        engine.agent.status = "active"
-                    time.sleep(2)
+                next_stage = st.get("stage")
+                next_idx = int(st.get("stage_idx"))
+                
+                print(f"    推进到: {STAGE_NAMES[next_idx]}")
+                
+                stage_input = StageInput(
+                    task_name=task_name,
+                    stage=next_stage,
+                    stage_idx=next_idx,
+                    metadata={"callbacks": callbacks}
+                )
+                threading.Thread(target=chain.invoke, args=(stage_input,), daemon=True).start()
+                time.sleep(2)
                 continue
 
             if status == 'error':
                 errors.append(f"[{current_stage}] Agent error")
-                engine.shutdown()
                 break
 
         # ── 3. 验证 ──
