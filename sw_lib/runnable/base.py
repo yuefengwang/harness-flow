@@ -11,8 +11,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR
-from ..core.state import read_state
+from ..core.state import read_state, write_state
 from ..core.utils import sw_log, now
+
+
+# ── Exceptions ──
+
+class RerouteLimitExceeded(Exception):
+    """Raised when the workflow loops back more than max_reroute times."""
+    def __init__(self, message: str, output: 'StageOutput'):
+        super().__init__(message)
+        self.output = output
 
 
 # ── Data models ──
@@ -67,10 +76,6 @@ class HarnessRunnable(ABC):
         """Execute this runnable asynchronously (for Web Dashboard)."""
         ...
 
-    def pipe(self, next_runnable: "HarnessRunnable") -> "HarnessRunnable":
-        """Chain composition: self | next."""
-        from .chain import WorkflowChain
-        return WorkflowChain([self, next_runnable])
 
 
 # ── Stage Runnable ──
@@ -124,7 +129,6 @@ class StageRunnable(HarnessRunnable):
         if st:
             st["stage_status"] = "running"
             st["updated_at"] = now()
-            from ..core.state import write_state
             write_state(input.task_name, st)
 
         # 2. Record injected context to .input (for offline playback/debugging)

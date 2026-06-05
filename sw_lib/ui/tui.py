@@ -21,8 +21,8 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
-from ..core.engine import WorkflowEngine
 from ..runnable.base import StageInput
+from ..runnable.runtime import WorkflowRuntime
 from ..core.state import read_state
 from ..core.utils import sw_log, now
 
@@ -349,17 +349,17 @@ class MonitorTUI:
         self._q_answers: List[str] = []
 
         # 编排引擎初始化
-        callbacks = {
+        self.callbacks = {
             "add_log": self._add_log, 
             "is_running": lambda: self.running,
             "on_ask_user": self._on_ask_user,
             "on_settlement": self._on_settlement
         }
-        self.engine = WorkflowEngine(
-            name=name, stage=stage, stage_idx=stage_idx,
-            agent_name=agent_name, callbacks=callbacks
-        )
         
+        # 预先解析模型名用于显示
+        from ..core.config import resolve_agent_model
+        self._model_name = resolve_agent_model(stage, agent_name)
+
         # Rich 渲染引擎组件
         self.console = Console()
         self.live: Optional[Live] = None
@@ -378,7 +378,7 @@ class MonitorTUI:
     @property
     def model_name(self) -> str:
         """获取当前引擎中解析出的具体模型名"""
-        return self.engine.model_name
+        return self._model_name
 
     # ── 生命周期 ──
 
@@ -409,20 +409,17 @@ class MonitorTUI:
             with Live(self.layout, refresh_per_second=20, screen=True, console=self.console) as live:
                 self.live = live
 
-                # 启动引擎 (Phase 1-3 集成: 优先使用 WorkflowChain)
-                chain = WorkflowEngine._workflow_chain
-                if chain:
-                    stage_input = StageInput(
-                        task_name=self.state.name,
-                        stage=self.state.stage,
-                        stage_idx=self.state.stage_idx,
-                        metadata={"callbacks": self.engine.callbacks}
-                    )
-                    threading.Thread(target=chain.invoke, args=(stage_input,), daemon=True).start()
-                else:
-                    self.engine.run_stage()
+                # 启动引擎
+                executor = WorkflowRuntime.get_executor()
+                stage_input = StageInput(
+                    task_name=self.state.name,
+                    stage=self.state.stage,
+                    stage_idx=self.state.stage_idx,
+                    metadata={"callbacks": self.callbacks}
+                )
+                threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
 
-                self.state.model_name = self.engine.model_name
+                self.state.model_name = self.model_name
 
                 # 启动输入线程
                 if self._is_tty and self._stdin_fd is not None:
@@ -445,7 +442,14 @@ class MonitorTUI:
 
         finally:
             self.running = False
-            self.engine.shutdown()
+            # 关闭当前活跃 Agent
+            try:
+                executor = WorkflowRuntime.get_executor()
+                if executor.active_stage and executor.active_stage.active_agent:
+                    executor.active_stage.active_agent.shutdown()
+            except Exception:
+                pass
+                
             if self._old_term is not None:
                 try:
                     termios.tcsetattr(self._stdin_fd, termios.TCSANOW, self._old_term)
@@ -656,7 +660,7 @@ class MonitorTUI:
 
     def _update_agent_status(self):
         # 优先从 WorkflowChain 获取当前活跃 Agent 状态 (需匹配当前任务名)
-        chain = WorkflowEngine._workflow_chain
+        chain = WorkflowRuntime.get_executor()
         agent = None
         if chain and chain.active_stage:
             potential_agent = chain.active_stage.active_agent
@@ -664,7 +668,8 @@ class MonitorTUI:
                 agent = potential_agent
         
         if not agent:
-            agent = self.engine.agent
+            # Fallback to local state if no executor is active
+            pass
 
         if agent and hasattr(agent, 'status'):
             self.state.agent_status = agent.status
@@ -673,12 +678,10 @@ class MonitorTUI:
         # 优先从 .state 文件读取（agent 可能直接修改磁盘状态）
         st = read_state(self.state.name)
         if st:
-            self.state.stage = st.get("stage", self.engine.stage)
-            self.state.stage_idx = int(st.get("stage_idx", self.engine.stage_idx))
-        else:
-            self.state.stage = self.engine.stage
-            self.state.stage_idx = self.engine.stage_idx
-        self.state.model_name = self.engine.model_name
+            self.state.stage = st.get("stage", self.state.stage)
+            self.state.stage_idx = int(st.get("stage_idx", self.state.stage_idx))
+        
+        self.state.model_name = self.model_name
         
         # 探测模式
         self.state.options = extract_options(self.state.log_lines)
@@ -782,7 +785,7 @@ class MonitorTUI:
 
         if cmd.startswith("/"):
             self._add_log("user", cmd)
-            self.engine.handle_command(cmd[1:])
+            WorkflowRuntime.get_executor().handle_command(cmd[1:])
             return
 
         # 1. 处理结构化提问回复
@@ -808,8 +811,7 @@ class MonitorTUI:
                         results = ["(无有效回复)"] * len(self.state.pending_questions)
                     
                     self._q_res_queue.put(results)
-                    # 告知引擎：交互已完成，恢复运行状态
-                    self.engine.resume_running()
+                    # 告知引擎：交互已完成，恢复运行状态 (如果需要)
                 self.state.pending_questions = []
                 self._q_res_queue = None
             return
@@ -836,7 +838,7 @@ class MonitorTUI:
 
         response = self._build_agent_response(cmd)
         self._add_log("user", response)
-        self.engine.answer(response)
+        WorkflowRuntime.get_executor().answer(response)
 
     def _write_review_route(self, target: str):
         """写入 04-review.md 中的 Route 字段"""

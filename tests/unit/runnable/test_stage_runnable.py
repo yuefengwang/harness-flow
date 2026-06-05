@@ -155,14 +155,6 @@ class TestStageRunnableConstruction:
         assert stage.stage == "01-brainstorming"
         assert stage.stage_idx == 0
 
-    def test_pipe_creates_workflow_chain(self):
-        """pipe() combines two StageRunnables into a WorkflowChain."""
-        from sw_lib.runnable.chain import WorkflowChain
-        s1 = StageRunnable("01-brainstorming", 0, MagicMock(), MagicMock(), MagicMock(), MagicMock())
-        s2 = StageRunnable("02-planning", 1, MagicMock(), MagicMock(), MagicMock(), MagicMock())
-        chain = s1.pipe(s2)
-        assert isinstance(chain, WorkflowChain)
-
 
 class TestStageRunnableInvoke:
     def _make_real_stage(self, dummy_task_dir):

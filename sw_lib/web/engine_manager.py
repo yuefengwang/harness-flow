@@ -10,27 +10,23 @@ import threading
 from collections import deque
 from typing import Dict, Optional, Any, Callable
 
-from ..core.engine import WorkflowEngine
+from ..runnable.runtime import WorkflowRuntime
 from ..core.state import read_state
 from ..core.utils import now, sw_log
 
 
 class WebEngineSession:
 
-    def __init__(self, task_name: str, engine: WorkflowEngine):
+    def __init__(self, task_name: str, stage: str, stage_idx: int, agent_name: str):
         self.task_name = task_name
-        self.engine = engine
         self._events: deque = deque()
         self._lock = threading.Lock()
         self._background_thread: Optional[threading.Thread] = None
         self._alive = True
         self._pending_questions: Optional[list] = None
-        self._pending_res_queue: Optional[asyncio.Queue] = None
+        self._pending_res_queue: Optional[Any] = None
 
-        self._install_web_callbacks()
-
-    def _install_web_callbacks(self):
-        self.engine.callbacks = {
+        self.callbacks = {
             "add_log": self._web_add_log,
             "is_running": self._web_is_running,
             "on_ask_user": self._web_on_ask_user,
@@ -49,18 +45,17 @@ class WebEngineSession:
         return self._alive
 
     def _web_on_ask_user(self, questions: list, res_queue):
+        import queue
         self._pending_questions = questions
-        async_res_queue: asyncio.Queue = asyncio.Queue()
-        self._pending_res_queue = async_res_queue
+        # Use standard thread-safe queue instead of asyncio to avoid loop issues in threads
+        sync_res_queue = queue.Queue()
+        self._pending_res_queue = sync_res_queue
 
         self._push_event({"type": "question", "questions": questions, "q_idx": 0})
 
         def _bridge_answers():
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                answers = loop.run_until_complete(async_res_queue.get())
-                loop.close()
+                answers = sync_res_queue.get()
             except Exception:
                 answers = [""] * len(questions)
             res_queue.put(answers)
@@ -80,35 +75,44 @@ class WebEngineSession:
         if not self._alive:
             return
         
-        chain = WorkflowEngine._workflow_chain
-        if chain:
-            from ..runnable.base import StageInput
-            st = read_state(self.task_name)
-            stage_input = StageInput(
-                task_name=self.task_name,
-                stage=st.get("stage", "01-brainstorming"),
-                stage_idx=int(st.get("stage_idx", 0)),
-                metadata={"callbacks": self.engine.callbacks}
-            )
-            self._background_thread = threading.Thread(
-                target=chain.invoke, args=(stage_input,), daemon=True,
-            )
-        else:
-            self._background_thread = threading.Thread(
-                target=self.engine.run_stage, daemon=True,
-            )
+        executor = WorkflowRuntime.get_executor()
+        from ..runnable.base import StageInput
+        st = read_state(self.task_name)
+        stage_input = StageInput(
+            task_name=self.task_name,
+            stage=st.get("stage", "01-brainstorming"),
+            stage_idx=int(st.get("stage_idx", 0)),
+            metadata={"callbacks": self.callbacks}
+        )
+        self._background_thread = threading.Thread(
+            target=executor.invoke, args=(stage_input,), daemon=True,
+        )
         self._background_thread.start()
 
     def submit_answer(self, text: str):
-        self.engine.answer(text)
+        executor = WorkflowRuntime.get_executor()
+        if self._pending_res_queue:
+            # We are waiting for a question
+            answers = [text] * max(1, len(self._pending_questions))
+            self._pending_res_queue.put(answers)
+            
+            self._pending_questions = []
+            self._pending_res_queue = None
+            
+            # Resume executor active agent state if possible
+            executor.answer(text)
+        else:
+            executor.answer(text)
 
     def submit_command(self, cmd: str):
-        self.engine.handle_command(cmd)
+        WorkflowRuntime.get_executor().handle_command(cmd)
 
     def destroy(self):
         self._alive = False
         try:
-            self.engine.shutdown()
+            executor = WorkflowRuntime.get_executor()
+            if executor.active_stage and executor.active_stage.active_agent:
+                executor.active_stage.active_agent.shutdown()
         except Exception:
             pass
 
@@ -118,17 +122,14 @@ class WebEngineSession:
 
     @property
     def status(self) -> str:
-        chain = WorkflowEngine._workflow_chain
+        executor = WorkflowRuntime.get_executor()
         agent = None
-        if chain and chain.active_stage:
+        if executor.active_stage:
             # Only use the chain's agent if it's working on THIS task
-            potential_agent = chain.active_stage.active_agent
+            potential_agent = executor.active_stage.active_agent
             if potential_agent and getattr(potential_agent, 'name', None) == self.task_name:
                 agent = potential_agent
         
-        if not agent and self.engine:
-            agent = self.engine.agent
-
         if agent and hasattr(agent, 'status'):
             return agent.status
         return "idle"
@@ -168,13 +169,7 @@ class WebEngineManager:
         from ..core.service import _service
         _service.get_task_state(task_name)
 
-        callbacks_placeholder: Dict[str, Callable] = {}
-        engine = WorkflowEngine(
-            name=task_name, stage=stage, stage_idx=stage_idx,
-            agent_name=agent_name, callbacks=callbacks_placeholder,
-        )
-
-        session = WebEngineSession(task_name, engine)
+        session = WebEngineSession(task_name, stage, stage_idx, agent_name)
         self._sessions[task_name] = session
         sw_log(task_name, "[web] session created", "sw")
         return session

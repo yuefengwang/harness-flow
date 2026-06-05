@@ -72,7 +72,7 @@ def cmd_test(args):
     max_advances = max_stages * 3  # allow reroute loops
 
     try:
-        from ..core.engine import WorkflowEngine
+        from ..runnable.runtime import WorkflowRuntime
         from ..runnable.base import StageInput
         import threading
 
@@ -89,7 +89,7 @@ def cmd_test(args):
         # ── 2. sw monitor (主循环) ──
         print(f"  sw monitor...")
         
-        chain = WorkflowEngine._workflow_chain
+        chain = WorkflowRuntime.get_executor()
         if not chain:
             die("WorkflowChain 未初始化")
 
@@ -177,7 +177,7 @@ def cmd_test(args):
         stages_ok = 0
         for s in ["01-brainstorming", "02-planning", "03-coding", "04-review", "05-archive"]:
             sf = task_dir / f"{s}.md"
-            if sf.exists() and "## 🤖 AI Output" in sf.read_text(encoding="utf-8"):
+            if sf.exists() and "## 🤖 AI Output" in sf.read_text(encoding="utf-8", errors="replace"):
                 stages_ok += 1
                 print(f"  {green('✓')} {s}")
             else:

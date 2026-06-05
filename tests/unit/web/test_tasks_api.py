@@ -301,9 +301,9 @@ class TestEngineIntegration:
         name = setup_task
         resp = client.post(f"/tasks/{name}/engine/start")
         assert resp.status_code == 200
-        session = clean_engine_mgr.get_session(name)
-        assert session.engine.stage == "01-brainstorming"
-        assert session.engine.stage_idx == 0
+        st = read_state(name)
+        assert st.get("stage") == "01-brainstorming"
+        assert int(st.get("stage_idx", 0)) == 0
 
     def test_engine_start_respects_advance(self, setup_task, client, clean_engine_mgr):
         """推进后 engine 应在正确阶段启动"""
@@ -321,9 +321,9 @@ class TestEngineIntegration:
         # 再启动 engine
         resp = client.post(f"/tasks/{name}/engine/start")
         assert resp.status_code == 200
-        session = clean_engine_mgr.get_session(name)
-        assert session.engine.stage == "02-planning"
-        assert session.engine.stage_idx == 1
+        st = read_state(name)
+        assert st.get("stage") == "02-planning"
+        assert int(st.get("stage_idx", 0)) == 1
 
 
 # ── Task Detail ──

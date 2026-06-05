@@ -8,10 +8,11 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
 
 from sw_lib.core.bootstrap import bootstrap
-from sw_lib.core.engine import ContextBuilder, WorkflowEngine, _auto_check_gate
+from sw_lib.core.engine import ContextBuilder, WorkflowEngine
+from sw_lib.runnable.runtime import WorkflowRuntime
 from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
 from sw_lib.core.state import write_state, read_state
-from sw_lib.runnable import StageRunnable, WorkflowChain, StageInput, WorkflowExecutor
+from sw_lib.runnable import StageRunnable, StageInput, WorkflowExecutor
 from sw_lib.prompts import PromptRegistry, PromptBuilder
 
 
@@ -32,21 +33,23 @@ class TestBootstrapWiring:
         assert isinstance(ContextBuilder._prompt_builder, PromptBuilder)
 
     def test_workflow_engine_has_chain(self):
-        """WorkflowEngine._workflow_chain is set after bootstrap."""
-        assert WorkflowEngine._workflow_chain is not None
-        assert isinstance(WorkflowEngine._workflow_chain, WorkflowChain)
+        """WorkflowRuntime.get_executor() is available after bootstrap."""
+        executor = WorkflowRuntime.get_executor()
+        assert executor is not None
+        from sw_lib.runnable.graph import LangGraphAdapter
+        assert isinstance(executor, LangGraphAdapter)
 
     def test_chain_satisfies_executor_protocol(self):
-        """The chain implements WorkflowExecutor protocol."""
-        chain = WorkflowEngine._workflow_chain
-        assert isinstance(chain, WorkflowExecutor)
+        """The executor implements WorkflowExecutor protocol."""
+        executor = WorkflowRuntime.get_executor()
+        assert isinstance(executor, WorkflowExecutor)
 
     def test_chain_has_all_five_stages(self):
         """Chain contains all 5 workflow stages."""
-        chain = WorkflowEngine._workflow_chain
+        executor = WorkflowRuntime.get_executor()
         for stage in ["01-brainstorming", "02-planning", "03-coding",
                        "04-review", "05-archive"]:
-            assert stage in chain._stage_map
+            assert stage in executor._stage_map
 
     def test_prompt_builder_can_build_all_stages(self):
         """PromptBuilder can build prompts for all 5 stages."""
@@ -206,8 +209,9 @@ class TestChainRerouteWithEngine:
         )
 
         try:
-            from sw_lib.runnable import StageRunnable, WorkflowChain
+            from sw_lib.runnable import StageRunnable
             from sw_lib.runnable.base import StageInput, StageOutput
+            from sw_lib.runnable.graph import build_harness_graph, LangGraphAdapter
 
             # Create mock stages that simulate reroute
             coding = MagicMock(spec=StageRunnable)
@@ -225,7 +229,7 @@ class TestChainRerouteWithEngine:
             review.stage_idx = 3
             review.invoke = MagicMock(side_effect=[
                 StageOutput(task_name="t", stage="04-review", raw_agent_output="",
-                             parsed={}, gate_passed=False, route="03-coding"),
+                             parsed={}, gate_passed=True, route="03-coding"),
                 StageOutput(task_name="t", stage="04-review", raw_agent_output="",
                              parsed={}, gate_passed=True, route="05-archive"),
             ])
@@ -237,11 +241,13 @@ class TestChainRerouteWithEngine:
                 task_name="t", stage="05-archive", raw_agent_output="",
                 parsed={"done": True}, gate_passed=True))
 
-            chain = WorkflowChain([
+            stages = [
                 MagicMock(stage="01-brainstorming", stage_idx=0, spec=StageRunnable),
                 MagicMock(stage="02-planning", stage_idx=1, spec=StageRunnable),
                 coding, review, archive,
-            ])
+            ]
+            graph = build_harness_graph(stages)
+            chain = LangGraphAdapter(graph, stages)
 
             result = chain.invoke(StageInput(
                 task_name=task_name, stage="03-coding", stage_idx=2))

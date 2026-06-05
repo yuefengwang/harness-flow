@@ -7,7 +7,7 @@ Without bootstrap(), the system falls back to the original WorkflowEngine logic.
 from pathlib import Path
 from typing import Optional
 
-from ..runnable import StageRunnable, WorkflowChain, GateValidator
+from ..runnable import StageRunnable, GateValidator
 from ..runnable.base import StageInput
 from ..prompts import PromptRegistry, PromptBuilder
 from ..output.parser import StageOutputParser
@@ -19,7 +19,8 @@ from ..core.engine import ContextBuilder, WorkflowEngine
 from ..core.config import STAGES, STAGE_NAMES
 
 # Module-level cache — only bootstrap once
-_chain: Optional[WorkflowChain] = None
+from ..runnable.graph import LangGraphAdapter
+_chain: Optional[LangGraphAdapter] = None
 
 
 def bootstrap(templates_dir: Optional[Path] = None):
@@ -83,8 +84,10 @@ def bootstrap(templates_dir: Optional[Path] = None):
         ),
     ]
 
-    _chain = WorkflowChain(stages, max_reroute=3)
-    WorkflowEngine._workflow_chain = _chain
+    from ..runnable.runtime import WorkflowRuntime
+    WorkflowRuntime.initialize(stages)
+    # 暂时保持兼容，直到 UI/Service 全部迁移
+    WorkflowEngine._workflow_chain = WorkflowRuntime.get_executor()
 
 
 def _make_agent_factory(stage: str):

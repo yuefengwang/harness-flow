@@ -305,12 +305,11 @@ class TaskService:
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
 
-        from .engine import _auto_check_gate, WorkflowEngine, parse_route_field
-        _auto_check_gate(name, cur_stage)
+        from ..runnable.utils import auto_check_gate, parse_route_field
+        from ..runnable.runtime import WorkflowRuntime
 
-        chain = WorkflowEngine._workflow_chain
-        if chain is None:
-            raise TaskError("WorkflowChain 未初始化，请先执行 bootstrap()")
+        auto_check_gate(name, cur_stage)
+        executor = WorkflowRuntime.get_executor()
 
         next_stage = cur_stage
         next_idx = idx
@@ -318,16 +317,16 @@ class TaskService:
         # 1. 优先处理 Review 阶段的路由
         if cur_stage == "04-review":
             target = parse_route_field(name)
-            if target and target in chain._stage_map:
+            if target and target in executor._stage_map:
                 next_stage = target
-                next_idx = chain._stage_map[target].stage_idx
+                next_idx = executor._stage_map[target].stage_idx
 
         # 2. 如果没有路由决策或非 Review 阶段，则线性推进
         if next_stage == cur_stage:
-            cur_idx_in_chain = chain._stage_order.index(cur_stage)
-            if cur_idx_in_chain + 1 < len(chain._stage_order):
-                next_stage = chain._stage_order[cur_idx_in_chain + 1]
-                next_idx = chain._stage_map[next_stage].stage_idx
+            cur_idx_in_chain = executor._stage_order.index(cur_stage)
+            if cur_idx_in_chain + 1 < len(executor._stage_order):
+                next_stage = executor._stage_order[cur_idx_in_chain + 1]
+                next_idx = executor._stage_map[next_stage].stage_idx
 
         if next_stage == cur_stage:
              # 无处可去，标记为结束

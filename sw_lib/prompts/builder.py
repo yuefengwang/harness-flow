@@ -96,7 +96,7 @@ class PromptBuilder:
         prev_stage = STAGES[stage_idx - 1]
         path = TASKS / task_name / f"{prev_stage}.md"
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
                 return f"=== 前一阶段产出 ({prev_stage} / {STAGE_NAMES[stage_idx - 1]}) ===\n{content}"
         return None
@@ -104,7 +104,7 @@ class PromptBuilder:
     def _read_current_template(self, task_name: str, stage: str, stage_name: str) -> Optional[str]:
         path = TASKS / task_name / f"{stage}.md"
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
                 return f"=== 当前阶段模板 ({stage} / {stage_name}) ===\n{content}"
         return None
@@ -112,7 +112,7 @@ class PromptBuilder:
     def _read_task_context(self, task_name: str) -> Optional[str]:
         path = TASKS / task_name / ".context"
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
                 return f"=== 任务需求 ===\n{content}"
         return None
@@ -120,7 +120,7 @@ class PromptBuilder:
     def _read_hook_rules(self, stage: str) -> Optional[str]:
         path = HOOKS_DIR / f"{stage}.md"
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
                 return f"=== 强制规则 (hooks/{stage}.md) ===\n{content}"
         return None

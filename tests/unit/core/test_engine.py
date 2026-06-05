@@ -8,6 +8,8 @@ def test_build_context_with_template(dummy_task, agent_callbacks):
         assert any(keyword in ctx for keyword in ["头脑风暴", "Brainstorming", "hook", "强制规则"])
 
 def test_command_dispatch(dummy_task, agent_callbacks):
+    from sw_lib.core.bootstrap import bootstrap
+    bootstrap()
     logs = []
     callbacks = dict(agent_callbacks)
     callbacks["add_log"] = lambda s, m: logs.append((s, m))

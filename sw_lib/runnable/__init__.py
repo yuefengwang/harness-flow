@@ -3,18 +3,18 @@
 Phase 1 of HarnessFlow × LangChain refactoring.
 """
 
-from .base import HarnessRunnable, StageRunnable, StageInput, StageOutput
-from .chain import WorkflowChain, RerouteLimitExceeded
+from .base import HarnessRunnable, StageRunnable, StageInput, StageOutput, RerouteLimitExceeded
 from .executor import WorkflowExecutor
 from .gate import GateValidator
+from .graph import LangGraphAdapter
 
 __all__ = [
     "HarnessRunnable",
     "StageRunnable",
     "StageInput",
     "StageOutput",
-    "WorkflowChain",
-    "RerouteLimitExceeded",
     "WorkflowExecutor",
     "GateValidator",
+    "LangGraphAdapter",
+    "RerouteLimitExceeded",
 ]
