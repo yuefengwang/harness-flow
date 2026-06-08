@@ -6,6 +6,7 @@ Centralizes access to the active LangGraph executor.
 from typing import Optional, List
 from .base import StageRunnable
 from .graph import build_harness_graph, LangGraphAdapter
+from ..core.config import MAX_REROUTE
 
 class WorkflowRuntime:
     """Manages the lifecycle of the workflow graph."""
@@ -15,8 +16,8 @@ class WorkflowRuntime:
     @classmethod
     def initialize(cls, stages: List[StageRunnable]):
         """Initialize the global executor with provided stages."""
-        graph = build_harness_graph(stages, max_reroute=3)
-        cls._executor = LangGraphAdapter(graph, stages, max_reroute=3)
+        graph = build_harness_graph(stages, max_reroute=MAX_REROUTE)
+        cls._executor = LangGraphAdapter(graph, stages, max_reroute=MAX_REROUTE)
 
     @classmethod
     def get_executor(cls) -> LangGraphAdapter:

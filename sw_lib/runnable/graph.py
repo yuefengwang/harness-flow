@@ -1,3 +1,4 @@
+import threading
 from typing import List, Dict, Any, Optional, Callable
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
@@ -5,6 +6,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from .base import StageRunnable, StageInput, StageOutput
 from .state import WorkflowState
 
+
+from ..core.config import MAX_REROUTE
 
 def create_stage_node(runnable: StageRunnable):
     """Factory to wrap a StageRunnable as a LangGraph node.
@@ -56,7 +59,7 @@ def create_stage_node(runnable: StageRunnable):
 
 from .checkpoint import FileCheckpointSaver
 
-def build_harness_graph(stages: List[StageRunnable], max_reroute: int = 3):
+def build_harness_graph(stages: List[StageRunnable], max_reroute: int = MAX_REROUTE):
     """Constructs the LangGraph for Harness-Flow.
     
     Args:
@@ -71,54 +74,60 @@ def build_harness_graph(stages: List[StageRunnable], max_reroute: int = 3):
         workflow.add_node(s.stage, create_stage_node(s))
         stage_names.append(s.stage)
     
-    # 2. Linear edges (01 -> 02 -> 03 -> 04)
-    # 05 is handled by ending the graph or special edge.
+    # 2. Add edges with gate checks
     for i in range(len(stage_names) - 1):
         src = stage_names[i]
         dst = stage_names[i+1]
         
-        # Review has custom routing, don't add automatic forward edge to 05
         if src == "04-review":
-            continue
-            
-        workflow.add_edge(src, dst)
-    
-    # 3. Routing logic for Review stage
-    def review_router(state: WorkflowState):
-        if not state["gate_passed"]:
-            return END
-            
-        route = state.get("next_route")
-        
-        # Resolve target index to see if it's a reroute back
-        if route:
-            route_lower = route.lower()
-            target_node = None
-            for name in stage_names:
-                if name.lower() == route_lower:
-                    target_node = name
-                    break
-            
-            if target_node:
-                target_idx = stage_names.index(target_node)
-                review_idx = stage_names.index("04-review")
+            # 3. Routing logic for Review stage
+            def review_router(state: WorkflowState):
+                if not state["gate_passed"]:
+                    return END
+                    
+                route = state.get("next_route")
                 
-                if target_idx < review_idx:
-                    if state["reroute_count"] >= max_reroute:
-                        return "05-archive"
-                    return target_node
-        
-        # Default: proceed to archive
-        return "05-archive"
+                # Resolve target index to see if it's a reroute back
+                if route:
+                    route_lower = route.lower()
+                    target_node = None
+                    for name in stage_names:
+                        if name.lower() == route_lower:
+                            target_node = name
+                            break
+                    
+                    if target_node:
+                        target_idx = stage_names.index(target_node)
+                        review_idx = stage_names.index("04-review")
+                        
+                        if target_idx < review_idx:
+                            if state["reroute_count"] >= max_reroute:
+                                return "05-archive"
+                            return target_node
+                
+                # Default: proceed to archive
+                return "05-archive"
 
-    # Add conditional edges from review
-    workflow.add_conditional_edges(
-        "04-review",
-        review_router,
-        {name: name for name in stage_names} | {END: END}
-    )
+            workflow.add_conditional_edges(
+                src,
+                review_router,
+                {name: name for name in stage_names} | {END: END}
+            )
+        else:
+            # Standard stage: check gate then proceed to next
+            def make_standard_router(target):
+                def standard_router(state: WorkflowState):
+                    return target if state["gate_passed"] else END
+                return standard_router
+
+            workflow.add_conditional_edges(
+                src,
+                make_standard_router(dst),
+                {dst: dst, END: END}
+            )
     
     workflow.add_edge("05-archive", END)
+
     
     # 4. Entry point: route to the current_stage set in state
     def entry_router(state: WorkflowState):
@@ -136,9 +145,9 @@ def build_harness_graph(stages: List[StageRunnable], max_reroute: int = 3):
 class LangGraphAdapter:
     """Adapts a CompiledGraph to the WorkflowExecutor protocol.
     
-    Enables drop-in replacement of WorkflowChain.
+    Provides the core execution logic using LangGraph StateGraph.
     """
-    def __init__(self, graph, stages: List[StageRunnable], max_reroute: int = 3):
+    def __init__(self, graph, stages: List[StageRunnable], max_reroute: int = MAX_REROUTE):
         self._graph = graph
         self.max_reroute = max_reroute
         self.active_stage: Optional[StageRunnable] = None # For TUI compatibility
@@ -146,42 +155,51 @@ class LangGraphAdapter:
         # Compatibility with TaskService.advance_stage
         self._stage_map = {s.stage: s for s in stages}
         self._stage_order = [s.stage for s in stages]
+        self._task_locks: Dict[str, threading.RLock] = {}
+        self._global_lock = threading.Lock()
 
     def invoke(self, input: StageInput) -> StageOutput:
-        # Initial state (serializable only)
-        state: WorkflowState = {
-            "task_name": input.task_name,
-            "current_stage": input.stage,
-            "stage_idx": input.stage_idx,
-            "history_outputs": [],
-            "last_output": input.previous_output,
-            "next_route": None,
-            "reroute_count": input.metadata.get("reroute_count", 0),
-            "gate_passed": False
-        }
-        
-        # Pass non-serializable callbacks and metadata through config
-        config = {
-            "configurable": {
-                "thread_id": input.task_name,
-                "adapter": self,
-                "callbacks": input.metadata.get("callbacks", {}),
-                "metadata": {k: v for k, v in input.metadata.items() if k != "callbacks"}
+        # Get or create per-task lock
+        with self._global_lock:
+            if input.task_name not in self._task_locks:
+                self._task_locks[input.task_name] = threading.RLock()
+            lock = self._task_locks[input.task_name]
+
+        with lock:
+            # Initial state (serializable only)
+            state: WorkflowState = {
+                "task_name": input.task_name,
+                "current_stage": input.stage,
+                "stage_idx": input.stage_idx,
+                "history_outputs": [],
+                "last_output": input.previous_output,
+                "next_route": None,
+                "reroute_count": input.metadata.get("reroute_count", 0),
+                "gate_passed": False
             }
-        }
-        
-        # Run the graph
-        final_state = self._graph.invoke(state, config)
-        
-        # Convert back to StageOutput
-        return StageOutput(
-            task_name=final_state["task_name"],
-            stage=final_state["current_stage"],
-            raw_agent_output="", # Graph doesn't keep raw text by default in State
-            parsed=final_state["last_output"],
-            gate_passed=final_state["gate_passed"],
-            route=final_state["next_route"]
-        )
+            
+            # Pass non-serializable callbacks and metadata through config
+            config = {
+                "configurable": {
+                    "thread_id": input.task_name,
+                    "adapter": self,
+                    "callbacks": input.metadata.get("callbacks", {}),
+                    "metadata": {k: v for k, v in input.metadata.items() if k != "callbacks"}
+                }
+            }
+            
+            # Run the graph
+            final_state = self._graph.invoke(state, config)
+            
+            # Convert back to StageOutput
+            return StageOutput(
+                task_name=final_state["task_name"],
+                stage=final_state["current_stage"],
+                raw_agent_output="", # Graph doesn't keep raw text by default in State
+                parsed=final_state["last_output"],
+                gate_passed=final_state["gate_passed"],
+                route=final_state["next_route"]
+            )
 
     def answer(self, text: str):
         """User reply to the active agent."""

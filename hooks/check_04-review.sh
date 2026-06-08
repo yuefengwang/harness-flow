@@ -65,4 +65,111 @@ if [ -f "package.json" ] && grep -q '"test"' "package.json"; then
     npm test >/dev/null 2>&1 || { echo "❌ 回归测试失败"; exit 1; }
 fi
 
+# ── README Documentation Validation ──
+README_ERRORS=0
+README_WARNINGS=0
+
+# 从 STATUS.json 查找任务的 target_dir
+TARGET_DIR=$(python3 -c "
+import json, sys
+try:
+    with open('workspace/STATUS.json') as f:
+        data = json.load(f)
+    td = data.get('tasks', {}).get('${TASK_NAME}', {}).get('target_dir', '')
+    if td: print(td)
+except: pass
+" 2>/dev/null || true)
+
+# 如果 target_dir 是相对路径，加上 repo/ 前缀
+if [ -n "$TARGET_DIR" ] && [ ! -d "$TARGET_DIR" ]; then
+    if [ -d "repo/$TARGET_DIR" ]; then
+        TARGET_DIR="repo/$TARGET_DIR"
+    fi
+fi
+
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+    echo "[README Check] 验证文档: $TARGET_DIR/README.md"
+    README_FILE="$TARGET_DIR/README.md"
+
+    if [ ! -f "$README_FILE" ]; then
+        echo "⚠️  $TARGET_DIR/ 下无 README.md"
+        README_WARNINGS=$((README_WARNINGS + 1))
+    else
+        # 检查占位符（软告警）
+        PLACEHOLDERS=$(grep -c 'TODO\|___\|FIXME' "$README_FILE" 2>/dev/null || echo 0)
+        if [ "$PLACEHOLDERS" -gt 0 ]; then
+            echo "⚠️  README 中包含 $PLACEHOLDERS 个占位符(TODO/___/FIXME)"
+            README_WARNINGS=$((README_WARNINGS + 1))
+        fi
+
+        # 检测 CLI 入口 → 验证 README 中的命令
+        CLI_CMDS=""
+        if [ -f "$TARGET_DIR/pyproject.toml" ]; then
+            CLI_CMDS=$(python3 -c "
+import re, sys
+try:
+    with open('$TARGET_DIR/pyproject.toml') as f:
+        in_scripts = False
+        for line in f:
+            line = line.strip()
+            if line == '[project.scripts]':
+                in_scripts = True
+                continue
+            if in_scripts:
+                if line.startswith('['):
+                    break
+                m = re.match(r'^(\w+)\s*=\s*', line)
+                if m:
+                    print(m.group(1))
+except Exception:
+    pass
+" 2>/dev/null || true)
+        elif [ -f "$TARGET_DIR/package.json" ]; then
+            CLI_CMDS=$(python3 -c "
+import json
+try:
+    with open('$TARGET_DIR/package.json') as f:
+        d = json.load(f)
+    for k in d.get('bin', {}):
+        print(k)
+except: pass
+" 2>/dev/null || true)
+        fi
+
+        if [ -n "$CLI_CMDS" ]; then
+            for cmd in $CLI_CMDS; do
+                # 检查 README 是否用到了这个命令
+                if grep -qE "\`${cmd}\b" "$README_FILE" 2>/dev/null || grep -qE "^\s*${cmd}\s" "$README_FILE" 2>/dev/null; then
+                    echo "  → README 引用命令: $cmd"
+                    # 验证命令已安装
+                    if ! command -v "$cmd" >/dev/null 2>&1; then
+                        echo "  ❌ 命令 '$cmd' 未安装（pip install -e . 或 npm link 后重试）"
+                        README_ERRORS=$((README_ERRORS + 1))
+                    else
+                        # 验证 help 正常输出
+                        if ! "$cmd" --help >/dev/null 2>&1; then
+                            echo "  ❌ 命令 '$cmd --help' 执行失败"
+                            README_ERRORS=$((README_ERRORS + 1))
+                        else
+                            echo "  ✓ 命令 '$cmd' 可用"
+                        fi
+                    fi
+                fi
+            done
+        fi
+    fi
+else
+    echo "[README Check] ⚠️  无法确定目标目录（target_dir 为空），跳过 README 校验"
+fi
+
+# 如果目标走向 Archive 但 README 有错误 → 硬阻断
+if [ "$ROUTE_VAL" = "05-Archive" ] && [ "$README_ERRORS" -gt 0 ]; then
+    echo "❌ README 文档存在 $README_ERRORS 个错误，不能推进到归档阶段。请修复后重试。"
+    exit 1
+fi
+
+if [ "$README_ERRORS" -gt 0 ] || [ "$README_WARNINGS" -gt 0 ]; then
+    echo "[README Check] 发现 $README_ERRORS 个错误, $README_WARNINGS 个警告"
+fi
+
 echo "[Hard Check] ✅ 通过"

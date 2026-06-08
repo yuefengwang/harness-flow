@@ -274,6 +274,94 @@ def _remove_old_reroute_blocks(content: str) -> str:
     return "\n".join(result)
 
 
+def check_stage_compliance(task_name: str, stage: str, stage_idx: int) -> tuple[list[str], list[str]]:
+    """Check if a stage is complete. Returns (done_items, todo_items).
+    
+    Migrated from legacy StageValidator.
+    """
+    from ..core.config import TPLS, STAGES, STAGE_NAMES
+    done = []
+    todo = []
+    task_dir = TASKS / task_name
+    tpl = task_dir / f"{stage}.md"
+
+    if not tpl.exists():
+        todo.append(f"模板文件不存在: {stage}.md")
+        return done, todo
+
+    content = tpl.read_text(encoding="utf-8", errors="replace")
+
+    lines = content.splitlines()
+    unchecked = 0
+    checked = 0
+    
+    in_choice_group = False
+    has_checkboxes = False
+    
+    for line in lines:
+        cbs = re.findall(r'\[([ xX])\]', line)
+        if not cbs:
+            if in_choice_group and line.strip() != "":
+                in_choice_group = False
+            continue
+            
+        has_checkboxes = True
+        is_choice_opt = bool(re.match(r'^\s*[-*]\s+\[[ xX]\]\s*[A-Z\d]+[.、:)]\s', line))
+        
+        if is_choice_opt:
+            if not in_choice_group:
+                in_choice_group = True
+            
+            if cbs[0].lower() == 'x':
+                checked += 1
+        else:
+            in_choice_group = False
+            for cb in cbs:
+                if cb.lower() == 'x':
+                    checked += 1
+                else:
+                    unchecked += 1
+
+    if not has_checkboxes:
+        todo.append(f"{stage}.md — 缺少门禁选项 (无复选框)")
+
+    if unchecked == 0 and checked > 0:
+        done.append(f"{stage}.md — 全部 {checked} 项已勾选")
+    elif unchecked > 0:
+        todo.append(f"{stage}.md — {unchecked} 个待填项未完成")
+    elif not has_checkboxes:
+        pass # Already handled
+    elif unchecked == 0 and checked == 0:
+        tpl_orig = TPLS / f"{stage}.md"
+        if tpl_orig.exists() and content != tpl_orig.read_text(encoding="utf-8", errors="replace"):
+            done.append(f"{stage}.md — 内容已修改（非初始模板）")
+        else:
+            todo.append(f"{stage}.md — 尚未填写（与初始模板一致）")
+
+    if stage == "01-brainstorming":
+        if re.search(r'\[x\]\s*Design approved', content, re.IGNORECASE):
+            done.append("设计批准已勾选 [x]")
+        elif '[ ] Design approved' in content:
+            todo.append("设计尚未获得批准（模板中 'Design approved' 尚未勾选）")
+        else:
+            done.append("设计批准已填写")
+
+    elif stage == "04-review":
+        route_val = parse_route_field(task_name)
+        if route_val:
+            done.append(f"**Route**: {route_val}")
+        else:
+            # Check if it's explicitly ___
+            if re.search(r'\*\*Route\*\*:\s*`___`', content):
+                todo.append("**Route** 字段尚未填写")
+            elif re.search(r'\*\*Route\*\*:\s*`([^`]+)`', content):
+                todo.append("缺少有效的 **Route** 决策")
+            else:
+                todo.append("缺少 **Route** 字段")
+
+    return done, todo
+
+
 def _normalize_stage_case(route: str) -> str:
     """Normalize stage string to match STAGES list (lowercase)."""
     route_lower = route.lower()

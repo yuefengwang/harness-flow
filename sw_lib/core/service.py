@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from .config import ROOT,  TASKS, TPLS, STAGES, STAGE_NAMES, TRASH
 from .state import (
-    read_state, write_state, state_path, StageValidator,
+    read_state, write_state, state_path,
     get_active_from_status, upsert_task_summary, remove_task_summary,
 )
 from .utils import now, sanitize_name, sw_log
@@ -285,14 +285,14 @@ class TaskService:
     def validate_stage(self, name: str) -> Tuple[List[str], List[str]]:
         """执行当前阶段的内容校验"""
         st = self.get_task_state(name)
-        idx = st.get("stage_idx", 0)
+        idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
         
-        task_dir = TASKS / name
-        return StageValidator.check(task_dir, cur_stage, idx)
+        from ..runnable.utils import check_stage_compliance
+        return check_stage_compliance(name, cur_stage, idx)
 
     def advance_stage(self, name: str) -> Dict[str, Any]:
-        """执行阶段推进 — 使用 WorkflowChain 的路由逻辑确定下一阶段。"""
+        """执行阶段推进 — 使用 WorkflowRuntime 的路由逻辑确定下一阶段。"""
         st = self.get_task_state(name)
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]

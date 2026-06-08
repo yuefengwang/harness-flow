@@ -9,32 +9,7 @@ sys.path.insert(0, str(project_root))
 
 from sw_lib.core.config import TASKS
 from sw_lib.core.state import write_state
-from sw_lib.core.engine import ContextBuilder
 
-
-@pytest.fixture(autouse=True)
-def ensure_context_builder():
-    """Ensure ContextBuilder._prompt_builder is set for all tests.
-    Does NOT override if already set by bootstrap()."""
-    saved = ContextBuilder._prompt_builder
-    if ContextBuilder._prompt_builder is None:
-        ContextBuilder._prompt_builder = MagicMock()
-        ContextBuilder._prompt_builder.build = MagicMock(return_value=(
-            "你是 Harness-Flow 平台的 AI Agent。\n"
-            "Brainstorming 头脑风暴\n"
-            "=== 编排规则 ===\n"
-            "=== 强制规则 ===\n"
-            "=== 项目信息 ===\n"
-            "=== 前一阶段产出 ===\n"
-            "=== 当前阶段模板 ===\n"
-            "=== 任务需求 ===\n"
-            "Harness-Flow AI Agent" * 3
-        ))
-    yield
-    if saved is None:
-        ContextBuilder._prompt_builder = None
-    else:
-        ContextBuilder._prompt_builder = saved
 
 @pytest.fixture
 def dummy_task():
@@ -63,3 +38,18 @@ def agent_callbacks():
         "add_log": lambda s, m: None,
         "is_running": lambda: True
     }
+
+@pytest.fixture
+def workflow_state():
+    """提供一个初始化的 WorkflowState 字典 (用于 LangGraph 测试)"""
+    return {
+        "task_name": "test-task",
+        "current_stage": "01-brainstorming",
+        "stage_idx": 0,
+        "history_outputs": [],
+        "last_output": None,
+        "next_route": None,
+        "reroute_count": 0,
+        "gate_passed": False
+    }
+

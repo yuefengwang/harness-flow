@@ -91,7 +91,7 @@ def cmd_test(args):
         
         chain = WorkflowRuntime.get_executor()
         if not chain:
-            die("WorkflowChain 未初始化")
+            die("WorkflowRuntime 未初始化")
 
         # Start the first stage
         stage_input = StageInput(

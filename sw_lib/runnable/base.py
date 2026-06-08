@@ -1,7 +1,7 @@
 """sw_lib.runnable.base — HarnessRunnable, StageRunnable, StageInput/StageOutput.
 
 Provides the foundation for HarnessFlow's composable workflow architecture.
-Each stage is a StageRunnable; orchestration is handled by WorkflowChain.
+Each stage is a StageRunnable; orchestration is handled by LangGraph.
 """
 
 import re
@@ -88,7 +88,7 @@ class StageRunnable(HarnessRunnable):
 
     All five stages (brainstorming, planning, coding, review, archive) use
     this same class. The review stage is NOT special-cased—its routing
-    behaviour is handled by WorkflowChain reading output.route.
+    behaviour is handled by LangGraph conditional edges reading output.route.
     """
 
     def __init__(

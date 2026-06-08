@@ -1,7 +1,6 @@
-"""Bootstrap — wires Phase 1/2/3 modules into the running WorkflowEngine.
+"""Bootstrap — wires LangChain and LangGraph modules into the runtime.
 
-Call bootstrap() once at CLI startup to activate the new workflow chain.
-Without bootstrap(), the system falls back to the original WorkflowEngine logic.
+Call bootstrap() once at CLI startup to activate the new workflow architecture.
 """
 
 from pathlib import Path
@@ -15,28 +14,22 @@ from ..output.stages import (
     BrainstormingOutput, PlanningOutput, CodingOutput,
     ReviewOutput, ArchiveOutput,
 )
-from ..core.engine import ContextBuilder, WorkflowEngine
 from ..core.config import STAGES, STAGE_NAMES
 
 # Module-level cache — only bootstrap once
 from ..runnable.graph import LangGraphAdapter
-_chain: Optional[LangGraphAdapter] = None
+_executor: Optional[LangGraphAdapter] = None
 
 
 def bootstrap(templates_dir: Optional[Path] = None):
-    """Activate the new workflow chain. Idempotent — safe to call multiple times.
-
-    After calling this:
-    - ContextBuilder delegates to PromptBuilder (Phase 2)
-    - WorkflowEngine.advance_stage() delegates to WorkflowChain (Phase 1)
-    - StageRunnable uses StageOutputParser (Phase 3)
+    """Activate the new workflow architecture. Idempotent — safe to call multiple times.
 
     Args:
         templates_dir: path to prompt YAML templates. Defaults to
                        sw_lib/prompts/templates/ relative to this file.
     """
-    global _chain
-    if _chain is not None:
+    global _executor
+    if _executor is not None:
         return  # already bootstrapped
 
     if templates_dir is None:
@@ -44,7 +37,6 @@ def bootstrap(templates_dir: Optional[Path] = None):
 
     registry = PromptRegistry(templates_dir)
     prompt_builder = PromptBuilder(registry)
-    ContextBuilder._prompt_builder = prompt_builder
 
     stages = [
         StageRunnable(
@@ -86,8 +78,7 @@ def bootstrap(templates_dir: Optional[Path] = None):
 
     from ..runnable.runtime import WorkflowRuntime
     WorkflowRuntime.initialize(stages)
-    # 暂时保持兼容，直到 UI/Service 全部迁移
-    WorkflowEngine._workflow_chain = WorkflowRuntime.get_executor()
+    _executor = WorkflowRuntime.get_executor()
 
 
 def _make_agent_factory(stage: str):

@@ -27,6 +27,7 @@ TRASH = TASKS / ".trash"
 
 STAGES = ["01-brainstorming", "02-planning", "03-coding", "04-review", "05-archive"]
 STAGE_NAMES = ["头脑风暴", "规划", "编码", "评审", "归档"]
+MAX_REROUTE = 3  # 最大返工循环次数
 
 # ── 配置模型 ──
 

@@ -1,6 +1,5 @@
 """PromptBuilder — builds agent context from YAML templates.
 
-Replaces ContextBuilder.build() with template-driven prompt construction.
 All prompt text lives in YAML files under sw_lib/prompts/templates/.
 """
 

@@ -659,11 +659,11 @@ class MonitorTUI:
     # ── 逻辑更新 ──
 
     def _update_agent_status(self):
-        # 优先从 WorkflowChain 获取当前活跃 Agent 状态 (需匹配当前任务名)
-        chain = WorkflowRuntime.get_executor()
+        # 优先从 WorkflowRuntime 获取当前活跃 Agent 状态 (需匹配当前任务名)
+        executor = WorkflowRuntime.get_executor()
         agent = None
-        if chain and chain.active_stage:
-            potential_agent = chain.active_stage.active_agent
+        if executor and executor.active_stage:
+            potential_agent = executor.active_stage.active_agent
             if potential_agent and getattr(potential_agent, 'name', None) == self.state.name:
                 agent = potential_agent
         
@@ -717,7 +717,7 @@ class MonitorTUI:
         if self.state.pending_questions:
             return False
         try:
-            from ..core.engine import parse_route_field
+            from ..runnable.utils import parse_route_field
             route = parse_route_field(self.state.name)
             return route is None
         except Exception:

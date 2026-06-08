@@ -1,4 +1,4 @@
-"""Tests for PromptBuilder — build() vs ContextBuilder.build() equivalence."""
+"""Tests for PromptBuilder — template-driven prompt construction."""
 import pytest
 from pathlib import Path
 
@@ -50,8 +50,8 @@ def builder():
     return PromptBuilder(registry)
 
 
-class TestPromptBuilderVsContextBuilder:
-    def test_brainstorming_output_matches_context_builder(self, task_setup, builder):
+class TestPromptBuilder:
+    def test_brainstorming_output_elements(self, task_setup, builder):
         """PromptBuilder output is non-empty and contains key elements."""
         task_name = task_setup
 
@@ -64,7 +64,7 @@ class TestPromptBuilderVsContextBuilder:
         # Shared orchestration rules
         assert "编排规则" in new_output
 
-    def test_coding_output_matches_context_builder(self, task_setup, builder):
+    def test_coding_output_elements(self, task_setup, builder):
         """PromptBuilder output for coding includes core structure."""
         task_name = task_setup
 

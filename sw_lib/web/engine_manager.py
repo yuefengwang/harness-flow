@@ -1,7 +1,7 @@
 """
-sw_lib.web.engine_manager — Web 会话引擎管理
+sw_lib.web.engine_manager — Web session management for the workflow runtime.
 
-管理 WorkflowEngine 的 Web 适配会话，提供线程安全的 deque 桥接 SSE 事件流。
+Manages WebEngineSession instances that provide thread-safe deque bridging for SSE event streams.
 """
 
 import asyncio

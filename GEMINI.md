@@ -51,12 +51,24 @@ python3 -m pytest -v       # run tests
 GEMINI.md                          ← this file (entry point + cross-refs)
 bin/sw                             ← CLI entry script
 sw_lib/                            ← core library (11 modules)
+  runnable/                        ← LangGraph engine & nodes
+  prompts/                         ← ChatPromptTemplates & YAMLs
+  output/                          ← Pydantic Output Parsers
 templates/                         ← stage deliverable templates
 hooks/                             ← stage guardrails (mandatory checks)
 workspace/STATUS.json              ← task board
 bin/dispatch.sh                   ← worktree dispatch
 config/config.yaml                 ← agent role config
 ```
+
+## Workflow Architecture (LangGraph)
+
+系统已升级为基于 **LangGraph** 的响应式状态机架构。
+
+*   **WorkflowRuntime**: 全局单例，管理 `StateGraph` 的生命周期。
+*   **WorkflowState**: 强类型全局状态，包含 `history_outputs` 和 `last_output`。
+*   **FileCheckpointSaver**: 实现磁盘持久化，支持任务断点续传（通过 thread_id）。
+*   **StageRunnable**: 标准执行单元，封装了 Prompt -> Agent -> Parser -> Gate -> Save 流程。
 
 ## Web Console Module (新增)
 
@@ -261,6 +273,105 @@ java -jar repo/helloworld/target/helloworld-1.0.0.jar Harness # → Hello, Harne
 - Java 25 `java --version` output format differs from Java 21 (2021 vs 2025 era), but Maven handles both identically
 - `mvn package` creates JAR with manifest; `mvn compile` alone is insufficient for `java -jar`
 - Build artifacts (`target/`) must be cleaned before archiving to avoid stale state
+
+## Generated Project Pattern: HealthMonitor (repo/optimize-deploy)
+
+A reference example of a deployment health monitoring module with auto-recovery and circuit breaker. Produced under `repo/optimize-deploy/`.
+
+**Module**: `sw_lib/core/health.py` — HealthMonitor for post-deploy service health
+**Stack**: Python 3.9+ (stdlib only: socket, threading, os, time, dataclasses)
+
+```
+sw_lib/core/
+├── health.py              ← HealthMonitor + HealthConfig (256 lines)
+tests/unit/core/
+└── test_health_monitor.py ← 53 tests (full coverage)
+```
+
+**Architecture**:
+- `HealthConfig` dataclass: `enabled`, `check_interval`, `failure_threshold`, `auto_redeploy`, `max_redeploys`, `redeploy_window_sec`
+- `HealthMonitor` class: `run()` blocking loop, `stop()` via `threading.Event`, `_check_tcp()`, `_check_pid()`, `_trigger_redeploy()`, `_redeploy()`, `_check_circuit_breaker()`
+- Integration: `DeployOrchestrator` for actual redeploy, `stop_tunnel` for tunnel cleanup, task state for status persistence
+
+**Key decisions**:
+- Dual health check: TCP port listen + PID process alive (`os.kill(pid, 0)`) — two independent checks
+- Circuit breaker: timestamp-based window (default 5 redeploys in 300s), simple list cleanup O(n) where n ≤ 5
+- Port reuse: `socket.bind(preferred)` to test, fallback to `bind(0)` for random port
+- `threading.Event.wait(timeout)` for interruptible sleep instead of `time.sleep()`
+- All redeploy exceptions caught — tunnel failure, process kill failure, deploy failure — never blocks the chain
+- Auto/Manual mode via `health_config.auto_redeploy` field in task `.state` file
+
+**Test patterns**:
+- `timeout > my_monitor.config.check_interval` in `run()` / `stop()` race tests
+- Mock `socket.create_connection` for TCP failure scenarios
+- Mock `os.kill` for PID check failure scenarios
+- Mock `time.time` for circuit breaker window tests (avoid real sleep)
+- `stop_event.wait()` as synchronization point
+
+**Validation commands**:
+```bash
+python3 -m pytest tests/unit/core/test_health_monitor.py -v   # 53 tests
+python3 -m pytest tests/unit/core/ -v                         # no regression (82 tests)
+```
+
+## Generated Project Pattern: CLI Note Manager (repo/test-app)
+
+A reference example of a zero-dependency Python CLI application with layered architecture and comprehensive testing — produced by the `e2e-1780569694` task. **Replaces earlier `e2e-test-1780559048` iteration** with cleaner `src/` layout and standard `pyproject.toml`-based packaging.
+
+**Project**: `repo/test-app/` — CLI Note Manager
+**Stack**: Python 3.10+ (stdlib only: argparse, json, dataclasses, uuid, pathlib, datetime) + pytest
+**Architecture**: 3-layer: `models.py` (data) → `storage.py` (JSON CRUD) → `cli.py` (argparse dispatch)
+
+```
+repo/test-app/
+├── pyproject.toml            # setuptools build + [project.scripts] notes = "notes.cli:main"
+├── src/notes/
+│   ├── __init__.py           # exports Note, NotesStore
+│   ├── models.py             # Note dataclass (id, title, content, tags, timestamps)
+│   ├── storage.py            # NotesStore: JSON CRUD + search with atomic writes
+│   └── cli.py                # argparse CLI (add/list/delete/search)
+└── tests/
+    ├── __init__.py           # empty
+    ├── test_models.py        # 3 tests — creation, tags, id uniqueness
+    ├── test_storage.py       # 9 tests — CRUD, search, persistence, empty store
+    └── test_cli.py           # 8 tests — integration via tmp_path + NOTEFILE env
+```
+
+**CLI commands**:
+```
+notes add <title> <content> [-t tag [tag ...]]
+notes list
+notes delete <id>
+notes search [query] [-t tag]
+```
+
+**Key decisions**:
+- Zero external runtime dependencies — pure stdlib means no `pip install` for production use
+- `src/` layout with `[tool.setuptools.packages.find] where = ["src"]` — standard modern Python packaging
+- `Note` dataclass with `field(default_factory=...)` for mutable defaults (tags, id, timestamps)
+- `NOTES_FILE` env var for test isolation (no mocking of `Path.home()` needed) — cleaner than `unittest.mock.patch`
+- `NotesStore.search()` uses case-insensitive substring match on title+content + optional tag filter
+- Atomic file writes: write to `.tmp`, then `os.replace(tmp, target)` — prevents partial writes on crash
+- UUID hex[:8] for short 8-char IDs (good enough uniqueness for a personal CLI tool)
+- `NotesStore._note_to_dict()` / `_dict_to_note()` for explicit datetime serialization via `.isoformat()` / `fromisoformat()`
+- Default storage path: `~/.notes/notes.json` via `DEFAULT_NOTES_DIR`
+- `_get_notes_path()` reads env `NOTES_FILE` first, falls back to default
+- `try/finally` cleanup pattern in CLI tests to avoid `NOTES_FILE` env var leaking between tests
+- Output format: `<id>  <title> [tags]` with timestamp + content preview on subsequent lines
+
+**Test patterns**:
+- `tmp_path` fixture for isolated storage per test — no mocks needed for `NotesStore`
+- `NOTES_FILE` env var + `tmp_path` for CLI integration tests (avoids `unittest.mock.patch`)
+- `capsys` fixture for CLI output assertions (not used in current tests — just return codes, but available)
+- 20 tests total (3 model + 9 storage + 8 CLI), all passing in ~0.06s
+- Edge cases: empty store, missing note ID (exit code 1), file persistence verified via `json.loads()`
+
+**Validation commands**:
+```bash
+cd repo/test-app && python3 -m pytest tests/ -v   # 20 tests
+cd repo/test-app && python3 -m notes add "Hello" --body "world"
+cd repo/test-app && python3 -m notes list
+```
 
 ## Cross-Reference Index
 

@@ -1,19 +1,17 @@
 """
-sw_lib.state — 任务状态持久化及阶段校验。
+sw_lib.state — 任务状态持久化及汇总管理。
 
 主要职责：
 1. 维护任务的 .state 文件 (JSON 格式)，每个任务独立管理自身状态。
-2. 通过扫描 .state 文件查找当前活跃任务。
-3. 封装对任务状态的读取、写入及自动迁移逻辑。
+2. 通过扫描 STATUS.json 查找当前活跃任务。
+3. 封装对任务状态的读取、写入及汇总逻辑。
 """
 
 import json
-import re
-import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any
 
-from .config import ROOT, TASKS, STATUS, STAGES, STAGE_NAMES
+from .config import TASKS, STATUS, STAGES, STAGE_NAMES
 
 
 def state_path(name: str) -> Path:
@@ -190,101 +188,3 @@ def find_context_from_cwd(start_dir: Optional[str] = None) -> Optional[Dict[str,
                 pass
     return None
 
-
-class StageValidator:
-    """阶段完成校验器"""
-
-    @staticmethod
-    def check(task_dir: Path, stage: str, stage_idx: int) -> tuple[list[str], list[str]]:
-        """返回 (done_items, todo_items)"""
-        done = []
-        todo = []
-        tpl = task_dir / f"{stage}.md"
-
-        if not tpl.exists():
-            todo.append(f"模板文件不存在: {stage}.md")
-            return done, todo
-
-        content = tpl.read_text()
-
-        lines = content.splitlines()
-        unchecked = 0
-        checked = 0
-        
-        in_choice_group = False
-        choice_group_has_checked = False
-        
-        for line in lines:
-            cbs = re.findall(r'\[([ xX])\]', line)
-            if not cbs:
-                if in_choice_group and line.strip() != "":
-                    # Choice 组在中间结束，空组不计入 unchecked
-                    in_choice_group = False
-                continue
-                
-            is_choice_opt = bool(re.match(r'^\s*[-*]\s+\[[ xX]\]\s*[A-Z\d]+[.、:)]\s', line))
-            
-            if is_choice_opt:
-                if not in_choice_group:
-                    in_choice_group = True
-                    choice_group_has_checked = False
-                
-                if cbs[0].lower() == 'x':
-                    choice_group_has_checked = True
-                    checked += 1
-            else:
-                # Choice 组结束：若组内无选中项，不计入 unchecked（空选择组是有效状态）
-                in_choice_group = False
-                
-                for cb in cbs:
-                    if cb.lower() == 'x':
-                        checked += 1
-                    else:
-                        unchecked += 1
-
-        # Choice 组在文件末尾结束：空组中性，不计数
-
-        if unchecked == 0 and checked > 0:
-            done.append(f"{stage}.md — 全部 {checked} 项已勾选")
-        elif unchecked > 0:
-            todo.append(f"{stage}.md — {unchecked} 个待填项未完成")
-        elif unchecked == 0 and checked == 0:
-            tpl_orig = TPLS / f"{stage}.md"
-            if tpl_orig.exists() and content != tpl_orig.read_text():
-                done.append(f"{stage}.md — 内容已修改（非初始模板）")
-            else:
-                todo.append(f"{stage}.md — 尚未填写（与初始模板一致）")
-
-        if stage == "01-brainstorming":
-            if re.search(r'\[x\]\s*Design approved', content, re.IGNORECASE):
-                done.append("设计批准已勾选 [x]")
-            elif '[ ] Design approved' in content:
-                todo.append("设计尚未获得批准（模板中 'Design approved' 尚未勾选）")
-            else:
-                done.append("设计批准已填写")
-
-        elif stage == "04-review":
-            m = re.search(r'\*\*Route\*\*:\s*`([^`]+)`', content)
-            if m:
-                route_val = m.group(1).strip()
-                if route_val == "___":
-                    todo.append("**Route** 字段尚未填写")
-                else:
-                    if route_val.lower() in STAGES:
-                        done.append(f"**Route**: {route_val}")
-                    else:
-                        todo.append(f"**Route** '{route_val}' 无效，应为 05-Archive/03-Coding/02-Planning/01-Brainstorming")
-            else:
-                todo.append("缺少 **Route** 字段")
-
-        # elif stage == "03-coding":
-        #     try:
-        #         result = subprocess.run(
-        #             ["git", "-C", str(ROOT), "log", "--oneline", "-5"],
-        #             capture_output=True, text=True)
-        #         if result.stdout.strip():
-        #             done.append(f"最近 git 提交:\n    {result.stdout.strip()[:200]}")
-        #     except Exception:
-        #         pass
-
-        return done, todo

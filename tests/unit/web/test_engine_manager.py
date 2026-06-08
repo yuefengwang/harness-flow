@@ -1,16 +1,7 @@
 import asyncio
 import pytest
 from sw_lib.web.engine_manager import WebEngineManager, WebEngineSession
-from sw_lib.core.engine import WorkflowEngine
-
-
-@pytest.fixture(autouse=True)
-def reset_chain():
-    """Ensure WorkflowEngine._workflow_chain is None for these tests."""
-    saved = WorkflowEngine._workflow_chain
-    WorkflowEngine._workflow_chain = None
-    yield
-    WorkflowEngine._workflow_chain = saved
+from sw_lib.runnable.runtime import WorkflowRuntime
 
 
 def test_engine_manager_singleton():
@@ -99,6 +90,8 @@ async def test_get_all_events_empty(dummy_task):
 
 
 def test_session_status_initially_idle(dummy_task):
+    from sw_lib.core.bootstrap import bootstrap
+    bootstrap()
     mgr = WebEngineManager()
     session = mgr.create_session(dummy_task, "01-brainstorming", 0, "N/A")
     try:
@@ -108,6 +101,8 @@ def test_session_status_initially_idle(dummy_task):
 
 
 def test_session_submit_answer_no_crash(dummy_task):
+    from sw_lib.core.bootstrap import bootstrap
+    bootstrap()
     mgr = WebEngineManager()
     session = mgr.create_session(dummy_task, "01-brainstorming", 0, "N/A")
     try:

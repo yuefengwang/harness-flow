@@ -173,7 +173,10 @@ harness-flow/
 ├── sw_lib/                 # 🧠 逻辑核心 (分层架构)
 │   ├── agents/             # Agent 驱动 (Gemini, OpenCode, PTY, Mock)
 │   ├── cli/                # 命令行解析与指令实现
-│   ├── core/               # 引擎、服务、状态、配置模型
+│   ├── core/               # 服务、状态、配置模型
+│   ├── runnable/           # 核心编排引擎 (LangGraph, StateGraph)
+│   ├── prompts/            # YAML 驱动的提示词构建
+│   ├── output/             # Pydantic 结构化产出解析
 │   ├── tools/              # 插件化工具箱 (5 个原子工具)
 │   ├── ui/                 # 终端交互界面 (Init UI & Monitor TUI)
 │   └── web/                # Web Dashboard (FastAPI + HTMX + SSE)

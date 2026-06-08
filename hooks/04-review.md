@@ -25,7 +25,16 @@
 - **Rule**: code, test, doc, config in sync
 - **Check**: README / task.yaml reflect latest state
 
-## hook-04-06: Review Decision & Reroute Gate
+## hook-04-06: README Content Validation (文档内容校验)
+- **When**: post
+- **Rule**: README.md 文档内容必须与项目实际行为一致。所有在 README 中出现的 CLI 命令必须可执行且正确。
+- **Check**:
+  - README.md 存在且非空
+  - README 中引用的 CLI 命令已安装
+  - CLI `--help` 运行正常
+  - 无残留 TODO/___/FIXME 占位符（仅警告）
+
+## hook-04-07: Review Decision & Reroute Gate
 - **When**: post (before stage exit)
 - **Rule**: review must classify outcome into exactly one routing path. **Route 决策必须通过 ask_user 工具与用户交互确认** — agent 不得自行填写 Route 值，必须向用户汇报审查结论并请求选择路由方向。
 - **Decision Tree**:
@@ -63,7 +72,7 @@
 
 - **Check**: review 文档中必须明确记录路由路径及理由
 
-## hook-04-07: Reroute Evidence (返工证据链)
+## hook-04-08: Reroute Evidence (返工证据链)
 - **When**: post (仅在路由非 05-Archive 时触发)
 - **Rule**: 每次返工路由必须附带可复现的证据
 - **Evidence per route**:
