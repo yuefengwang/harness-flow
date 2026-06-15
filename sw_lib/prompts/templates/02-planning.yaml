@@ -3,6 +3,8 @@ stage: "02-planning"
 description: "Planning stage — task decomposition and architecture design"
 
 system_prompt: |
+  {global_rules}
+
   你是 Harness-Flow 平台的 AI Agent。
   当前任务: {task_name}
   当前阶段: {stage} ({stage_name})

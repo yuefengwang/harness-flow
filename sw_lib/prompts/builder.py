@@ -42,10 +42,13 @@ class PromptBuilder:
         template = self.registry.get(stage)
         parts = []
 
+        global_rules = self._read_global_rules() or "（未定义全局规范）"
+
         system_prompt = template["system_prompt"].format(
             task_name=task_name,
             stage=stage,
             stage_name=stage_name,
+            global_rules=global_rules,
         )
         parts.append(system_prompt)
 
@@ -88,6 +91,27 @@ class PromptBuilder:
             f"代码生成目录: {target_dir}\n"
             "所有的业务代码、模板、静态文件等都应生成到此目录下。"
         )
+
+    def _read_global_rules(self) -> Optional[str]:
+        """探测并读取通用的全局项目规则文件。"""
+        from ..core.config import ROOT
+        
+        # 兼容列表，按优先级探测
+        possible_rule_files = [
+            "INSTRUCTIONS.md", 
+            "PROJECT_RULES.md", 
+            "GEMINI.md", 
+            "Claude.skills",
+            ".cursorrules"
+        ]
+        
+        for filename in possible_rule_files:
+            rule_path = ROOT / filename
+            if rule_path.exists():
+                content = rule_path.read_text(encoding="utf-8", errors="replace").strip()
+                if content:
+                    return f"=== 全局项目规范 ({filename}) ===\n{content}"
+        return None
 
     def _read_previous_stage(self, task_name: str, stage_idx: int) -> Optional[str]:
         if stage_idx == 0:

@@ -3,6 +3,8 @@ stage: "01-brainstorming"
 description: "Brainstorming stage — requirement elicitation and ambiguity resolution"
 
 system_prompt: |
+  {global_rules}
+
   你是 Harness-Flow 平台的 AI Agent。
   当前任务: {task_name}
   当前阶段: {stage} ({stage_name})
