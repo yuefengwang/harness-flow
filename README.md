@@ -74,10 +74,23 @@
 
 ### 1. 安装环境
 
-确保您的环境已安装 Python 3.9+ 及依赖：
+本项目使用 [uv](https://github.com/astral-sh/uv) 进行极速的依赖与 Python 环境管理。确保您的系统环境支持 Python 3.9+。
+
+**步骤 1. 安装 uv**
+
+*   **macOS / Linux**:
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+*   **Windows**:
+    ```powershell
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    ```
+
+**步骤 2. 极速安装并同步项目依赖** (这会自动为您创建一个隔离的 `.venv` 虚拟环境)
 
 ```bash
-pip install pyyaml rich google-genai fastapi uvicorn
+uv sync
 ```
 
 ### 2. 配置凭证 (Credentials)
@@ -115,13 +128,13 @@ harness:
 运行交互式向导，只需三步：起名 → 选型 → 贴需求。确认后自动进入监控面板。
 
 ```bash
-./sw init
+uv run ./sw init
 ```
 
 也可通过命令行参数一键创建：
 
 ```bash
-./sw init --type=feature --name=my-feature --context="实现用户登录模块"
+uv run ./sw init --type=feature --name=my-feature --context="实现用户登录模块"
 ```
 
 ### 5. 在监控面板中协作
@@ -138,7 +151,7 @@ harness:
 浏览器端管理面板，无需终端即可管理所有任务：
 
 ```bash
-./sw dashboard
+uv run ./sw dashboard
 # 默认访问 http://127.0.0.1:8080
 ```
 
@@ -148,17 +161,17 @@ harness:
 
 | 命令 | 说明 |
 |:---|:---|
-| `./sw init` | 创建新任务（零参数自动进入交互模式） |
-| `./sw monitor --name=<id>` | 启动 TUI 监控面板 |
-| `./sw dashboard` | 启动 Web Dashboard（FastAPI + HTMX） |
-| `./sw status [--name=<id>]` | 查看任务状态 |
-| `./sw advance [--name=<id>]` | 校验并推进到下一阶段 |
-| `./sw resume --name=<id>` | 恢复并查看任务上下文 |
-| `./sw list` | 列出所有活跃任务 |
-| `./sw list --trash` | 查看回收站中的任务 |
-| `./sw remove --name=<id>` | 将任务移入回收站（软删除） |
-| `./sw restore --name=<id>` | 从回收站恢复任务 |
-| `./sw answer --name=<id> --text=<reply>` | 以编程方式回复 Agent 问题 |
+| `uv run ./sw init` | 创建新任务（零参数自动进入交互模式） |
+| `uv run ./sw monitor --name=<id>` | 启动 TUI 监控面板 |
+| `uv run ./sw dashboard` | 启动 Web Dashboard（FastAPI + HTMX） |
+| `uv run ./sw status [--name=<id>]` | 查看任务状态 |
+| `uv run ./sw advance [--name=<id>]` | 校验并推进到下一阶段 |
+| `uv run ./sw resume --name=<id>` | 恢复并查看任务上下文 |
+| `uv run ./sw list` | 列出所有活跃任务 |
+| `uv run ./sw list --trash` | 查看回收站中的任务 |
+| `uv run ./sw remove --name=<id>` | 将任务移入回收站（软删除） |
+| `uv run ./sw restore --name=<id>` | 从回收站恢复任务 |
+| `uv run ./sw answer --name=<id> --text=<reply>` | 以编程方式回复 Agent 问题 |
 
 全局标志：`--yes/-y`（自动确认）、`--non-interactive`（非交互模式）
 
@@ -236,9 +249,9 @@ harness-flow/
 任务移除不会真正删除数据，而是移入回收站：
 
 ```bash
-./sw remove --name=my-task   # 移入 workspace/tasks/.trash/
-./sw list --trash             # 查看已移除任务
-./sw restore --name=my-task   # 恢复到活跃任务列表
+uv run ./sw remove --name=my-task   # 移入 workspace/tasks/.trash/
+uv run ./sw list --trash             # 查看已移除任务
+uv run ./sw restore --name=my-task   # 恢复到活跃任务列表
 ```
 
 任务的所有产物（`.state`、`.log`、阶段文档）均完整保留，恢复后可继续推进。
