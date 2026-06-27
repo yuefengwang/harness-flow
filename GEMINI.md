@@ -39,6 +39,10 @@ sw monitor --name=<task-id>
 - **可验证目标**：将模糊任务转化为可测试的结果（如：编写失败测试 -> 修复 -> 测试通过）。
 - **迭代闭环**：通过强有力的成功标准实现自主迭代，避免陷入“让它工作”的模糊循环。
 
+### 5. Spec-Driven Collaboration (规约驱动与长效进展对齐)
+- **核心理念**：意图为先，进展交接。代码服务于规约。
+- **可验证目标**：启动时硬性对齐 `progress.txt` 中前一任进展与本次首要待办；开发时在 `02-Planning` 阶段完成用例与接口冻结；退出时在 `progress.txt` 提交高密度交接小结（不少于 50 字）作为门禁硬卡点，确立长会话开发的信任链条。
+
 ## Key Commands
 ```bash
 sw init                    # create task + start workflow

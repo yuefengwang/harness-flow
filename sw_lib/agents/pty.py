@@ -149,7 +149,7 @@ class PtyAgent(BaseAgent):
                     self._add_log("error", f"加载凭证失败 ({p.name}): {e}")
         return creds
 
-    def send(self, text):
+    def send(self, text, is_system=False):
         if self._master_fd is None:
             self._add_log("sw", "Agent 未运行，输入已写入 .input (sw next 后生效)")
             input_file = TASKS / self.name / ".input"

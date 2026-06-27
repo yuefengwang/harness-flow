@@ -295,7 +295,8 @@ class ContextBuilder:
             "4. **提问与确认规则 (CRITICAL)**: 向用户提问、寻求选择、请求确认时，**必须**使用 "
             "`ask_user` 或 `question` 工具。**严禁**在正文中输出编号列表（如 '1. xxx 2. yyy'）"
             "让用户选择——这会被框架误解析。如果你无法调用这些工具，请输出单行简洁问题，"
-            "不要使用编号或字母列表格式。"
+            "不要使用编号或字母列表格式。\n"
+            "5. **进展小结 (Progress Handover)**: 为了支持长运行多 Context 会话协同，在你每次回答的最后，或者认为当前任务阶段工作完成时，**必须**在输出最后加上一个以 '## Progress' 开头的段落（不少于 50 字），陈述当前进展、阻碍及移交下任的待办事项。"
         )
 
         # 0.6 注入项目目录信息
@@ -307,6 +308,25 @@ class ContextBuilder:
                 f"代码生成目录: {target_dir}\n"
                 f"所有的业务代码、模板、静态文件等都应生成到此目录下。"
             )
+
+        # 0.7 注入跨会话进展记录 (Progress Handover)
+        progress_file = task_dir / "progress.txt"
+        if progress_file.exists():
+            progress_content = progress_file.read_text(encoding="utf-8").strip()
+            if progress_content:
+                parts.append(
+                    f"=== 跨会话进展记录 (progress.txt) ===\n"
+                    f"请务必仔细阅读以下之前的进展记录，了解最近的变动和当前的任务待办：\n"
+                    f"{progress_content}"
+                )
+                
+                # 0.8 启动握手指令 (Bootstrap Handshake)
+                parts.append(
+                    "=== 启动指令 (Bootstrap Command) ===\n"
+                    "请仔细阅读上方注入的 `progress.txt` 进展交接记录。\n"
+                    "【你当前的首要任务】是：在你的第一个回答中，先简要向用户汇报你所理解的「当前进展」与「本次首要待办任务」。\n"
+                    "只有在上述对齐握手完成后，你才可以开始后续具体的代码编写或规划工作。"
+                )
 
         # 1. 注入前一阶段的产出 (Context Injection)
         if stage_idx > 0:
@@ -397,7 +417,35 @@ class OutputExtractor:
         stage_file.write_text(new_content, encoding="utf-8")
         add_log_callback("sw", f"阶段产出已保存到 {stage}.md ({len(output)} 字符)")
         sw_log(task_name, f"stage output saved: {stage}.md", "sw")
+
+        # 自动提取 progress 写入 progress.txt (Progress Handover)
+        agent_lines = [msg for source, msg in output_lines if source == "agent"]
+        if agent_lines:
+            full_text = "\n".join(agent_lines)
+            progress_text = OutputExtractor._extract_progress_section(full_text)
+            if progress_text:
+                progress_file = task_dir / "progress.txt"
+                progress_file.write_text(progress_text, encoding="utf-8")
+                add_log_callback("sw", f"📝 跨会话进展小结已自动更新到 progress.txt")
+
         return True
+
+    @staticmethod
+    def _extract_progress_section(text: str) -> Optional[str]:
+        """寻找 ## Progress 或 ## 进展 或 ## progress 开头的标题，并截取其内容"""
+        import re
+        pattern = re.compile(
+            r'##\s*(Progress|progress|进展)\b(.*?)(?=\n##\s*|\Z)',
+            re.IGNORECASE | re.DOTALL
+        )
+        match = pattern.search(text)
+        if match:
+            from .utils import now
+            title = f"## Progress (更新时间: {now()})"
+            body = match.group(2).strip()
+            if len(body) > 10:
+                return f"{title}\n{body}"
+        return None
 
     @staticmethod
     def _extract_output(output_lines: List[Tuple[str, str]]) -> Optional[str]:
@@ -543,9 +591,14 @@ class WorkflowEngine:
                 capture_output=True, text=True, timeout=60
             )
             if result.returncode != 0:
-                self._add_log("error", f"Hooks 验证失败: {script_name}")
+                self._add_log("error", f"❌ Hooks 验证失败: {script_name}")
+                err_msg = ""
                 if result.stdout.strip():
-                    self._add_log("error", result.stdout.strip()[:300])
+                    err_msg += f"--- Stdout ---\n{result.stdout.strip()}\n"
+                if result.stderr.strip():
+                    err_msg += f"--- Stderr ---\n{result.stderr.strip()}\n"
+                if err_msg:
+                    self._add_log("error", err_msg[:4000])
                 return False
             self._add_log("sw", f"Hooks 验证通过: {script_name}")
             return True

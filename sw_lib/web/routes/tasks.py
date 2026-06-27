@@ -267,6 +267,8 @@ def _task_table_html() -> str:
                 elif ds == "deploy_failed":
                     actions_html += '<span class="status-failed">部署失败</span> '
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">重试</button>'
+            else:
+                actions_html += f'<button class="btn" hx-post="/tasks/{t["id"]}/advance" hx-target="#task-list" hx-swap="outerHTML">推进</button>'
             actions_html += f'<button class="danger" hx-post="/tasks/{t["id"]}/remove" hx-target="#task-list" hx-swap="outerHTML" hx-confirm="确认移除任务 {t["id"]}?">删除</button>'
             actions_html += '</td>'
             lines.append(

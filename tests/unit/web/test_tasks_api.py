@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from sw_lib.web.app import create_app
 from sw_lib.web.engine_manager import WebEngineManager
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
+from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES, get_repo_path
 from sw_lib.core.state import read_state, write_state
 from sw_lib.core.service import _service
 
