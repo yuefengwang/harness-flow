@@ -78,6 +78,26 @@ class ReadFileTool(BaseTool):
             return f"错误: {e}"
 
 
+class ReadProgressTool(BaseTool):
+    def __init__(self, task_name: str):
+        self.task_name = task_name
+
+    @property
+    def name(self) -> str: return "read_progress"
+    
+    @property
+    def description(self) -> str: return "读取当前任务的跨会话进展交接记录(progress.txt)，以恢复历史上下文记忆。参数: 无。"
+
+    def __call__(self) -> str:
+        try:
+            target = TASKS / self.task_name / "progress.txt"
+            if not target.exists():
+                return "暂无历史进展记录。"
+            return target.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"错误: {e}"
+
+
 class WriteFileTool(BaseTool):
     @property
     def name(self) -> str: return "write_file"
@@ -193,7 +213,8 @@ class Toolbox:
             "read_file": ReadFileTool(),
             "write_file": WriteFileTool(),
             "run_command": RunCommandTool(),
-            "ask_user": AskUserTool(self.callbacks, self.stage)
+            "ask_user": AskUserTool(self.callbacks, self.stage),
+            "read_progress": ReadProgressTool(self.task_name)
         }
 
     def get_available_tools(self) -> List[Callable]:

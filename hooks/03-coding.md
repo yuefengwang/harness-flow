@@ -28,3 +28,8 @@
 ## hook-03-06: User Interaction via Tool
 - **When**: 需要用户确认、选择或输入时
 - **Rule**: **必须**使用 `ask_user` / `question` 工具，**禁止**在正文中输出编号选项列表
+
+## hook-03-07: Spec Conformance (契约一致性)
+- **When**: post-coding
+- **Rule**: 代码接口命名、入参、出参及异常处理必须与 `01-brainstorming.md` 的 Spec Contracts 保持 100% 一致。
+- **Check**: 检查是否有针对 Spec Contracts 中所有 Scenario 的测试用例覆盖，且测试用例需全部通过。

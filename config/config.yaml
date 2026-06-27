@@ -32,6 +32,7 @@ harness:
       tools:
       - list_files
       - read_file
+      - read_progress
     architect:
       agent: opencode
       description: "\u7CFB\u7EDF\u67B6\u6784\u5E08\uFF1A\u64C5\u957F\u6A21\u5757\u62C6\
@@ -40,6 +41,7 @@ harness:
       tools:
       - list_files
       - read_file
+      - read_progress
     archivist:
       agent: opencode
       description: "\u6587\u6863\u4E13\u5458\uFF1A\u8D1F\u8D23\u5F52\u6863\u548C\u6587\
@@ -49,6 +51,7 @@ harness:
       - list_files
       - read_file
       - write_file
+      - read_progress
     developer:
       agent: opencode
       description: "\u4EE3\u7801\u6267\u884C\u8005\uFF1A\u5168\u9762\u5F00\u653E\u4EE3\
@@ -59,6 +62,7 @@ harness:
       - read_file
       - write_file
       - run_command
+      - read_progress
     reviewer:
       agent: opencode
       description: "\u4EE3\u7801\u8BC4\u5BA1\u5458\uFF1A\u5FEB\u901F\u3001\u4E25\u82DB\
