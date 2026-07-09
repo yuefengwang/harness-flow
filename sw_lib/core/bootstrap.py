@@ -89,14 +89,13 @@ def _make_agent_factory(stage: str):
     have access to the engine, we use a lazy proxy.
     """
     from ..agents.base import AgentFactory
-    from ..core.config import resolve_agent_type, resolve_agent_model
+    from ..core.config import resolve_agent_type, resolve_agent_model, STAGES
 
     def factory(stage=stage, task_name=None):
-        # StageRunnable passes task_name=None; the agent_factory callback
-        # from the engine will resolve it.
         agent_type = resolve_agent_type(stage, "")
         model = resolve_agent_model(stage, "")
         callbacks = {}  # StageRunnable overrides these in _run_agent
-        return AgentFactory.create(agent_type, callbacks, task_name or "", stage, 0, model)
+        stage_idx = STAGES.index(stage) if stage in STAGES else 0
+        return AgentFactory.create(agent_type, callbacks, task_name or "", stage, stage_idx, model)
 
     return factory

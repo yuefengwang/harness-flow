@@ -231,10 +231,7 @@ class MockAgent(BaseAgent):
             f"- **国际化支持**: {choice}\n"
             "- **核心架构**: 采用分层解耦设计\n\n"
             "### 方案建议\n"
-            "建议使用标准的 Service 模式，将业务逻辑与接口层分离。\n\n"
-            "## Gate\n"
-            "- [x] Design approved\n"
-            "- [x] Ready for Planning\n"
+            "建议使用标准的 Service 模式，将业务逻辑与接口层分离。\n"
         )
         self._say(output)
 
@@ -247,10 +244,7 @@ class MockAgent(BaseAgent):
             "### 任务拆解 (WBS)\n"
             "1. [ ] 定义数据模型\n"
             "2. [ ] 实现核心 Service\n"
-            "3. [ ] 编写单元测试\n\n"
-            "## Gate\n"
-            "- [x] Architecture finalized\n"
-            "- [x] Tasks itemized\n"
+            "3. [ ] 编写单元测试\n"
         )
         self._say(output)
 
@@ -301,7 +295,7 @@ class MockAgent(BaseAgent):
         if is_pass:
             output += (
                 "### Reroute Evidence\n"
-                "*(评审通过，无需返工)*\n\n"
+                "*(评审通过，无需返工)*\n"
             )
         else:
             output += (
@@ -309,15 +303,9 @@ class MockAgent(BaseAgent):
                 "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
                 "|---|------|---------|---------|-------------|\n"
                 "| 1 | 模拟发现的问题 | high | coding | 详见审查结论 |\n"
-                "| 2 | 需修复项 | med | coding | 详见审查结论 |\n\n"
+                "| 2 | 需修复项 | med | coding | 详见审查结论 |\n"
             )
 
-        output += (
-            "## Gate\n"
-            f"- [{'x' if is_pass else ' '}] Full build passes\n"
-            f"- [{'x' if is_pass else ' '}] Security audit clear\n"
-            f"- [{'x' if is_pass else ' '}] Lint/static analysis passes\n"
-        )
         self._say(output)
 
     def _scenario_generic(self, stage_key: str):
@@ -327,9 +315,6 @@ class MockAgent(BaseAgent):
         
         output = (
             f"## 🤖 AI Output\n\n"
-            f"这是 {stage_name} 阶段的模拟产出。工作已顺利完成。\n\n"
-            "## Gate\n"
-            "- [x] Step 1 completed\n"
-            "- [x] Verification passed\n"
+            f"这是 {stage_name} 阶段的模拟产出。工作已顺利完成。\n"
         )
         self._say(output)

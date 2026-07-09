@@ -187,6 +187,96 @@ class TestGateValidatorCheck:
             import shutil
             shutil.rmtree(task_dir, ignore_errors=True)
 
+    def test_fails_when_choice_options_all_unchecked(self):
+        """01-brainstorming where ALL choice options in a group are [ ] should NOT pass.
+        
+        Choice group = A/B options under a clarifying question.
+        Current bug: all [ ] in a group are ignored, allowing advance with empty template.
+        """
+        task_name = "gate-test-choice-all-unchecked"
+        task_dir = TASKS / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "01-brainstorming.md").write_text(
+            "# 01-Brainstorming\n\n"
+            "## Clarifying Questions\n"
+            "1. **Topic**: ___\n"
+            "   - [ ] A: Option A — Pros\n"
+            "   - [ ] B: Option B — Pros\n"
+            "   - **Chosen**: ___\n"
+            "\n"
+            "## Gate\n"
+            "- [x] Design approved\n"
+            "- [x] Ready for Planning\n",
+            encoding="utf-8",
+        )
+
+        try:
+            validator = GateValidator()
+            result = validator.check(task_name, "01-brainstorming")
+            # Should FAIL — no choice has been selected in the group
+            assert result is False, "Gate must fail when choice group has no [x]"
+        finally:
+            import shutil
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+    def test_passes_when_one_choice_in_group_checked(self):
+        """Choice group passes when at least one option is [x]."""
+        task_name = "gate-test-choice-one-checked"
+        task_dir = TASKS / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "01-brainstorming.md").write_text(
+            "# 01-Brainstorming\n\n"
+            "## Clarifying Questions\n"
+            "1. **Topic**: ___\n"
+            "   - [x] A: Option A — Pros\n"
+            "   - [ ] B: Option B — Pros\n"
+            "   - **Chosen**: ___\n"
+            "\n"
+            "## Gate\n"
+            "- [x] Design approved\n"
+            "- [x] Ready for Planning\n",
+            encoding="utf-8",
+        )
+
+        try:
+            validator = GateValidator()
+            result = validator.check(task_name, "01-brainstorming")
+            assert result is True
+        finally:
+            import shutil
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+    def test_fails_when_multiple_choice_groups_all_unchecked(self):
+        """Multiple choice groups, all unchecked — should fail."""
+        task_name = "gate-test-multi-choice-all-unchecked"
+        task_dir = TASKS / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "01-brainstorming.md").write_text(
+            "# 01-Brainstorming\n\n"
+            "## Clarifying Questions\n"
+            "1. **Topic**: ___\n"
+            "   - [ ] A: Opt1A — Pros\n"
+            "   - [ ] B: Opt1B — Pros\n"
+            "   - **Chosen**: ___\n"
+            "2. **Topic**: ___\n"
+            "   - [ ] A: Opt2A — Pros\n"
+            "   - [ ] B: Opt2B — Pros\n"
+            "   - **Chosen**: ___\n"
+            "\n"
+            "## Gate\n"
+            "- [x] Design approved\n"
+            "- [x] Ready for Planning\n",
+            encoding="utf-8",
+        )
+
+        try:
+            validator = GateValidator()
+            result = validator.check(task_name, "01-brainstorming")
+            assert result is False
+        finally:
+            import shutil
+            shutil.rmtree(task_dir, ignore_errors=True)
+
     def test_hook_script_not_run_by_default(self):
         """By default, hook scripts are NOT run (gate is template-only)."""
         task_name = "gate-test-no-hook"

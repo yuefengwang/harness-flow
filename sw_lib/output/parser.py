@@ -48,7 +48,11 @@ class StageOutputParser:
                     return result
             except Exception:
                 continue
-        return None
+        # All strategies failed — create schema instance with raw text only
+        try:
+            return self.schema_cls(raw_output=text[:5000])
+        except Exception:
+            return None
 
     def _parse_json(self, text: str) -> Optional[StageOutputSchema]:
         """Try parsing the entire text as raw JSON."""

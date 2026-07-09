@@ -10,6 +10,7 @@ import io
 import os
 import re
 import selectors
+import subprocess
 import sys
 import termios
 import threading
@@ -20,10 +21,10 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
-from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HAS_RICH, Layout, Live, Panel, Text, Console, box
+from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HOOKS_DIR, HAS_RICH, Layout, Live, Panel, Text, Console, box
 from ..runnable.base import StageInput
 from ..runnable.runtime import WorkflowRuntime
-from ..core.state import read_state
+from ..core.state import read_state, write_state
 from ..core.utils import sw_log, now
 
 # 如果环境没有 Rich，退回到基础 Console 占位
@@ -380,6 +381,14 @@ class MonitorTUI:
         """获取当前引擎中解析出的具体模型名"""
         return self._model_name
 
+    def _stage_has_output(self) -> bool:
+        """Check if the current stage file has AI Output."""
+        stage_file = TASKS / self.state.name / f"{self.state.stage}.md"
+        if not stage_file.exists():
+            return False
+        content = stage_file.read_text(encoding="utf-8", errors="replace")
+        return "AI Output" in content
+
     # ── 生命周期 ──
 
     def run(self):
@@ -409,15 +418,33 @@ class MonitorTUI:
             with Live(self.layout, refresh_per_second=20, screen=True, console=self.console) as live:
                 self.live = live
 
-                # 启动引擎
-                executor = WorkflowRuntime.get_executor()
-                stage_input = StageInput(
-                    task_name=self.state.name,
-                    stage=self.state.stage,
-                    stage_idx=self.state.stage_idx,
-                    metadata={"callbacks": self.callbacks}
-                )
-                threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
+                # 仅在 stage 未启动时启动引擎（跳过已完成/idle 的 stage）
+                st = read_state(self.state.name)
+                st_status = st.get("stage_status", "pending") if st else "pending"
+                if st_status == "pending":
+                    self._add_log("sw", f"启动阶段: {self.state.stage}")
+                    executor = WorkflowRuntime.get_executor()
+                    stage_input = StageInput(
+                        task_name=self.state.name,
+                        stage=self.state.stage,
+                        stage_idx=self.state.stage_idx,
+                        metadata={"callbacks": self.callbacks}
+                    )
+                    threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
+                elif st_status == "idle" and not self._stage_has_output():
+                    # idle 但无 AI Output → 之前异常退出未产出，重新启动
+                    self._add_log("sw", f"阶段无产出，重启 agent...")
+                    write_state(self.state.name, {**st, "stage_status": "pending"})
+                    executor = WorkflowRuntime.get_executor()
+                    stage_input = StageInput(
+                        task_name=self.state.name,
+                        stage=self.state.stage,
+                        stage_idx=self.state.stage_idx,
+                        metadata={"callbacks": self.callbacks}
+                    )
+                    threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
+                else:
+                    self._add_log("sw", f"阶段状态: {st_status}，跳过 agent 重连")
 
                 self.state.model_name = self.model_name
 
@@ -667,12 +694,11 @@ class MonitorTUI:
             if potential_agent and getattr(potential_agent, 'name', None) == self.state.name:
                 agent = potential_agent
         
-        if not agent:
-            # Fallback to local state if no executor is active
-            pass
-
         if agent and hasattr(agent, 'status'):
             self.state.agent_status = agent.status
+        else:
+            # 如果没有活跃 agent，重置为 idle
+            self.state.agent_status = "idle"
         
         # 同步工作流阶段状态到 UI 状态
         # 优先从 .state 文件读取（agent 可能直接修改磁盘状态）
@@ -732,7 +758,8 @@ class MonitorTUI:
         # 自动聚焦到最新
         self.state.log_scroll_offset = 0
         
-        sw_log(self.state.name, msg[:500], source)
+        # Split long messages into multi-line log entries for .log file readability
+        sw_log(self.state.name, msg, source)
 
     def _on_ask_user(self, questions: List[Dict[str, Any]], res_queue: queue.Queue):
         """引擎回调：收到结构化提问"""
@@ -785,6 +812,96 @@ class MonitorTUI:
 
         if cmd.startswith("/"):
             self._add_log("user", cmd)
+            if cmd == "/advance":
+                from ..core.service import _service
+                from ..runnable.base import StageInput
+                try:
+                    st = _service.get_task_state(self.state.name)
+                    idx = int(st.get("stage_idx", 0))
+                    cur_status = st.get("stage_status", "pending")
+
+                    # 若 Agent 处于多轮对话模式，先通知其收尾退出
+                    executor = WorkflowRuntime.get_executor()
+                    active = executor.active_stage
+                    if active and active.active_agent:
+                        self._add_log("sw", "Agent 仍在运行中，正在等待完成...")
+                        active._stage_done.set()
+                        active._agent_finalized.wait(timeout=30)
+                        active._invoke_done.wait(timeout=30)
+                        self._add_log("sw", "Agent 已退出，继续推进")
+                    else:
+                        # Agent may have already completed — wait for invoke to finish saving
+                        if active:
+                            active._invoke_done.wait(timeout=30)
+
+                    # 归档阶段特殊处理
+                    if idx >= len(STAGES) - 1:
+                        done_items, todo_items = _service.validate_stage(self.state.name)
+                        for item in done_items:
+                            self._add_log("sw", f"  [✓] {item}")
+                        for item in todo_items:
+                            self._add_log("sw", f"  [!] {item}")
+                        if todo_items:
+                            self._add_log("error", f"检测到 {len(todo_items)} 个未完成项")
+                            return
+                        _service.advance_stage(self.state.name)
+                        self._on_settlement()
+                        return
+
+                    if cur_status == "pending":
+                        self._add_log("error", f"当前阶段尚未开始运行，请等待 Agent 完成后再推进")
+                        return
+
+                    # 软校验: validate_stage
+                    self._add_log("sw", f"--- 阶段校验: {STAGES[idx]} ({STAGE_NAMES[idx]}) ---")
+                    done_items, todo_items = _service.validate_stage(self.state.name)
+                    for item in done_items:
+                        self._add_log("sw", f"  [✓] {item}")
+                    for item in todo_items:
+                        self._add_log("sw", f"  [!] {item}")
+
+                    # 硬校验: hook shell script
+                    hook_script = HOOKS_DIR / f"check_{STAGES[idx]}.sh"
+                    if not hook_script.exists():
+                        hook_script = HOOKS_DIR / f"post_check_{STAGES[idx]}.sh"
+                    if hook_script.exists():
+                        self._add_log("sw", f"--- 系统硬校验: {hook_script.name} ---")
+                        res = subprocess.run(
+                            [str(hook_script), self.state.name],
+                            cwd=str(ROOT), check=False, timeout=60
+                        )
+                        if res.returncode != 0:
+                            self._add_log("error", "硬校验未通过，必须满足所有条件才能推进")
+                            return
+
+                    # 待办项阻断
+                    if todo_items:
+                        self._add_log("error", f"检测到 {len(todo_items)} 个未完成项，请完善后重试")
+                        return
+
+                    # 执行推进
+                    _service.advance_stage(self.state.name)
+                    st = read_state(self.state.name)
+
+                    if st.get("stage_status") == "Finished":
+                        self._on_settlement()
+                        return
+
+                    self.state.stage = st.get("stage")
+                    self.state.stage_idx = int(st.get("stage_idx", 0))
+                    self._add_log("sw", f"阶段推进 → {STAGE_NAMES[self.state.stage_idx]}")
+
+                    stage_input = StageInput(
+                        task_name=self.state.name,
+                        stage=self.state.stage,
+                        stage_idx=self.state.stage_idx,
+                        metadata={"callbacks": self.callbacks}
+                    )
+                    threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
+                except Exception as e:
+                    self._add_log("error", f"推进失败: {e}")
+                return
+
             WorkflowRuntime.get_executor().handle_command(cmd[1:])
             return
 
@@ -841,7 +958,7 @@ class MonitorTUI:
         WorkflowRuntime.get_executor().answer(response)
 
     def _write_review_route(self, target: str):
-        """写入 04-review.md 中的 Route 字段"""
+        """写入 04-review.md 中的 Route 字段，返工时自动填充 Evidence 表"""
         review_path = TASKS / self.state.name / "04-review.md"
         if not review_path.exists():
             return
@@ -851,6 +968,23 @@ class MonitorTUI:
             f"- **Route**: `{target}`",
             1
         )
+        if target != "05-Archive":
+            stage_labels = {
+                "02-Planning": "planning",
+                "03-Coding": "coding",
+                "01-Brainstorming": "brainstorming",
+            }
+            stage = stage_labels.get(target, "planning")
+            content = content.replace(
+                "| 1 | ___ | high/med/low | coding/planning/brainstorming | ___ |",
+                f"| 1 | 需返工修复的问题 | high | {stage} | 详见审查结论 |",
+                1,
+            )
+            content = content.replace(
+                "| 2 | ___ | high/med/low | coding/planning/brainstorming | ___ |",
+                "| 2 | 需跟踪的改进项 | med | coding | 详见审查结论 |",
+                1,
+            )
         review_path.write_text(content, encoding="utf-8")
 
     def _handle_settlement_choice(self, choice: str):

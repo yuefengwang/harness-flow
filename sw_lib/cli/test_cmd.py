@@ -32,30 +32,47 @@ def _make_auto_answer():
 
 
 def _mock_gate_pass(task_name: str, stage: str):
-    """模拟用户勾选 Gate 下的所有复选框。"""
+    """模拟用户勾选 Gate 下的所有复选框，并填写 Route 字段。"""
     path = TASKS / task_name / f"{stage}.md"
     if path.exists():
         content = path.read_text(encoding="utf-8")
         if "[ ]" in content:
-            path.write_text(content.replace("[ ]", "[x]"), encoding="utf-8")
+            content = content.replace("[ ]", "[x]")
+        # 04-review: fill in Route field (mock always routes to 05-Archive)
+        if stage == "04-review":
+            content = content.replace("- **Route**: `___`", "- **Route**: `05-Archive`", 1)
+        path.write_text(content, encoding="utf-8")
 
 
 def cmd_test(args):
     """sw test: 黑盒端到端测试 — 模拟 sw monitor 交互"""
     task_name = getattr(args, "name", "") or f"e2e-{int(time.time())}"
-    use_mock = not getattr(args, "no_mock", False)
-
-    hdr(f"🧪 HarnessFlow E2E: {task_name}")
-    print(f"  Agent: {green('MockAgent') if use_mock else yellow('Real')}")
 
     _cleanup_repo()
 
     from ..core.config import _manager
     _manager.reload()
-    if use_mock:
-        _manager._config.mock_agent.enabled = True
+
+    # 处理 mock/no-mock 参数（优先级: CLI 输入 > config.yaml）
+    no_mock_flag = getattr(args, "no_mock", False)
+    mock_flag = getattr(args, "mock", False)
+    if no_mock_flag:
+        use_mock = False
+        _manager.config.mock_agent.enabled = False
+    elif mock_flag:
+        use_mock = True
+        _manager.config.mock_agent.enabled = True
         # Ensure review routes to archive for clean test flow
-        _manager._config.mock_agent.review_route = "05-Archive"
+        _manager.config.mock_agent.review_route = "05-Archive"
+    else:
+        # 未指定，使用 config.yaml 的默认值
+        use_mock = _manager.config.mock_agent.enabled
+        if use_mock:
+            _manager.config.mock_agent.review_route = "05-Archive"
+
+    hdr(f"🧪 HarnessFlow E2E: {task_name}")
+    print(f"  Agent: {green('MockAgent') if use_mock else yellow('Real')}")
+
     bootstrap()
 
     # ── 1. sw init ──
@@ -109,6 +126,7 @@ def cmd_test(args):
             # Get status from active agent in the chain
             agent = chain.active_stage.active_agent if chain.active_stage else None
             status = getattr(agent, 'status', 'idle') if agent else 'idle'
+            print(f"  [TRACE] loop: status={status!r}, stage_completed={stage_completed}, agent_active={chain.active_stage is not None and agent is not None}, active_stage_set={chain.active_stage is not None}")
 
             if status == 'waiting':
                 # Agent 在等待用户回答 → auto-answer
@@ -134,6 +152,12 @@ def cmd_test(args):
                     print(f"    {red('⚠')} 阶段有 {len(agent_errors)} 个异常记录")
 
                 print(f"    ✓ {STAGE_NAMES[current_idx]} 完成，准备推进...")
+                
+                # Signal multi-turn agent to finalize (Direction A)
+                if chain.active_stage and chain.active_stage.active_agent:
+                    chain.active_stage._stage_done.set()
+                    chain.active_stage._agent_finalized.wait(timeout=15)
+                    chain.active_stage._invoke_done.wait(timeout=30)
                 
                 # Mock checkboxes for the gate
                 _mock_gate_pass(task_name, current_stage)
@@ -177,11 +201,14 @@ def cmd_test(args):
         stages_ok = 0
         for s in ["01-brainstorming", "02-planning", "03-coding", "04-review", "05-archive"]:
             sf = task_dir / f"{s}.md"
-            if sf.exists() and "## 🤖 AI Output" in sf.read_text(encoding="utf-8", errors="replace"):
+            content = sf.read_text(encoding="utf-8", errors="replace") if sf.exists() else ""
+            has_output = "## 🤖 AI Output" in content
+            if has_output:
                 stages_ok += 1
                 print(f"  {green('✓')} {s}")
             else:
-                print(f"  {red('✗')} {s} — 无有效产出")
+                issue = "文件不存在" if not sf.exists() else "无 AI Output 标记"
+                print(f"  {red('✗')} {s} — {issue} (文件大小={sf.stat().st_size if sf.exists() else 0}B)")
 
         # 检查代码文件
         py_files = _find_code_files(task_name)

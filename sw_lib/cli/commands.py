@@ -72,6 +72,16 @@ def cmd_init(args):
         allow_trash_collision = result["allow_trash_collision"]
         target_dir = result.get("target_dir", target_dir)
 
+    # 处理 mock/no-mock 参数（优先级: CLI 输入 > config.yaml）
+    no_mock_flag = getattr(args, "no_mock", False)
+    mock_flag = getattr(args, "mock", False)
+    if no_mock_flag:
+        from ..core.config import _manager
+        _manager.config.mock_agent.enabled = False
+    elif mock_flag:
+        from ..core.config import _manager
+        _manager.config.mock_agent.enabled = True
+
     try:
         # 如果未指定 agent，则传 N/A 让 Service/Engine 自动解析
         clean_name = _service.create_task(
@@ -84,7 +94,7 @@ def cmd_init(args):
         )
         
         # 自动进入监控面板 (原子化操作)
-        if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("SW_NON_INTERACTIVE") != "1":
+        if os.environ.get("SW_NON_INTERACTIVE") != "1":
             args.name = clean_name
             cmd_monitor(args)
         else:
@@ -187,7 +197,7 @@ def cmd_advance(args):
 
         # 返工时自动启动目标阶段（无需用户手动 ./sw monitor）
         if new_st.get("reroute_count", 0) > 0:
-            if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("SW_NON_INTERACTIVE") != "1":
+            if os.environ.get("SW_NON_INTERACTIVE") != "1":
                 print(f"  🔄 返工至 {new_label}，自动启动中...")
                 args.name = name
                 cmd_monitor(args)

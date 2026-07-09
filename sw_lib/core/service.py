@@ -305,7 +305,7 @@ class TaskService:
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
 
-        from ..runnable.utils import auto_check_gate, parse_route_field
+        from ..runnable.utils import auto_check_gate, parse_route_field, inject_reroute_context, _reset_gate_checkboxes
         from ..runnable.runtime import WorkflowRuntime
 
         auto_check_gate(name, cur_stage)
@@ -313,6 +313,7 @@ class TaskService:
 
         next_stage = cur_stage
         next_idx = idx
+        is_reroute = False
 
         # 1. 优先处理 Review 阶段的路由
         if cur_stage == "04-review":
@@ -320,6 +321,8 @@ class TaskService:
             if target and target in executor._stage_map:
                 next_stage = target
                 next_idx = executor._stage_map[target].stage_idx
+                if next_idx < idx:
+                    is_reroute = True
 
         # 2. 如果没有路由决策或非 Review 阶段，则线性推进
         if next_stage == cur_stage:
@@ -335,6 +338,13 @@ class TaskService:
             write_state(name, st)
             upsert_task_summary(name, stage_status="Finished")
             return st
+
+        # 3. 处理返工上下文注入与重置
+        if is_reroute:
+            inject_reroute_context(name, next_stage)
+        
+        # 无论是否返工，进入新阶段前都重置其门禁状态
+        _reset_gate_checkboxes(name, next_stage)
 
         st["stage"] = next_stage
         st["stage_idx"] = next_idx

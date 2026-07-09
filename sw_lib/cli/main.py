@@ -56,6 +56,8 @@ def main():
     p_init.add_argument("--target", help="生成代码的目录 (默认: repo/<任务名>)")
     p_init.add_argument("--self", action="store_true", help="开发 Harness-Flow 自身 (target=.)")
     p_init.add_argument("--interactive", action="store_true", help="进入交互式创建模式")
+    p_init.add_argument("--no-mock", action="store_true", help="使用真实 Agent（默认由 config.yaml 控制）")
+    p_init.add_argument("--mock", action="store_true", help="使用 MockAgent（默认由 config.yaml 控制）")
 
     # status
     p_status = subparsers.add_parser("status", help="显示任务状态")

@@ -209,6 +209,7 @@ def extract_evidence_table(task_name: str) -> Optional[str]:
 
 
 def _reset_gate_checkboxes(task_name: str, stage: str):
+    """Reset all checkboxes and stage-specific placeholders (like Route) for a stage."""
     tpl = TASKS / task_name / f"{stage}.md"
     if not tpl.exists():
         return
@@ -225,7 +226,13 @@ def _reset_gate_checkboxes(task_name: str, stage: str):
         if in_gate:
             lines[i] = line.replace("[x]", "[ ]")
 
-    tpl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    content = "\n".join(lines) + "\n"
+    
+    # 04-review: reset Route field
+    if stage == "04-review":
+        content = re.sub(r'(\*\*Route\*\*:\s*)`[^`]+`', r'\1`___`', content)
+
+    tpl.write_text(content, encoding="utf-8")
 
 
 def inject_reroute_context(task_name: str, target_stage: str):
@@ -296,12 +303,29 @@ def check_stage_compliance(task_name: str, stage: str, stage_idx: int) -> tuple[
     checked = 0
     
     in_choice_group = False
+    group_has_checked = False
     has_checkboxes = False
+    skip_ai_output = False  # Skip AI Output region until ## Gate
     
     for line in lines:
+        stripped = line.strip()
+        
+        # Skip AI Output region (## 🤖 AI Output → ## Gate)
+        if stripped.startswith("## 🤖 AI Output"):
+            skip_ai_output = True
+            continue
+        if skip_ai_output:
+            if stripped.startswith("## Gate"):
+                skip_ai_output = False
+            else:
+                continue  # Skip AI output content
+        
         cbs = re.findall(r'\[([ xX])\]', line)
         if not cbs:
             if in_choice_group and line.strip() != "":
+                # Non-empty line with no checkbox ends a choice group
+                if not group_has_checked:
+                    unchecked += 1
                 in_choice_group = False
             continue
             
@@ -311,16 +335,24 @@ def check_stage_compliance(task_name: str, stage: str, stage_idx: int) -> tuple[
         if is_choice_opt:
             if not in_choice_group:
                 in_choice_group = True
+                group_has_checked = False
             
             if cbs[0].lower() == 'x':
                 checked += 1
+                group_has_checked = True
         else:
+            if in_choice_group and not group_has_checked:
+                unchecked += 1
             in_choice_group = False
             for cb in cbs:
                 if cb.lower() == 'x':
                     checked += 1
                 else:
                     unchecked += 1
+
+    # Handle unclosed choice group at end of file
+    if in_choice_group and not group_has_checked:
+        unchecked += 1
 
     if not has_checkboxes:
         todo.append(f"{stage}.md — 缺少门禁选项 (无复选框)")

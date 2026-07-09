@@ -64,15 +64,50 @@ class InitializationUI:
         self.console.print(welcome_panel)
         self.console.print()
 
-        # Step 1: 任务定名 (包含实时预览和校验)
-        self._render_header("定义任务名称", 1)
+        # Step 1: 开发目标 (New!)
+        self._render_header("选择开发目标", 1, total_steps=4)
+        target_mode = Prompt.ask(
+            "[bold white]您打算开发哪个项目？[/]",
+            choices=["self", "existing", "new"],
+            default="new"
+        )
+        
+        if target_mode == "self":
+            self.data["target_dir"] = "."
+            self.console.print("[cyan]目标: Harness-Flow (自身开发)[/]")
+        elif target_mode == "existing":
+            # 探测 repo/ 目录
+            from ..core.config import ROOT
+            repo_dir = ROOT / "repo"
+            existing_projects = [d.name for d in repo_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+            if not existing_projects:
+                self.console.print("[yellow]警告: repo/ 目录下暂无项目。自动切换到 'new' 模式。[/]")
+                target_mode = "new"
+            else:
+                project = Prompt.ask(
+                    "[bold white]请选择已有项目[/]",
+                    choices=existing_projects
+                )
+                self.data["target_dir"] = f"repo/{project}"
+                self.console.print(f"[cyan]目标项目: {project}[/]")
+        
+        if target_mode == "new":
+            self.console.print("[cyan]目标: 从 0 到 1 开发新项目[/]")
+            # 标记为新项目，稍后根据任务名生成 target_dir
+            self.data["is_new_project"] = True
+
+        self.console.print()
+
+        # Step 2: 任务定名
+        self._render_header("定义任务名称", 2, total_steps=4)
         while True:
+            name_prompt = "[bold white]请输入项目名称 (从0到1)[/]" if self.data.get("is_new_project") else "[bold white]请输入任务名称[/]"
             name = Prompt.ask(
-                "[bold white]请输入任务名称[/]",
+                name_prompt,
                 default=default_name
             )
             if not name:
-                self.console.print("[red]错误: 任务名称不能为空。[/]")
+                self.console.print("[red]错误: 名称不能为空。[/]")
                 continue
                 
             clean_name = sanitize_name(name)
@@ -83,20 +118,19 @@ class InitializationUI:
             if (TASKS / clean_name).exists():
                 self.console.print(f"[red]错误: 任务 [bold]{clean_name}[/] 已存在。请换个名字。[/]")
                 continue
-            if (TRASH / clean_name).exists():
-                self.console.print(f"[yellow]警告: 同名任务已在回收站中。[/]")
-                if Confirm.ask("是否继续创建？(将覆盖回收站索引，旧任务将难以直接恢复)", default=False):
-                    self.data["allow_trash_collision"] = True
-                else:
-                    continue
             
             self.data["name"] = clean_name
+            
+            # 如果是新项目，自动设置 target_dir
+            if self.data.get("is_new_project"):
+                self.data["target_dir"] = f"repo/{clean_name}"
+                
             break
             
         self.console.print()
 
-        # Step 2: 任务类型
-        self._render_header("选择任务类型", 2)
+        # Step 3: 任务类型
+        self._render_header("选择任务类型", 3, total_steps=4)
         task_type = Prompt.ask(
             "[bold white]任务类型[/]",
             choices=["feature", "bugfix", "refactor", "chore"],
@@ -105,8 +139,8 @@ class InitializationUI:
         self.data["type"] = task_type
         self.console.print()
 
-        # Step 3: 需求注入
-        self._render_header("注入需求上下文", 3)
+        # Step 4: 需求注入
+        self._render_header("注入需求上下文", 4, total_steps=4)
         self.console.print("[bold white]请输入详细的任务需求描述:[/]")
         self.console.print("[dim](输入完成后按 Ctrl+D 结束，支持多行粘贴和方向键)[/]")
 

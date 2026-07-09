@@ -9,7 +9,7 @@ harness:
     mount_git_config: true
     mount_ssh: true
   mock_agent:
-    enabled: true
+    enabled: false
     response_delay: 2.0
     review_route: "02-Planning"
     responses:
