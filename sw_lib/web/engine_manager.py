@@ -10,14 +10,15 @@ import threading
 from collections import deque
 from typing import Dict, Optional, Any, Callable
 
-from ..runnable.runtime import WorkflowRuntime
+from ..workflow.engine import WorkflowEngine, LangGraphWorkflowEngine
 from ..core.state import read_state
 from ..core.utils import now, sw_log
 
 
 class WebEngineSession:
 
-    def __init__(self, task_name: str, stage: str, stage_idx: int, agent_name: str):
+    def __init__(self, task_name: str, stage: str, stage_idx: int, agent_name: str,
+                 engine: Optional[WorkflowEngine] = None):
         self.task_name = task_name
         self._events: deque = deque()
         self._lock = threading.Lock()
@@ -25,6 +26,9 @@ class WebEngineSession:
         self._alive = True
         self._pending_questions: Optional[list] = None
         self._pending_res_queue: Optional[Any] = None
+        # Phase 3: Web drives the workflow exclusively through the engine
+        # abstraction; it never touches executor.active_stage.active_agent.
+        self.engine: WorkflowEngine = engine or LangGraphWorkflowEngine()
 
         self.callbacks = {
             "add_log": self._web_add_log,
@@ -74,9 +78,8 @@ class WebEngineSession:
     def start_engine(self):
         if not self._alive:
             return
-        
-        executor = WorkflowRuntime.get_executor()
-        from ..runnable.base import StageInput
+
+        from ..workflow.base import StageInput
         st = read_state(self.task_name)
         stage_input = StageInput(
             task_name=self.task_name,
@@ -85,34 +88,31 @@ class WebEngineSession:
             metadata={"callbacks": self.callbacks}
         )
         self._background_thread = threading.Thread(
-            target=executor.invoke, args=(stage_input,), daemon=True,
+            target=self.engine.start_stage, args=(stage_input,), daemon=True,
         )
         self._background_thread.start()
 
     def submit_answer(self, text: str):
-        executor = WorkflowRuntime.get_executor()
         if self._pending_res_queue:
             # We are waiting for a question
             answers = [text] * max(1, len(self._pending_questions))
             self._pending_res_queue.put(answers)
-            
+
             self._pending_questions = []
             self._pending_res_queue = None
-            
+
             # Resume executor active agent state if possible
-            executor.answer(text)
+            self.engine.submit_answer(self.task_name, text)
         else:
-            executor.answer(text)
+            self.engine.submit_answer(self.task_name, text)
 
     def submit_command(self, cmd: str):
-        WorkflowRuntime.get_executor().handle_command(cmd)
+        self.engine.submit_command(self.task_name, cmd)
 
     def destroy(self):
         self._alive = False
         try:
-            executor = WorkflowRuntime.get_executor()
-            if executor.active_stage and executor.active_stage.active_agent:
-                executor.active_stage.active_agent.shutdown()
+            self.engine.shutdown(self.task_name)
         except Exception:
             pass
 
@@ -122,17 +122,9 @@ class WebEngineSession:
 
     @property
     def status(self) -> str:
-        executor = WorkflowRuntime.get_executor()
-        agent = None
-        if executor.active_stage:
-            # Only use the chain's agent if it's working on THIS task
-            potential_agent = executor.active_stage.active_agent
-            if potential_agent and getattr(potential_agent, 'name', None) == self.task_name:
-                agent = potential_agent
-        
-        if agent and hasattr(agent, 'status'):
-            return agent.status
-        return "idle"
+        # Sourced from the engine abstraction (state-backed), never from the
+        # live agent's private status attribute.
+        return self.engine.get_status(self.task_name)
 
     async def get_event(self) -> Optional[Dict[str, Any]]:
         deadline = time.monotonic() + 30.0
@@ -161,6 +153,7 @@ class WebEngineManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._sessions: Dict[str, WebEngineSession] = {}
+            cls._instance._engine: WorkflowEngine = LangGraphWorkflowEngine()
         return cls._instance
 
     def create_session(self, task_name: str, stage: str, stage_idx: int, agent_name: str) -> WebEngineSession:
@@ -169,7 +162,8 @@ class WebEngineManager:
         from ..core.service import _service
         _service.get_task_state(task_name)
 
-        session = WebEngineSession(task_name, stage, stage_idx, agent_name)
+        session = WebEngineSession(task_name, stage, stage_idx, agent_name,
+                                   engine=self._engine)
         self._sessions[task_name] = session
         sw_log(task_name, "[web] session created", "sw")
         return session

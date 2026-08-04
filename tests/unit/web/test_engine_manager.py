@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 from sw_lib.web.engine_manager import WebEngineManager, WebEngineSession
-from sw_lib.runnable.runtime import WorkflowRuntime
+from sw_lib.workflow.runtime import WorkflowRuntime
 
 
 def test_engine_manager_singleton():

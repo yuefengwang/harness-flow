@@ -23,7 +23,6 @@ import time
 from pathlib import Path
 
 from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
-from ..web.app import create_app
 from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
 from ..core.deploy_orchestrator import DeployOrchestrator
 from ..core.health import HealthMonitor, HealthConfig
@@ -33,7 +32,6 @@ from ..core.utils import (
     prompt, prompt_yn,
     now,
 )
-from ..ui.tui import MonitorTUI
 from ..ui.init_ui import InitializationUI
 from ..core.service import _service, TaskError
 
@@ -262,6 +260,8 @@ def cmd_answer(args):
 
 def cmd_monitor(args):
     """启动流式终端监控面板，直连 Agent 进程"""
+    # 惰性导入 TUI（避免非 monitor 命令也拉起 workflow.runtime/langgraph 链）
+    from ..ui.tui import MonitorTUI
     name = getattr(args, "name", "") or get_active_from_status()
     if not name or name == "无":
         die("缺少 --name")
@@ -281,7 +281,9 @@ def cmd_monitor(args):
 
 def cmd_dashboard(args):
     """启动 Web Dashboard (FastAPI + HTMX)"""
+    # 惰性导入 web 依赖，避免非 dashboard 命令也拉起 fastapi/langgraph 链
     import uvicorn
+    from ..web.app import create_app
     host = getattr(args, "host", "127.0.0.1")
     port = int(getattr(args, "port", 8080))
     app = create_app()

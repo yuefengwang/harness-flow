@@ -6,8 +6,8 @@ Call bootstrap() once at CLI startup to activate the new workflow architecture.
 from pathlib import Path
 from typing import Optional
 
-from ..runnable import StageRunnable, GateValidator
-from ..runnable.base import StageInput
+from ..workflow import StageRunnable, GateValidator
+from ..workflow.base import StageInput
 from ..prompts import PromptRegistry, PromptBuilder
 from ..output.parser import StageOutputParser
 from ..output.stages import (
@@ -17,7 +17,7 @@ from ..output.stages import (
 from ..core.config import STAGES, STAGE_NAMES
 
 # Module-level cache — only bootstrap once
-from ..runnable.graph import LangGraphAdapter
+from ..workflow.graph import LangGraphAdapter
 _executor: Optional[LangGraphAdapter] = None
 
 
@@ -76,7 +76,7 @@ def bootstrap(templates_dir: Optional[Path] = None):
         ),
     ]
 
-    from ..runnable.runtime import WorkflowRuntime
+    from ..workflow.runtime import WorkflowRuntime
     WorkflowRuntime.initialize(stages)
     _executor = WorkflowRuntime.get_executor()
 

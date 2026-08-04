@@ -20,6 +20,7 @@ from .state import (
     get_active_from_status, upsert_task_summary, remove_task_summary,
 )
 from .utils import now, sanitize_name, sw_log
+from ..workflow.runtime import WorkflowRuntime
 
 
 class TaskError(Exception):
@@ -288,73 +289,16 @@ class TaskService:
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
         
-        from ..runnable.utils import check_stage_compliance
+        from ..workflow.utils import check_stage_compliance
         return check_stage_compliance(name, cur_stage, idx)
 
     def advance_stage(self, name: str) -> Dict[str, Any]:
-        """执行阶段推进 — 使用 WorkflowRuntime 的路由逻辑确定下一阶段。"""
-        st = self.get_task_state(name)
-        idx = int(st.get("stage_idx", 0))
-        cur_stage = STAGES[idx]
+        """执行阶段推进 — 路由逻辑统一委托给 WorkflowRuntime.advance。
 
-        if idx >= len(STAGES) - 1:
-            st["stage_status"] = "Finished"
-            st["updated_at"] = now()
-            write_state(name, st)
-            upsert_task_summary(name, stage_status="Finished")
-            sw_log(name, "🏁 任务已完成 (Finished)", "sw")
-            return st
-
-        from ..runnable.utils import auto_check_gate, parse_route_field, inject_reroute_context, _reset_gate_checkboxes
-        from ..runnable.runtime import WorkflowRuntime
-
-        auto_check_gate(name, cur_stage)
-        executor = WorkflowRuntime.get_executor()
-
-        next_stage = cur_stage
-        next_idx = idx
-        is_reroute = False
-
-        # 1. 优先处理 Review 阶段的路由
-        if cur_stage == "04-review":
-            target = parse_route_field(name)
-            if target and target in executor._stage_map:
-                next_stage = target
-                next_idx = executor._stage_map[target].stage_idx
-                if next_idx < idx:
-                    is_reroute = True
-
-        # 2. 如果没有路由决策或非 Review 阶段，则线性推进
-        if next_stage == cur_stage:
-            cur_idx_in_chain = executor._stage_order.index(cur_stage)
-            if cur_idx_in_chain + 1 < len(executor._stage_order):
-                next_stage = executor._stage_order[cur_idx_in_chain + 1]
-                next_idx = executor._stage_map[next_stage].stage_idx
-
-        if next_stage == cur_stage:
-             # 无处可去，标记为结束
-            st["stage_status"] = "Finished"
-            st["updated_at"] = now()
-            write_state(name, st)
-            upsert_task_summary(name, stage_status="Finished")
-            return st
-
-        # 3. 处理返工上下文注入与重置
-        if is_reroute:
-            inject_reroute_context(name, next_stage)
-        
-        # 无论是否返工，进入新阶段前都重置其门禁状态
-        _reset_gate_checkboxes(name, next_stage)
-
-        st["stage"] = next_stage
-        st["stage_idx"] = next_idx
-        st["stage_status"] = "pending"
-        st["updated_at"] = now()
-        write_state(name, st)
-        upsert_task_summary(name, stage=next_stage, stage_idx=st["stage_idx"],
-                              stage_status="pending")
-        sw_log(name, f"advanced to {next_stage} (via chain logic)", "sw")
-        return st
+        Phase 1 重构：不再直接访问 executor 的私有属性 (_stage_map /
+        _stage_order)，改由 WorkflowRuntime.advance() 作为唯一路由真相源。
+        """
+        return WorkflowRuntime.advance(name)
 
     def deploy_task(self, name: str, force: bool = False) -> Dict[str, Any]:
         """

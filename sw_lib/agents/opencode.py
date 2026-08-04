@@ -1,50 +1,42 @@
-"""OpenCode transport — direct HTTP via requests.
+"""OpenCodeAgent — 通过 OpenCodeTransport 接入 opencode，遵循选项 A 能力协议层。
 
-Uses requests library for server communication due to httpx compatibility
-issues with opencode serve. The API contract is identical to the SDK.
+本类不再直接 import requests / subprocess，也不解析 opencode 的私有 parts 字段。
+所有协议耦合集中在 `transport.py`（OpenCodeTransport）与 `protocol.py`
+（AgentMessage/ToolCall）。本类只负责：
+  - 把 harness 的回调映射到结构化 AgentMessage；
+  - 把允许的原子工具清单以 MCP server 形式注入 opencode，让其自主调用；
+  - 暴露与 BaseAgent 一致的生命周期接口（start/send/shutdown/restart）。
+
+opencode 升级改协议 → 只动 transport.py；加新工具 → 只动 mcp_tools.py + Toolbox。
 """
-
 import os
-import signal
-import socket
-import subprocess
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
-from ..core.config import ROOT, CONFIG_DIR
+from ..core.config import ROOT, CONFIG_DIR, get_tools_for_stage
 from ..core.utils import sw_log
 from .base import BaseAgent
+from .transport import OpenCodeTransport, OpenCodeTransportError
+from .protocol import AgentMessage, ToolCall
 
 
 class OpenCodeAgent(BaseAgent):
-    """OpenCode transport via direct HTTP requests.
+    """OpenCode 后端 agent — 基于私有协议解耦的 transport 层。
 
-    Responsibilities:
-    - Start/stop opencode serve process
-    - Manage HTTP session lifetime (session create → chat → abort)
-    - Dispatch response parts via callbacks (on_text, on_tool, on_step, etc.)
-
-    Does NOT handle:
-    - Context preparation / message formatting (→ PromptBuilder layer)
-    - Tool execution / question-asking (→ Engine layer)
-    - Output persistence (→ Engine layer)
+    Responsibilities（与旧版对比，已下沉的部分）：
+      - 进程/端口/会话 HTTP 通信  → OpenCodeTransport
+      - parts 协议解析             → OpenCodeTransport._to_message
+      - 工具执行 / 提问            → 经 MCP 交由 opencode 自主调度（mcp_tools.py）
     """
 
-    CHAT_TIMEOUT = 1800.0  # long-running local agent responses can exceed 15 min
-    HEALTH_TIMEOUT = 2.0
-    DEFAULT_PORT = 65535
-
-    def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode"):
+    def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode",
+                 use_mcp_tools: bool = True, verbose: bool = False):
         super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
         self.running = False
         self.agent_proc = None
 
-        self._server_proc: Optional[subprocess.Popen] = None
-        self._server_port: Optional[int] = None
-        self._server_url: Optional[str] = None
-        self._session_id: Optional[str] = None
+        self._transport = OpenCodeTransport(verbose=verbose)
+        self._transport.set_model(self._parse_model()[1])
+        self.use_mcp_tools = use_mcp_tools
 
         self._env = self._load_env()
 
@@ -71,110 +63,13 @@ class OpenCodeAgent(BaseAgent):
                                 env[str(k)] = str(v)
                 except Exception:
                     continue
-        # NODE_EXTRA_CA_CERTS causes opencode serve crashes on macOS
         env.pop("NODE_EXTRA_CA_CERTS", None)
         return env
-
-    # ── Server lifecycle ──
-
-    @staticmethod
-    def _find_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
-    @staticmethod
-    def _cleanup_orphans():
-        """Kill any leftover opencode serve processes from prior runs."""
-        try:
-            r = subprocess.run(
-                ["pgrep", "-f", "opencode serve"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.returncode != 0:
-                return
-            for pid_str in r.stdout.strip().split("\n"):
-                pid = int(pid_str.strip())
-                if pid == os.getpid():
-                    continue
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _start_server(self):
-        """Start opencode serve, wait for healthy via HTTP."""
-        if self._server_proc is not None:
-            return
-        self._cleanup_orphans()
-        port = self.DEFAULT_PORT
-        try:
-            proc = subprocess.Popen(
-                ["opencode", "serve", "--port", str(port)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=self._env, cwd=str(ROOT), text=True,
-            )
-        except FileNotFoundError:
-            self._add_log("error", "opencode command not found in PATH")
-            return
-
-        self._server_proc = proc
-        self._server_port = port
-        self._server_url = f"http://127.0.0.1:{port}"
-
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                self._add_log("error", "opencode server exited prematurely (check PATH / opencode install)")
-                self._stop_server()
-                return
-            try:
-                r = requests.post(
-                    f"{self._server_url}/session",
-                    timeout=self.HEALTH_TIMEOUT,
-                )
-                if r.status_code == 200:
-                    self._add_log("sw", f"opencode server ready on port {port}")
-                    return
-            except requests.RequestException:
-                time.sleep(0.5)
-
-        self._add_log("error", "opencode server startup timed out (30s)")
-        self._stop_server()
-
-    def _stop_server(self):
-        self._session_id = None
-        self._server_port = None
-        self._server_url = None
-        proc = self._server_proc
-        self._server_proc = None
-        if proc is None:
-            return
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
 
     # ── Model parsing ──
 
     def _parse_model(self) -> Tuple[str, str]:
-        """Parse model_name into (provider_id, model_id).
-
-        Accepts formats:
-          - "opencode/deepseek-v4-flash-free"  → ("opencode", "deepseek-v4-flash-free")
-          - "opencode" or ""                    → ("opencode", "deepseek-v4-flash-free")  (fallback)
-        """
+        """Parse model_name into (provider_id, model_id)."""
         name = (self.model_name or "").strip()
         if not name or name == "opencode":
             return "opencode", "deepseek-v4-flash-free"
@@ -183,78 +78,84 @@ class OpenCodeAgent(BaseAgent):
             return parts[0], parts[1]
         return "opencode", name
 
-    # ── Message exchange ──
+    # ── MCP 工具注入 ──
 
-    def _dispatch_parts(self, parts: List[Dict[str, Any]]):
-        """Iterate response parts and call appropriate callbacks."""
-        text_parts = []
+    def _mcp_launch_env(self) -> Dict[str, str]:
+        """为 opencode 拉起的 MCP server 子进程注入 harness 上下文。"""
+        import json, os
+        env = dict(os.environ)
+        env["HARNESS_TASK"] = str(getattr(self, "task_name", "mcp"))
+        env["HARNESS_STAGE"] = self.stage
+        # ask_user 在 CLI 场景无 UI 时降级，由工具自身处理
+        return env
+
+    def _write_mcp_config(self) -> Optional[str]:
+        """生成 opencode 的 mcpServers 配置路径（若启用 MCP 工具）。
+
+        返回配置文件路径；opencode serve 启动时通过 --mcp-config 读取，
+        使 agent 能自主调用 harness 的 5 个原子工具。
+        """
+        if not self.use_mcp_tools:
+            return None
+        import json
+        from pathlib import Path
+        cfg = {
+            "mcpServers": {
+                "harness-flow-tools": {
+                    "command": "python",
+                    "args": ["-m", "sw_lib.agents.mcp_tools"],
+                    "env": self._mcp_launch_env(),
+                }
+            }
+        }
+        path = ROOT / ".mcp_harness.json"
+        Path(path).write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    # ── 结构化消息分发（不再解析裸 parts）──
+
+    def _dispatch_message(self, msg: AgentMessage) -> None:
+        """把结构化 AgentMessage 转交 harness 回调。"""
         try:
-            for part in parts or []:
-                if not isinstance(part, dict):
-                    sw_log(self.name, f"skipped non-dict part: {type(part).__name__}", "sw")
-                    continue
-                pt = part.get("type", "")
-                if pt == "step-start":
-                    self.status = self.STATUS_ACTIVE
-                    cb = self.callbacks.get("on_step_start")
+            if msg.step_start:
+                self.status = self.STATUS_ACTIVE
+                cb = self.callbacks.get("on_step_start")
+                if cb:
+                    cb()
+
+            for t in msg.text_parts:
+                if t:
+                    cb = self.callbacks.get("on_text")
                     if cb:
-                        cb()
-                elif pt == "text":
-                    t = part.get("text", "")
-                    if t:
-                        text_parts.append(t)
-                        cb = self.callbacks.get("on_text")
-                        if cb:
-                            cb(t)
-                elif pt == "reasoning":
-                    t = part.get("text", "")
-                    if t:
-                        cb = self.callbacks.get("on_reasoning")
-                        if cb:
-                            cb(t)
-                elif pt in ("tool_use", "tool"):
-                    cb = self.callbacks.get("on_tool")
+                        cb(t)
+
+            for t in msg.reasoning_parts:
+                if t:
+                    cb = self.callbacks.get("on_reasoning")
                     if cb:
-                        cb(part)
-                elif pt == "step-finish":
-                    reason = part.get("reason", "unknown")
-                    if reason == "stop":
-                        self.status = self.STATUS_IDLE
-                    cb = self.callbacks.get("on_step_finish")
-                    if cb:
-                        cb(reason)
+                        cb(t)
+
+            for tc in msg.tool_calls:
+                cb = self.callbacks.get("on_tool")
+                if cb:
+                    cb({"name": tc.name, "input": tc.input})
+
+            if msg.step_finish:
+                if msg.finish_reason == "stop":
+                    self.status = self.STATUS_IDLE
+                cb = self.callbacks.get("on_step_finish")
+                if cb:
+                    cb(msg.finish_reason)
         except Exception as e:
-            sw_log(self.name, f"error dispatching parts: {e}", "error")
+            sw_log(self.name, f"error dispatching message: {e}", "error")
 
-        if text_parts:
-            joined = "\n".join(text_parts)
-            sw_log(self.name, f"complete reply ({len(joined)} chars)", "agent")
+        if msg.text:
+            sw_log(self.name, f"complete reply ({len(msg.text)} chars)", "agent")
+        elif msg.has_tool:
+            sw_log(self.name, f"tool calls: {[t.name for t in msg.tool_calls]}", "agent")
         else:
-            ptypes = [p.get("type", "unknown") for p in (parts or [])]
-            sw_log(self.name, f"no text in response. parts: {ptypes}", "sw")
-        sw_log(self.name, "opencode SDK completed", "sw")
-
-    def _send_via_http(self, text: str) -> List[Dict[str, Any]]:
-        """Send message via HTTP. Returns list of response parts."""
-        provider_id, model_id = self._parse_model()
-
-        if not self._session_id:
-            r = requests.post(f"{self._server_url}/session", timeout=10)
-            r.raise_for_status()
-            self._session_id = r.json()["id"]
-            self._add_log("sw", f"opencode session: {self._session_id[:16]}...")
-
-        r = requests.post(
-            f"{self._server_url}/session/{self._session_id}/message",
-            json={
-                "providerID": provider_id,
-                "modelID": model_id,
-                "parts": [{"type": "text", "text": text}],
-            },
-            timeout=self.CHAT_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json().get("parts", [])
+            sw_log(self.name, "no text/tool in response", "sw")
+        sw_log(self.name, "opencode completed", "sw")
 
     # ── BaseAgent interface ──
 
@@ -267,8 +168,9 @@ class OpenCodeAgent(BaseAgent):
             return
         self.running = True
         self.status = self.STATUS_IDLE
-        if self._server_proc is None:
-            self._start_server()
+        if self._transport.server_url is None:
+            self._transport.start()
+            self._add_log("sw", f"opencode server ready at {self._transport.server_url}")
 
     def send(self, text: str, is_system: bool = False):
         """Send message to OpenCode. Blocks until response received."""
@@ -277,7 +179,7 @@ class OpenCodeAgent(BaseAgent):
                 self.start()
             else:
                 return
-        if not self._server_url:
+        if not self._transport.server_url:
             self._add_log("error", "No opencode server connected")
             self.status = self.STATUS_ERROR
             return
@@ -291,20 +193,11 @@ class OpenCodeAgent(BaseAgent):
 
         self.status = self.STATUS_CONNECTING
         try:
-            parts = self._send_via_http(text)
-            self._dispatch_parts(parts)
+            msg = self._transport.send_message(text)
+            self._dispatch_message(msg)
             self.status = self.STATUS_IDLE
-        except requests.Timeout as e:
-            self._add_log("error", f"HTTP timeout: {e}")
-            self.status = self.STATUS_ERROR
-        except requests.ConnectionError as e:
-            self._add_log("error", f"HTTP connection error: {e}")
-            self.status = self.STATUS_ERROR
-        except requests.HTTPError as e:
-            self._add_log("error", f"OpenCode API error (HTTP {e.response.status_code}): {e}")
-            self.status = self.STATUS_ERROR
-        except Exception as e:
-            self._add_log("error", f"HTTP send failed: {e}")
+        except OpenCodeTransportError as e:
+            self._add_log("error", str(e))
             self.status = self.STATUS_ERROR
 
         cb = self.callbacks.get("on_complete")
@@ -314,18 +207,7 @@ class OpenCodeAgent(BaseAgent):
     def shutdown(self):
         self.running = False
         self.status = self.STATUS_IDLE
-
-        if self._server_url and self._session_id:
-            try:
-                requests.post(
-                    f"{self._server_url}/session/{self._session_id}/abort",
-                    timeout=10,
-                )
-            except Exception:
-                pass
-        self._session_id = None
-        self._stop_server()
-        self._cleanup_orphans()
+        self._transport.shutdown()
 
     def restart(self):
         self.shutdown()
@@ -335,4 +217,4 @@ class OpenCodeAgent(BaseAgent):
         self._add_log("system", "Context injected via initial message")
 
     def reader_loop(self):
-        pass  # no async reader needed with synchronous HTTP
+        pass  # no async reader needed with synchronous transport

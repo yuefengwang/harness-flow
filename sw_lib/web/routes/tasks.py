@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from ..templating import SafeJinja2Templates
 
 from ...core.service import _service, TaskError
 from ...core.config import STAGES, STAGE_NAMES, TASKS
@@ -20,7 +20,7 @@ import asyncio
 from ..cloudflared import stop_tunnel as stop_cloudflared_tunnel
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+templates = SafeJinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 
 # ── Helper ──

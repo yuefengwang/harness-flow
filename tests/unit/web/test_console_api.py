@@ -85,7 +85,10 @@ def test_engine_command_with_session(dummy_task, client, clean_sessions):
 
 
 def test_sse_route_registered(client):
-    sse_routes = [r for r in client.app.routes if hasattr(r, "path") and "/sse" in r.path and "/deploy/" not in r.path]
+    # Starlette 1.3.x nests included-router routes such that app.routes paths
+    # are not directly iterable; OpenAPI schema reliably lists every path.
+    paths = list(client.app.openapi().get("paths", {}).keys())
+    sse_routes = [p for p in paths if "/sse" in p and "/deploy/" not in p]
     assert len(sse_routes) == 1
 
 

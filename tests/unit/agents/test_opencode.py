@@ -1,9 +1,15 @@
-"""Tests for HTTP-based OpenCodeAgent."""
+"""Tests for OpenCodeAgent + OpenCodeTransport（选项 A 解耦层）。
+
+核心断言：opencode 私有协议细节（parts 字段解析、端口/进程管理）只存在于
+transport 层；OpenCodeAgent 只消费结构化 AgentMessage，不接触裸 parts / requests。
+"""
 import json
 from unittest.mock import MagicMock, patch
 
 from sw_lib.agents.base import BaseAgent
 from sw_lib.agents.opencode import OpenCodeAgent
+from sw_lib.agents.transport import OpenCodeTransport
+from sw_lib.agents.protocol import AgentMessage, ToolCall
 
 
 def _agent(dummy_task, model_name="opencode/deepseek-v4-flash-free"):
@@ -16,16 +22,7 @@ def _agent(dummy_task, model_name="opencode/deepseek-v4-flash-free"):
     return agent, logs
 
 
-def _mock_requests_response(json_data, status_code=200):
-    """Build a mock requests.Response."""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_data
-    resp.raise_for_status.return_value = None
-    return resp
-
-
-# ── Model parsing ──
+# ── Model parsing（仍属 agent 业务层，保留）──
 
 def test_parse_model_splits(dummy_task):
     agent, _ = _agent(dummy_task, "opencode/deepseek-v4-flash-free")
@@ -51,214 +48,146 @@ def test_parse_model_single_part(dummy_task):
     assert agent._parse_model() == ("opencode", "gemini-2.0-flash")
 
 
-# ── send_via_http / dispatch ──
+# ── transport 层：私有协议解析唯一入口 ──
 
-def test_send_via_http_dispatches_text(dummy_task):
-    agent, logs = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
-
-    chat_resp = _mock_requests_response({
-        "info": {},
+def test_transport_parses_parts_into_structured_message():
+    """opencode parts 协议只在 transport._to_message 解析。"""
+    raw = {
         "parts": [
             {"type": "step-start"},
+            {"type": "reasoning", "text": "thinking..."},
             {"type": "text", "text": "Hello"},
+            {"type": "tool", "name": "read", "input": {"path": "f.txt"}},
             {"type": "step-finish", "reason": "stop"},
-        ],
-    })
+        ]
+    }
+    msg = OpenCodeTransport._to_message(raw)
+    assert isinstance(msg, AgentMessage)
+    assert msg.step_start is True
+    assert msg.reasoning == "thinking..."
+    assert msg.text == "Hello"
+    assert len(msg.tool_calls) == 1
+    assert msg.tool_calls[0] == ToolCall(name="read", input={"path": "f.txt"})
+    assert msg.finish_reason == "stop"
 
-    callbacks = {"on_text": MagicMock(), "on_step_start": MagicMock(), "on_step_finish": MagicMock()}
+
+def test_transport_empty_parts_yields_idle_message():
+    msg = OpenCodeTransport._to_message({"parts": []})
+    assert msg.text == ""
+    assert msg.has_tool is False
+    assert msg.step_finish is False
+
+
+# ── agent 层：只消费结构化 AgentMessage，不解析裸 parts ──
+
+def test_agent_dispatch_text(dummy_task):
+    agent, _ = _agent(dummy_task)
+    msg = AgentMessage(text_parts=["Hello"], step_finish=True)
+
+    callbacks = {"on_text": MagicMock(), "on_step_start": MagicMock(),
+                 "on_step_finish": MagicMock()}
     agent.callbacks.update(callbacks)
-
-    with patch("sw_lib.agents.opencode.requests.post", return_value=chat_resp):
-        parts = agent._send_via_http("hi")
-        agent._dispatch_parts(parts)
+    agent._dispatch_message(msg)
 
     callbacks["on_text"].assert_called_with("Hello")
     callbacks["on_step_finish"].assert_called_with("stop")
     assert agent.status == BaseAgent.STATUS_IDLE
 
 
-def test_send_via_http_tool_callback(dummy_task):
+def test_agent_dispatch_tool_callback(dummy_task):
     agent, _ = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
-
-    chat_resp = _mock_requests_response({
-        "info": {},
-        "parts": [
-            {"type": "tool", "name": "read", "input": {"path": "f.txt"}},
-            {"type": "step-finish", "reason": "stop"},
-        ],
-    })
-
+    msg = AgentMessage(
+        tool_calls=[ToolCall(name="read", input={"path": "f.txt"})],
+        step_finish=True,
+    )
     cb = MagicMock()
     agent.callbacks["on_tool"] = cb
-
-    with patch("sw_lib.agents.opencode.requests.post", return_value=chat_resp):
-        parts = agent._send_via_http("x")
-        agent._dispatch_parts(parts)
-
-    cb.assert_called_once()
+    agent._dispatch_message(msg)
+    cb.assert_called_once_with({"name": "read", "input": {"path": "f.txt"}})
 
 
-def test_send_creates_session_on_first_call(dummy_task):
+def test_agent_send_via_transport(dummy_task):
+    """send() 经由 transport.send_message 拿到结构化消息后分发。"""
     agent, _ = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = None
-
-    session_resp = _mock_requests_response({"id": "ses_mock_http_xxx"})
-    chat_resp = _mock_requests_response({
-        "info": {},
-        "parts": [{"type": "step-finish", "reason": "stop"}],
-    })
-
-    with patch("sw_lib.agents.opencode.requests.post", side_effect=[session_resp, chat_resp]):
-        parts = agent._send_via_http("first msg")
-
-    assert agent._session_id == "ses_mock_http_xxx"
-    assert parts is not None
-
-
-def test_send_reuses_session(dummy_task):
-    agent, _ = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_existing"
-
-    chat_resp = _mock_requests_response({
-        "info": {},
-        "parts": [{"type": "step-finish", "reason": "stop"}],
-    })
-
-    with patch("sw_lib.agents.opencode.requests.post", return_value=chat_resp):
-        agent._send_via_http("another msg")
-
-    # session create should NOT be called
-    with patch("sw_lib.agents.opencode.requests.post") as mock_post:
-        mock_post.return_value = chat_resp
-        agent._send_via_http("another msg")
-        assert mock_post.call_count == 1
-        assert "/session/ses_existing/message" in mock_post.call_args[0][0]
-
-
-# ── send() lifecycle ──
-
-def test_send_completes_ok(dummy_task):
-    agent, logs = _agent(dummy_task)
     agent.running = True
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
+    agent._transport._server_url = "http://127.0.0.1:9999"  # 模拟已 start
 
-    chat_resp = _mock_requests_response({
-        "info": {},
-        "parts": [{"type": "step-finish", "reason": "stop"}],
-    })
-
-    with patch("sw_lib.agents.opencode.requests.post", return_value=chat_resp):
+    msg = AgentMessage(text_parts=["done"], step_finish=True)
+    with patch.object(agent._transport, "send_message", return_value=msg) as m:
         agent.send("hello")
 
+    m.assert_called_once()
     assert agent.status == BaseAgent.STATUS_IDLE
 
 
-def test_send_no_server_sets_error(dummy_task):
+def test_agent_send_no_transport_sets_error(dummy_task):
     agent, _ = _agent(dummy_task)
     agent.running = True
-    agent._server_url = None
 
-    agent.send("hello")
-    assert agent.status == BaseAgent.STATUS_ERROR
-
-
-def test_requests_connection_error_sets_error(dummy_task):
-    import requests as req_lib
-    agent, _ = _agent(dummy_task)
-    agent.running = True
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
-
-    with patch("sw_lib.agents.opencode.requests.post", side_effect=req_lib.ConnectionError("refused")):
+    with patch.object(agent._transport, "_server_url", None):
         agent.send("hello")
-
     assert agent.status == BaseAgent.STATUS_ERROR
 
 
-def test_requests_timeout_logs_timeout(dummy_task):
-    import requests as req_lib
-    agent, logs = _agent(dummy_task)
+def test_agent_send_transport_error_sets_error(dummy_task):
+    agent, _ = _agent(dummy_task)
     agent.running = True
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
-
-    with patch("sw_lib.agents.opencode.requests.post", side_effect=req_lib.Timeout("timed out")):
+    from sw_lib.agents.transport import OpenCodeTransportError
+    with patch.object(agent._transport, "send_message",
+                      side_effect=OpenCodeTransportError("boom")):
         agent.send("hello")
-
     assert agent.status == BaseAgent.STATUS_ERROR
-    assert any("HTTP timeout:" in msg for _, msg in logs)
-    assert not any("HTTP connection error:" in msg for _, msg in logs)
 
 
-# ── Server lifecycle ──
+# ── MCP 工具注入（选项 A 关键能力）──
 
-def test_start_server(dummy_task):
+def test_mcp_config_written_when_enabled(dummy_task, tmp_path, monkeypatch):
+    import sw_lib.agents.opencode as oc
     agent, _ = _agent(dummy_task)
-    agent._server_url = None
-
-    session_resp = _mock_requests_response({"id": "ses_health_check"})
-
-    with patch("subprocess.Popen") as mock_popen, \
-         patch("sw_lib.agents.opencode.requests.post", return_value=session_resp) as mock_post, \
-         patch.object(agent, "_cleanup_orphans"), \
-         patch.object(agent, "_find_free_port", return_value=54321):
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_popen.return_value = mock_proc
-
-        agent._start_server()
-
-    assert agent._server_port is not None
-    assert agent._server_url == "http://127.0.0.1:54321"
-    assert OpenCodeAgent.CHAT_TIMEOUT >= 1800.0
-    mock_post.assert_called_once_with(
-        "http://127.0.0.1:54321/session",
-        timeout=agent.HEALTH_TIMEOUT,
-    )
+    agent.use_mcp_tools = True
+    monkeypatch.setattr(oc, "ROOT", tmp_path)
+    path = agent._write_mcp_config()
+    assert path is not None
+    import os
+    data = json.loads((tmp_path / ".mcp_harness.json").read_text(encoding="utf-8"))
+    assert "harness-flow-tools" in data["mcpServers"]
+    assert data["mcpServers"]["harness-flow-tools"]["args"] == [
+        "-m", "sw_lib.agents.mcp_tools"]
 
 
-def test_shutdown_aborts_session(dummy_task):
+def test_mcp_config_none_when_disabled(dummy_task):
     agent, _ = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_mock"
-    agent._server_proc = MagicMock()
+    agent.use_mcp_tools = False
+    assert agent._write_mcp_config() is None
 
-    with patch("sw_lib.agents.opencode.requests.post") as mock_post:
+
+# ── 生命周期 ──
+
+def test_shutdown_delegates_to_transport(dummy_task):
+    agent, _ = _agent(dummy_task)
+    agent.running = True
+    with patch.object(agent._transport, "shutdown") as m:
         agent.shutdown()
-
-    mock_post.assert_called_once_with(
-        "http://127.0.0.1:54321/session/ses_mock/abort",
-        timeout=10,
-    )
-    assert agent._session_id is None
+    m.assert_called_once()
+    assert agent.running is False
 
 
-def test_ignore_echoed_sent_message(dummy_task):
-    """Text parts dispatched via on_text — echo filtering is caller's responsibility."""
+def test_start_lazy_launches_transport(dummy_task):
     agent, _ = _agent(dummy_task)
-    agent._server_url = "http://127.0.0.1:54321"
-    agent._session_id = "ses_test"
+    with patch.object(agent._transport, "start") as m:
+        agent.start()
+    m.assert_called_once()
+    assert agent.running is True
 
-    chat_resp = _mock_requests_response({
-        "info": {},
-        "parts": [
-            {"type": "text", "text": "echoed message"},
-            {"type": "step-finish", "reason": "stop"},
-        ],
-    })
 
-    cb = MagicMock()
-    agent.callbacks["on_text"] = cb
-
-    with patch("sw_lib.agents.opencode.requests.post", return_value=chat_resp):
-        parts = agent._send_via_http("echoed message")
-        agent._dispatch_parts(parts)
-
-    cb.assert_called_once_with("echoed message")
+def test_factory_enables_mcp_tools(dummy_task):
+    """AgentFactory 构造的 opencode 应默认启用 MCP 工具桥接。"""
+    from sw_lib.agents.base import AgentFactory
+    agent = AgentFactory.create(
+        "opencode",
+        {"add_log": lambda *a: None, "is_running": lambda: True,
+         "on_complete": lambda: None},
+        dummy_task, "01-brainstorming", 0, "opencode",
+    )
+    assert isinstance(agent, OpenCodeAgent)
+    assert agent.use_mcp_tools is True

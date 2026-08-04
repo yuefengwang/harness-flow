@@ -1,4 +1,4 @@
-"""Integration test: OpenCodeAgent lifecycle via public API."""
+"""Integration test: OpenCodeAgent lifecycle via public API (option A)."""
 import os, subprocess
 
 import pytest
@@ -18,10 +18,10 @@ def test_start_and_shutdown():
     from sw_lib.agents.opencode import OpenCodeAgent
     a = OpenCodeAgent(_make_callbacks()[0], "test", "01-brainstorming", 0)
     a.start()
-    assert a._server_url is not None
+    assert a._transport.server_url is not None
     assert a.running
     a.shutdown()
-    assert a._server_url is None
+    assert a._transport.server_url is None
     assert not a.running
 
 
@@ -33,7 +33,7 @@ def test_shutdown_idempotent():
     a.start()
     a.shutdown()
     a.shutdown()
-    assert a._server_url is None
+    assert a._transport.server_url is None
 
 
 def test_send_before_start_noop():
@@ -60,9 +60,9 @@ def test_restart_cycle():
     from sw_lib.agents.opencode import OpenCodeAgent
     a = OpenCodeAgent(_make_callbacks()[0], "test", "01-brainstorming", 0)
     a.start()
-    url1 = a._server_url
+    url1 = a._transport.server_url
     a.restart()
-    url2 = a._server_url
+    url2 = a._transport.server_url
     assert url1 != url2  # new port each time
     assert a.running
     a.shutdown()
@@ -76,7 +76,7 @@ def test_server_responds_to_health():
     a = OpenCodeAgent(_make_callbacks()[0], "test", "01-brainstorming", 0)
     a.start()
     try:
-        with urlopen(Request(f"{a._server_url}/global/health"), timeout=5) as r:
+        with urlopen(Request(f"{a._transport.server_url}/global/health"), timeout=5) as r:
             assert r.status == 200
     finally:
         a.shutdown()

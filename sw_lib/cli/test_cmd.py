@@ -11,7 +11,6 @@ from ..core.service import _service, TaskError
 from ..core.config import TASKS, STAGE_NAMES, ROOT
 from ..core.state import read_state, write_state, remove_task_summary
 from ..core.utils import green, red, yellow, hdr, die, now
-from ..core.bootstrap import bootstrap
 
 TEST_CONTEXT = (
     "Build a CLI note manager tool in Python. It should: "
@@ -46,6 +45,7 @@ def _mock_gate_pass(task_name: str, stage: str):
 
 def cmd_test(args):
     """sw test: 黑盒端到端测试 — 模拟 sw monitor 交互"""
+    from ..core.bootstrap import bootstrap  # 惰性：避免非 test 命令也拉起 langgraph
     task_name = getattr(args, "name", "") or f"e2e-{int(time.time())}"
 
     _cleanup_repo()
@@ -89,8 +89,8 @@ def cmd_test(args):
     max_advances = max_stages * 3  # allow reroute loops
 
     try:
-        from ..runnable.runtime import WorkflowRuntime
-        from ..runnable.base import StageInput
+        from ..workflow.runtime import WorkflowRuntime
+        from ..workflow.base import StageInput
         import threading
 
         st = read_state(task_name)

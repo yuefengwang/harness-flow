@@ -129,7 +129,12 @@ class AgentFactory:
         
         elif agent_type == "opencode":
             from .opencode import OpenCodeAgent
-            return OpenCodeAgent(callbacks, name, stage, stage_idx, model_name)
+            # 选项 A：默认启用 MCP 工具桥接，让 opencode 自主调用 harness 原子工具，
+            # 而非被架空成纯聊天 API。协议升级只动 transport/protocol 层。
+            return OpenCodeAgent(
+                callbacks, name, stage, stage_idx, model_name,
+                use_mcp_tools=True,
+            )
         
         else:
             # 默认返回 PtyAgent (基础 PTY 封装)

@@ -22,8 +22,8 @@ from typing import List, Tuple, Dict, Any, Optional, Callable
 
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HOOKS_DIR, HAS_RICH, Layout, Live, Panel, Text, Console, box
-from ..runnable.base import StageInput
-from ..runnable.runtime import WorkflowRuntime
+from ..workflow.base import StageInput
+from ..workflow.runtime import WorkflowRuntime
 from ..core.state import read_state, write_state
 from ..core.utils import sw_log, now
 
@@ -743,7 +743,7 @@ class MonitorTUI:
         if self.state.pending_questions:
             return False
         try:
-            from ..runnable.utils import parse_route_field
+            from ..workflow.utils import parse_route_field
             route = parse_route_field(self.state.name)
             return route is None
         except Exception:
@@ -814,7 +814,7 @@ class MonitorTUI:
             self._add_log("user", cmd)
             if cmd == "/advance":
                 from ..core.service import _service
-                from ..runnable.base import StageInput
+                from ..workflow.base import StageInput
                 try:
                     st = _service.get_task_state(self.state.name)
                     idx = int(st.get("stage_idx", 0))

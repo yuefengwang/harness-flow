@@ -9,6 +9,18 @@ sys.path.insert(0, str(project_root))
 
 from sw_lib.core.config import TASKS
 from sw_lib.core.state import write_state
+from sw_lib.web.engine_manager import WebEngineManager
+
+
+@pytest.fixture(autouse=True)
+def _reset_web_engine_manager():
+    """WebEngineManager is a process-wide singleton; clear its session registry
+    between tests so create_session/get_session assertions don't see stale
+    state left by a previous test."""
+    yield
+    mgr = WebEngineManager._instance
+    if mgr is not None:
+        mgr._sessions.clear()
 
 
 @pytest.fixture

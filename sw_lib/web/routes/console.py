@@ -11,14 +11,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from ..templating import SafeJinja2Templates
 
 from ...core.config import STAGES, STAGE_NAMES, TASKS
 from ...core.service import _service, TaskError
 from ..engine_manager import WebEngineManager
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+templates = SafeJinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 _engine_manager = WebEngineManager.get_instance()
 

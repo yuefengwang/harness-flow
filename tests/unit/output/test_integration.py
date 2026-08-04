@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
-from sw_lib.runnable.base import StageRunnable, StageInput
+from sw_lib.workflow.base import StageRunnable, StageInput
 from sw_lib.prompts import PromptRegistry, PromptBuilder
 from sw_lib.output.parser import StageOutputParser
 from sw_lib.output.stages import BrainstormingOutput, ReviewOutput, CodingOutput
