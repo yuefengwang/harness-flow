@@ -21,3 +21,10 @@ harness/credentials.yaml
 workflow/tasks/*
 
 workspace/*
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
