@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock
-from sw_lib.runnable import StageRunnable, StageInput, StageOutput, LangGraphAdapter
-from sw_lib.runnable.graph import build_harness_graph
+from sw_lib.workflow import StageRunnable, StageInput, StageOutput, LangGraphAdapter
+from sw_lib.workflow.graph import build_harness_graph
 
 class TestGraphRoutingLogic:
     """验证 LangGraph 的核心路由逻辑是否符合预期（包括返工和正常推进）。"""

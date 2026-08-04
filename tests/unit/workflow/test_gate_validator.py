@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 import subprocess
 
-from sw_lib.runnable.gate import GateValidator
+from sw_lib.workflow.gate import GateValidator
 from sw_lib.core.config import TASKS
 
 

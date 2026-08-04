@@ -3,7 +3,7 @@ import pickle
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
-from sw_lib.runnable.checkpoint import FileCheckpointSaver
+from sw_lib.workflow.checkpoint import FileCheckpointSaver
 from sw_lib.core.config import TASKS
 
 def test_file_checkpoint_saver_put_and_get(dummy_task):

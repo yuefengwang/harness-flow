@@ -2,8 +2,8 @@ import threading
 import time
 import pytest
 from unittest.mock import MagicMock
-from sw_lib.runnable import StageRunnable, StageInput, LangGraphAdapter
-from sw_lib.runnable.graph import build_harness_graph
+from sw_lib.workflow import StageRunnable, StageInput, LangGraphAdapter
+from sw_lib.workflow.graph import build_harness_graph
 
 def test_adapter_concurrency_locking(dummy_task):
     """验证 LangGraphAdapter 对同一个任务的并发调用会排队执行。"""
@@ -14,7 +14,7 @@ def test_adapter_concurrency_locking(dummy_task):
         execution_order.append(f"start_{stage_input.stage}")
         time.sleep(1) # 模拟耗时操作
         execution_order.append(f"end_{stage_input.stage}")
-        from sw_lib.runnable import StageOutput
+        from sw_lib.workflow import StageOutput
         return StageOutput(
             task_name=stage_input.task_name,
             stage=stage_input.stage,

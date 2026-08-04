@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock, patch, call
 from pathlib import Path
 
-from sw_lib.runnable.base import (
+from sw_lib.workflow.base import (
     StageInput, StageOutput, HarnessRunnable, StageRunnable,
 )
 from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES

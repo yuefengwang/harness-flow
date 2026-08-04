@@ -1,4 +1,4 @@
-"""sw_lib.runnable.utils — Shared workflow utilities for the runnable architecture.
+"""sw_lib.workflow.utils — Shared workflow utilities for the workflow architecture.
 
 Extracted from legacy engine.py to enable modularity.
 """

@@ -1,28 +1,19 @@
-"""sw_lib.runnable.base — HarnessRunnable, StageRunnable, StageInput/StageOutput.
+"""sw_lib.workflow.base — HarnessRunnable, StageRunnable, StageInput/StageOutput.
 
 Provides the foundation for HarnessFlow's composable workflow architecture.
 Each stage is a StageRunnable; orchestration is handled by LangGraph.
 """
 
-import re
 import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, is_mock_agent
+from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR
+from .mock_fixups import apply_mock_gate_fixups
 from ..core.state import read_state, write_state
 from ..core.utils import sw_log, now
-
-
-# ── Exceptions ──
-
-class RerouteLimitExceeded(Exception):
-    """Raised when the workflow loops back more than max_reroute times."""
-    def __init__(self, message: str, output: 'StageOutput'):
-        super().__init__(message)
-        self.output = output
 
 
 # ── Data models ──
@@ -69,12 +60,12 @@ class HarnessRunnable(ABC):
 
     @abstractmethod
     def invoke(self, input: StageInput) -> StageOutput:
-        """Execute this runnable synchronously."""
+        """Execute this workflow synchronously."""
         ...
 
     @abstractmethod
     async def ainvoke(self, input: StageInput) -> StageOutput:
-        """Execute this runnable asynchronously (for Web Dashboard)."""
+        """Execute this workflow asynchronously (for Web Dashboard)."""
         ...
 
 
@@ -150,6 +141,7 @@ class StageRunnable(HarnessRunnable):
 
         # 2. Record injected context to .input (for offline playback/debugging)
         task_dir = TASKS / input.task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
         input_file = task_dir / ".input"
         with open(input_file, "a", encoding="utf-8") as f:
             f.write(f"\n[{now()}] system | === 启动运行: {self.stage} ===\n")
@@ -423,24 +415,7 @@ class StageRunnable(HarnessRunnable):
 
         stage_file.write_text(new_content, encoding="utf-8")
 
-        if is_mock_agent():
-            content = stage_file.read_text(encoding="utf-8")
-            # 只保留 AI Output 区域（## 🤖 AI Output → ## Gate 之间）不替换，
-            # 模板区和 Gate 区的 [ ] → [x] 确保校验通过
-            ai_mrkr = "\n## 🤖 AI Output\n"
-            gate_mrkr = "\n## Gate"
-            ai_pos = content.find(ai_mrkr)
-            if ai_pos >= 0:
-                gate_pos = content.find(gate_mrkr, ai_pos + len(ai_mrkr))
-                if gate_pos >= 0:
-                    before = content[:ai_pos].replace("[ ]", "[x]")
-                    if self.stage == "04-review":
-                        before = before.replace("- **Route**: `___`", "- **Route**: `05-Archive`", 1)
-                    output_area = content[ai_pos:gate_pos]
-                    gate_area = content[gate_pos:].replace("[ ]", "[x]")
-                    content = before + output_area + gate_area
-                else:
-                    content = content.replace("[ ]", "[x]")
-            else:
-                content = content.replace("[ ]", "[x]")
-            stage_file.write_text(content, encoding="utf-8")
+        # Mock 模式的后处理已抽离到 mock_fixups（生产路径不感知 mock）
+        fixed = apply_mock_gate_fixups(new_content, self.stage)
+        if fixed != new_content:
+            stage_file.write_text(fixed, encoding="utf-8")

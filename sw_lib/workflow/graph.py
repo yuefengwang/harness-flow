@@ -8,7 +8,7 @@ from .state import WorkflowState
 
 from ..core.config import MAX_REROUTE
 
-def create_stage_node(runnable: StageRunnable):
+def create_stage_node(stage_runnable: StageRunnable):
     """Factory to wrap a StageRunnable as a LangGraph node.
     
     Converts (state: WorkflowState, config: RunnableConfig) -> updates: dict.
@@ -23,35 +23,35 @@ def create_stage_node(runnable: StageRunnable):
         adapter = conf.get("adapter")
         
         if adapter:
-            adapter.active_stage = runnable
-            
+            adapter.active_stage = stage_runnable
+
         try:
             stage_input = StageInput(
                 task_name=state["task_name"],
-                stage=runnable.stage,
-                stage_idx=runnable.stage_idx,
+                stage=stage_runnable.stage,
+                stage_idx=stage_runnable.stage_idx,
                 previous_output=state["last_output"],
                 metadata={
                     "callbacks": callbacks,
                     "reroute_count": state["reroute_count"]
                 }
             )
-            
+
             # 2. Execute existing logic (Hooks -> Agent -> Parser -> Gate)
-            output: StageOutput = runnable.invoke(stage_input)
-            
+            output: StageOutput = stage_runnable.invoke(stage_input)
+
             # 3. Return state updates
             res = {
                 "last_output": output.parsed,
                 "history_outputs": [output.parsed] if output.parsed else [],
                 "next_route": output.route,
                 "current_stage": output.stage,
-                "stage_idx": runnable.stage_idx,
+                "stage_idx": stage_runnable.stage_idx,
                 "gate_passed": output.gate_passed
             }
-            
+
             # 4. 如果是归档阶段且门禁通过，触发结算回调
-            if runnable.stage == "05-archive" and output.gate_passed:
+            if stage_runnable.stage == "05-archive" and output.gate_passed:
                 if "on_settlement" in callbacks:
                     callbacks["on_settlement"]()
                     
@@ -99,8 +99,8 @@ def build_harness_graph(stages: List[StageRunnable], max_reroute: int = MAX_RERO
 
 
 class LangGraphAdapter:
-    """Adapts a CompiledGraph to the WorkflowExecutor protocol.
-    
+    """Adapts a CompiledGraph to a runnable workflow executor.
+
     Provides the core execution logic using LangGraph StateGraph.
     """
     def __init__(self, graph, stages: List[StageRunnable], max_reroute: int = MAX_REROUTE):

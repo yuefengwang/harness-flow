@@ -1,12 +1,12 @@
 """
-Tests for runnable utilities: parse_route_field, extract_evidence_table,
+Tests for workflow utilities: parse_route_field, extract_evidence_table,
 inject_reroute_context, and auto_check_gate.
 """
 
 import pytest
 import re
 from sw_lib.core.config import TASKS
-from sw_lib.runnable.utils import (
+from sw_lib.workflow.utils import (
     parse_route_field,
     extract_evidence_table,
     inject_reroute_context,
@@ -175,7 +175,7 @@ class TestAutoCheckGateEvidenceAutoFill:
             "|---|---|---|\n"
             "| Lint | ❌ | Fails\n"
         )
-        from sw_lib.runnable.utils import _auto_fill_evidence_from_ai_output
+        from sw_lib.workflow.utils import _auto_fill_evidence_from_ai_output
         new_content = _auto_fill_evidence_from_ai_output(content)
         assert "Lint" in new_content
         assert "审查发现: ❌" in new_content
@@ -197,21 +197,21 @@ class TestStageComplianceReviewRoute:
 
     def test_route_empty(self, dummy_task):
         self._make_04_review_md(dummy_task, "___")
-        from sw_lib.runnable.utils import check_stage_compliance
+        from sw_lib.workflow.utils import check_stage_compliance
         done, todo = check_stage_compliance(dummy_task, "04-review", 3)
         assert any("未填写" in item for item in todo)
 
     def test_route_valid(self, dummy_task):
         for val in ["05-archive", "03-coding", "02-planning", "01-brainstorming"]:
             self._make_04_review_md(dummy_task, val)
-            from sw_lib.runnable.utils import check_stage_compliance
+            from sw_lib.workflow.utils import check_stage_compliance
             done, todo = check_stage_compliance(dummy_task, "04-review", 3)
             assert not todo
             assert any(val in item.lower() for item in done)
 
     def test_route_invalid(self, dummy_task):
         self._make_04_review_md(dummy_task, "Invalid-Route")
-        from sw_lib.runnable.utils import check_stage_compliance
+        from sw_lib.workflow.utils import check_stage_compliance
         done, todo = check_stage_compliance(dummy_task, "04-review", 3)
         assert any("无效" in item or "缺少有效的" in item for item in todo)
 
@@ -220,6 +220,6 @@ class TestStageComplianceReviewRoute:
         (task_dir / "04-review.md").write_text(
             "# 04-Review\n\n## Gate\n- [x] OK\n", encoding="utf-8"
         )
-        from sw_lib.runnable.utils import check_stage_compliance
+        from sw_lib.workflow.utils import check_stage_compliance
         done, todo = check_stage_compliance(dummy_task, "04-review", 3)
         assert any("缺少" in item for item in todo)
