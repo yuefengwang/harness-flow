@@ -8,63 +8,36 @@ sys.path.insert(0, str(project_root))
 
 from sw_lib.core.config import TASKS
 from sw_lib.core.state import write_state, remove_task_summary
+from sw_lib.core import residue
 from sw_lib.web.engine_manager import WebEngineManager
-
-
-def _snapshot_workspace():
-    """记录当前 workspace/repo 里已存在的名字。"""
-    from sw_lib.core.config import STATUS
-
-    trash = TASKS / ".trash"
-    repo = TASKS.parent.parent / "repo"
-
-    def _dirs(base):
-        if not base.is_dir():
-            return set()
-        return {p.name for p in base.iterdir() if p.is_dir()}
-
-    status_names = set()
-    if STATUS.exists():
-        import json
-        try:
-            status_names = set(json.loads(STATUS.read_text(encoding="utf-8")).get("tasks", {}))
-        except Exception:
-            pass
-
-    return {
-        "tasks": _dirs(TASKS) - {".trash"},
-        "trash": _dirs(trash),
-        "repo": _dirs(repo),
-        "status": status_names,
-    }
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _reap_workspace_residue():
     """兜底清理测试在真实 workspace 里留下的残渣。
 
-    大部分用例自己会 rmtree，但清理散落在二十多个文件里，删目录和删
-    STATUS.json 条目是两个必须手工配对的动作，漏一半就留下孤儿条目 ——
-    历史上已经积到十几条。理想做法是所有用例都隔离到 tmp_path（见
+    大部分用例自己会 rmtree，但清理散落在二十多个文件里，且一个任务有三处
+    产物（任务目录、`repo/<name>`、STATUS.json 条目）—— 必须手工配对的动作，
+    漏一处就留孤儿。理想做法是所有用例都隔离到 tmp_path（见
     tests/unit/core/test_remove_all.py 的 isolated_workspace），但 TASKS
     被二十多个模块在导入期各自绑定，逐个 monkeypatch 反而更容易漏。
 
-    这里只做差集清理：跑测试前拍快照，结束后删掉新增出来的名字。
-    预先存在的任务（用户的真实任务）一律不碰。
+    判定交给 `sw_lib.core.residue`，按**名字模式**识别。此前这里用的是
+    「跑前拍快照、跑后删新增」的差集策略，它有个致命漏洞：残留只要活过一次
+    会话就进入下次的 before 快照，从此被永久豁免 —— 实测预置三处产物后跑
+    全量，三处原样留存，仓库里因此积了 13 条孤儿。
+
+    收尾时清一次就够：开场不清，避免与用户正在跑的任务抢文件。
+
+    `SW_SKIP_REAP=1` 可跳过回收 —— 用于诊断「哪个用例在污染真实 workspace」：
+    兜底扫帚一开，源头泄漏就被掩盖，看不出是谁漏的。
     """
-    before = _snapshot_workspace()
     yield
-    after = _snapshot_workspace()
+    import os
 
-    trash = TASKS / ".trash"
-    repo = TASKS.parent.parent / "repo"
-    for base, key in ((TASKS, "tasks"), (trash, "trash"), (repo, "repo")):
-        for name in sorted(after[key] - before[key]):
-            shutil.rmtree(base / name, ignore_errors=True)
-
-    new_entries = after["status"] - before["status"]
-    for name in sorted(new_entries):
-        remove_task_summary(name)
+    if os.environ.get("SW_SKIP_REAP") == "1":
+        return
+    residue.reap()
 
 
 @pytest.fixture(scope="session", autouse=True)

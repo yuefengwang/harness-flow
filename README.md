@@ -159,6 +159,7 @@ harness:
 | `./sw remove --name=<id>` | 将任务移入回收站（软删除） |
 | `./sw restore --name=<id>` | 从回收站恢复任务 |
 | `./sw answer --name=<id> --text=<reply>` | 以编程方式回复 Agent 问题 |
+| `./sw reap` | 清理测试残留任务（`e2e-*` / `web-*` / `pytest-*` / `test-*`） |
 
 全局标志：`--yes/-y`（自动确认）、`--non-interactive`（非交互模式）
 

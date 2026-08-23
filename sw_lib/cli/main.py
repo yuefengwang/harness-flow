@@ -13,7 +13,7 @@ from .commands import (
     cmd_init, cmd_status, cmd_advance,
     cmd_list, cmd_remove, cmd_remove_all, cmd_restore, cmd_answer, cmd_monitor,
     cmd_dashboard, cmd_usage, cmd_deploy, cmd_health, cmd_purge_trash,
-    cmd_state_get,
+    cmd_state_get, cmd_reap,
 )
 from .test_cmd import cmd_test
 
@@ -107,6 +107,9 @@ def main():
     # purge-trash（别名兼容驼峰写法）
     for _alias in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):
         subparsers.add_parser(_alias, help="清空回收站（物理删除，不可恢复）")
+
+    # reap：清理测试残留（被 Ctrl+C 打断时自动收尾不会执行）
+    subparsers.add_parser("reap", help="清理测试残留任务（e2e-* / web-* / pytest-*）")
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="启动 TUI 监控面板")
@@ -212,6 +215,9 @@ def main():
 
     elif cmd in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):
         cmd_purge_trash(args)
+
+    elif cmd == "reap":
+        cmd_reap(args)
 
     elif cmd == "monitor":
         cmd_monitor(args)

@@ -26,7 +26,6 @@ import json
 import re
 import select
 import signal
-import shutil
 import subprocess
 import sys
 import time
@@ -501,27 +500,20 @@ def _cleanup(pid: int, fd: int):
         pass
 
 
-def _drop_status_entry(name: str):
-    """从 workspace/STATUS.json 摘掉任务条目。
+def _reap_previous_residue():
+    """收掉**上一轮**留下的残留（本轮任务此时还没建）。
 
-    driver 是独立脚本（不经 pytest conftest），所以自己负责这步；
-    直接改 JSON 而不 import sw_lib，避免为一次清理牵进整个包。
+    driver 失败时故意保留现场供排查，但此前没人负责事后收 —— `repo/e2e-<pid>`
+    于是永久留在仓库里，靠用户手工清。开场先收一次，既保住「失败留现场」，
+    又不让它无限堆积。
+
+    复用 sw_lib.core.residue：清理规则只该有一份，抄第二份必然漂移。
     """
-    status = ROOT / "workspace" / "STATUS.json"
-    if not status.exists():
-        return
-    try:
-        data = json.loads(status.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if data.get("tasks", {}).pop(name, None) is None:
-        return
-    try:
-        status.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        pass
+    from sw_lib.core import residue
+
+    reaped = residue.reap()
+    if reaped:
+        log(f"Reaped {len(reaped)} stale test residue: {', '.join(reaped)}")
 
 
 def main() -> int:
@@ -539,6 +531,9 @@ def main() -> int:
     log(f"=== E2E Flow Test: {TASK_NAME} ===")
     log("Mode: MockAgent (scripted, deterministic)")
     log(f"Context: {CONTEXT}")
+
+    # 先收上一轮失败留下的现场，再开新的一轮。
+    _reap_previous_residue()
 
     # 测试自己决定输入：评审路由写死成归档，不看 config.yaml。仓库里那份
     # review_route 现在是 02-Planning，继承它会让 e2e 走返工分支然后卡在
@@ -580,16 +575,17 @@ def main() -> int:
             [sys.executable, str(Path(__file__).parent / "verify.py"),
              "--task-dir", str(task_dir)])
 
-    # 失败一律保留现场；通过则清理，避免残留任务污染 workspace
+    # 失败一律保留现场；通过则清理，避免残留任务污染 workspace。
+    # 三处产物（任务目录 / repo/<task> / STATUS 条目）交给 residue.reap()
+    # 统一收，少清任何一处都会留下孤儿。
     if rc == 0 and not args.keep:
-        shutil.rmtree(task_dir, ignore_errors=True)
-        # 任务目录只是三处产物之一：agent 会在 repo/<task> 下建工作目录，
-        # STATUS.json 里也有一条汇总。少清任何一处都会留下孤儿。
-        shutil.rmtree(ROOT / "repo" / TASK_NAME, ignore_errors=True)
-        _drop_status_entry(TASK_NAME)
+        from sw_lib.core import residue
+
+        residue.reap()
         log(f"Cleaned up {TASK_NAME}")
     else:
         log(f"Task dir kept for inspection: {task_dir}")
+        log("下次运行 driver 会自动收掉它；要长期保留请加 --keep")
 
     return rc
 

@@ -30,6 +30,7 @@
   ./sw health    [--name=<id>] [--interval=<s>] [--daemon]
   ./sw dashboard [--host=<h>] [--port=<n>]   # 启动 Web Dashboard
   ./sw test      [--name=<id>]               # 端到端集成测试（MockAgent）
+  ./sw reap                                  # 清理测试残留（e2e-* / web-* / pytest-* / test-*）
 """
 
 import signal
@@ -326,6 +327,28 @@ def cmd_purge_trash(args):
         for t in remaining:
             warn(f"未能删除: {t['id']}")
         die(f"{len(remaining)} 个任务清理失败")
+
+
+def cmd_reap(args):
+    """清理测试残留（任务目录 + repo 目录 + STATUS.json 条目）。
+
+    自动收尾有覆盖不到的情况：运行被 Ctrl+C 或 kill 打断时，pytest 的
+    session fixture 和 e2e driver 的 finally 都不会跑完，残留就留在仓库里。
+    这个命令是那时的手动补救。
+
+    只删名字匹配测试模式的任务（`e2e-*` / `web-*` / `pytest-*` / `test-app`），
+    用户的真实任务不受影响，所以不设确认闸门。
+    """
+    from ..core import residue
+
+    reaped = residue.reap()
+    if not reaped:
+        ok("没有测试残留")
+        return
+
+    hdr(f"已清理 {len(reaped)} 个测试残留")
+    for name in reaped:
+        print(f"  {name}")
 
 
 def _confirm_destructive(prompt: str) -> bool:
