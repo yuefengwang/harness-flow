@@ -359,11 +359,17 @@ class Toolbox:
     Agent 工具管理器，负责根据阶段加载并提供工具实例。
     """
     
-    def __init__(self, task_name: str, stage: str, callbacks: Optional[Dict[str, Callable]] = None):
+    def __init__(self, task_name: str, stage: str,
+                 callbacks: Optional[Dict[str, Callable]] = None,
+                 role_id: Optional[str] = None):
         self.task_name = task_name
         self.stage = stage
         self.callbacks = callbacks or {}
-        self.allowed_tool_names = get_tools_for_stage(stage)
+        self.role_id = role_id
+        # A4 的 3.6：按角色解析工具白名单。
+        # ⚠️ 这条路径只被 gemini 引用，对当前实际运行的 opencode 无效
+        # （A0 的 2.5）—— 真实生效的是 opencode.py 的 _tool_switches。
+        self.allowed_tool_names = get_tools_for_stage(stage, role_id=role_id)
         
         # 实例化工具对象
         self._all_tools: Dict[str, BaseTool] = {

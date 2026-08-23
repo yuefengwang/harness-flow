@@ -607,3 +607,67 @@ A4 自身自指风险低，但有一个**测试污染风险**：
 > `validate_config()` 那一行的意思是：回滚它会让「配置写错静默退化成
 > 同构 reviewer」这件事复原。那不是中性的技术回退，
 > 而是**放弃 C2 的解法**，应作为决策记录。
+
+---
+
+## 11. 实施记录
+
+实施于 2026-08-23/24。落盘：`sw_lib/core/config.py`（+396 行）、
+`bootstrap.py`、`agents/{base,opencode,gemini,pty,mock}.py`、
+`tools/toolbox.py`、`config/config.yaml`，测试 54 条分四个文件。
+
+### 11.1 验收结果
+
+| # | 判据 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | 多角色返回两个 role_id | ✅ | `test_stage_roles_returns_all_subjective_reviewers` |
+| 2 | 空 subjective 回落 `["reviewer"]` | ✅ | `test_empty_subjective_falls_back_to_stage_roles` |
+| 3 | 解析 objective / kind | ✅ | `test_resolve_review_config_parses_objective_and_kind` |
+| 4 | 按角色解析模型且与默认不同 | ✅ | `test_model_resolves_per_role_and_differs_from_default_reviewer` |
+| 5 | design_critic 无 run_command | ✅ | `test_design_critic_tools_exclude_run_command` |
+| 6 | factory 按 role_id 建 agent | ✅ | `test_factory_accepts_role_id_and_uses_role_model` |
+| 7 | provider 派生与回落 | ✅ | `test_provider_from_model_prefix` 等 3 条 |
+| 8 | 既有测试全通过（单调性） | ✅ | `tests/unit` 1170 passed / 1 skipped；e2e 32/32 |
+| 9 | `role_id=None` 逐字节等价 | ✅ | 15 值快照**改造前采集并确认为绿**，改造后仍绿 |
+| 10 | 配置写错抛 ConfigError | ✅ | `test_missing_role_raises_instead_of_silently_returning_gemini` |
+| 11 | 审查者互相同 provider 被拒 | ✅ | `test_same_provider_reviewers_rejected_when_heterogeneous_required` |
+| 12 | 与 developer 同 provider 被拒 | ✅ | `test_reviewer_sharing_provider_with_developer_rejected`（含反向断言，证明触发的是与作者同源那条） |
+| 13 | 权限到达 opencode 规则表 | ✅ | `test_design_critic_bash_is_denied_in_permission_rules` + 对照组 |
+| 14 | 增删审查者不改 Python | ✅ | `test_adding_third_reviewer_needs_no_python_change`（真实临时 YAML 加载，非 Python 构造） |
+
+### 11.2 实施中的三处偏离与修正
+
+1. **`_resolve_model_fallback` 的变量遮蔽**：`resolve_agent_type` 与
+   `resolve_agent_model` 内部把 `role_id` 当作局部变量重复使用
+   （`role_id = cfg.stage_roles.get(stage)`）。新增同名参数会被就地覆盖，
+   导致 role_id 分支静默失效。已把内部变量改名为 `stage_role`。
+   **这正是 R4 的具体形态** —— 加参数不是纯加法。
+2. **`RoleConfig.provider` 不能同时是 dataclass 字段与派生属性**。
+   最初写成 `@property` 与 R3 的「允许显式声明覆盖」冲突。
+   最终形态：字段名 `provider_override`，`provider` 为只读属性；
+   `__init__` 接受 `provider=` 关键字以兼容 YAML 直接声明。
+3. **测试自身缺陷（按 DEV-PROTOCOL 1.2 显式声明后重做）**：
+   factory 用例原用任务名 `a4-factory-probe`，而 `OpenCodeAgent` 构造会在
+   `repo/<name>` 建目录，该前缀不在 `residue` 的回收名单（`e2e|web|pytest|test|rw`）
+   里，会留孤儿。改用 `dummy_task` 夹具。
+
+### 11.3 遗留（❓ 与决策项）
+
+- **`config.yaml` 的 `review.subjective` 故意留空**。角色定义
+  （`adversary` / `design_critic`）与 `review` 段已就绪，但**没有填入审查者**：
+  多角色的图编排属 A5，尚未落地。此刻填上会造成「配置声称两个审查者、
+  实际只跑一个」的静默背离 —— 与 2.3 要消灭的缺陷同类。
+  A5 落地后填入两项即可，无需改 Python（验收 14 已证）。
+  **因此「一阶段真的并行跑了两个审查者」目前是 ❓ 未验证**，
+  A4 只交付了配置与解析层的能力。
+- **U4-1 未变**：工具权限仍只是声明。验收 13 断言的是**规则形状**，
+  A0 的 2.9.5 实测 assert 端点一律返回 allow，`bash` 可绕过路径 deny。
+  「design_critic 纯只读」是约定，不是保证。
+- **异构性当前为 `degraded` 的前置条件未触发**：`subjective` 为空时
+  `heterogeneous_status` 为 `ok`。填入两个 opencode 审查者后会变成
+  `degraded`（已由单测覆盖）。**A10 的报告必须消费这个字段**，
+  否则同构降级仍然是静默的 —— 记入 A10 的接口约定。
+- **`require_heterogeneous` 默认 false 是妥协**（R2）。当前五个角色全是
+  `opencode/mimo-v2.5-free`，开启即报错。这不代表同构可接受。
+  **需要用户拍板**：是否接入第二个 provider 的额度，否则 C2 的
+  「盲区不重合」在真实运行中仍未兑现，A11 的变异探针大概率会证明这一点。

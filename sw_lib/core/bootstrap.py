@@ -89,11 +89,13 @@ def _make_agent_factory(stage: str):
     from ..agents.base import AgentFactory
     from ..core.config import resolve_agent_type, resolve_agent_model, STAGES
 
-    def factory(stage=stage, task_name=None):
-        agent_type = resolve_agent_type(stage, "")
-        model = resolve_agent_model(stage, "")
+    def factory(stage=stage, task_name=None, role_id=None):
+        # role_id 非空时按角色解析 agent/model（A4 的 3.7，A5 的 4.3 消费此签名）。
+        agent_type = resolve_agent_type(stage, "", role_id=role_id)
+        model = resolve_agent_model(stage, "", role_id=role_id)
         callbacks = {}  # StageRunnable overrides these in _run_agent
         stage_idx = STAGES.index(stage) if stage in STAGES else 0
-        return AgentFactory.create(agent_type, callbacks, task_name or "", stage, stage_idx, model)
+        return AgentFactory.create(agent_type, callbacks, task_name or "", stage,
+                                   stage_idx, model, role_id=role_id)
 
     return factory

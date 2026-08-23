@@ -10,15 +10,19 @@
 opencode 升级改协议 → 只动 transport.py。
 """
 import os
+import logging
 import queue
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..core.config import ROOT, CONFIG_DIR, get_repo_path, get_tools_for_stage
+from ..core.config import (ROOT, CONFIG_DIR, ConfigError, get_repo_path,
+                           get_tools_for_stage)
 from ..core.utils import sw_log
 from .base import BaseAgent
 from .transport import OpenCodeTransport, OpenCodeTransportError
 from .protocol import AgentMessage
+
+_log = logging.getLogger(__name__)
 
 
 # opencode 免费模型（实测 cost.input/output 均为 0）。
@@ -120,8 +124,9 @@ class OpenCodeAgent(BaseAgent):
 
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode",
                  use_native_tools: bool = True, verbose: bool = False,
-                 workdir: Optional[str] = None):
-        super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
+                 workdir: Optional[str] = None, role_id: Optional[str] = None):
+        super().__init__(tui_callbacks, name, stage, stage_idx, model_name,
+                         role_id=role_id)
         self.running = False
         self.agent_proc = None
         self.use_native_tools = use_native_tools
@@ -206,15 +211,39 @@ class OpenCodeAgent(BaseAgent):
         """把阶段允许的 harness 工具翻译成 opencode 原生工具开关。
 
         显式关掉未授权工具，这样 04-review 之类只读阶段无法写盘或跑命令。
+
+        A4 的 2.2：这里是工具权限**当前唯一真实生效**的落点 ——
+        `Toolbox` 的白名单只被 gemini 引用，对 opencode 一概无效（A0 的 2.5）。
+        所以多角色的权限必须在这里按 role_id 解析，否则改了等于白改。
         """
         try:
-            allowed = set(get_tools_for_stage(self.stage) or [])
+            allowed = set(self._allowed_tool_names())
         except Exception:
             allowed = set()
         enabled: set = set()
         for harness_tool in allowed:
             enabled.update(TOOL_MAP.get(harness_tool, ()))
         return {t: (t in enabled) for t in _MANAGED_TOOLS}
+
+    def _allowed_tool_names(self) -> List[str]:
+        """本次会话的 harness 工具白名单。
+
+        role_id 为空时按 stage 解析（旧行为）。role_id 未知时**回落并记警告**
+        （A4 的 R5）—— 静默回落会让「纯只读的 design_critic」悄悄拿到 stage
+        默认角色的 run_command，与 2.3 的静默兜底同类。
+        """
+        role_id = getattr(self, "role_id", None)
+        if not role_id:
+            return list(get_tools_for_stage(self.stage) or [])
+        try:
+            from ..core.config import get_tools_for_role
+
+            return list(get_tools_for_role(role_id, self.stage) or [])
+        except ConfigError as exc:
+            _log.warning(
+                "role_id=%r 无法解析工具权限（%s），回落到 stage=%s 的默认角色 —— "
+                "该角色的权限约束本轮未生效", role_id, exc, self.stage)
+            return list(get_tools_for_stage(self.stage) or [])
 
     def _permission_rules(self) -> List[Dict[str, str]]:
         """生成 session 级权限规则表（D0-6）。

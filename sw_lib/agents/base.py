@@ -1,7 +1,7 @@
 """sw_lib.base_agent — Abstract base class and factory for Agents"""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
 
 class BaseAgent(ABC):
     """
@@ -17,7 +17,8 @@ class BaseAgent(ABC):
     STATUS_WAITING = "waiting"       # 等待中
     STATUS_ERROR = "error"           # 异常状态
 
-    def __init__(self, callbacks: Dict[str, Callable], name: str, stage: str, stage_idx: int, model_name: str):
+    def __init__(self, callbacks: Dict[str, Callable], name: str, stage: str,
+                 stage_idx: int, model_name: str, role_id: Optional[str] = None):
         """
         初始化 Agent 基类。
         
@@ -27,12 +28,15 @@ class BaseAgent(ABC):
             stage: 当前阶段标识 (如 "01-brainstorming")
             stage_idx: 阶段索引
             model_name: 使用的 AI 模型或命令名称
+            role_id: 本次会话承担的角色（A4 的 3.7）。为 None 时按 stage 解析
+                权限，与引入多角色之前行为一致。
         """
         self.callbacks = callbacks
         self.name = name
         self.stage = stage
         self.stage_idx = stage_idx
         self.model_name = model_name
+        self.role_id = role_id
         self.status: str = self.STATUS_IDLE
 
     def _add_log(self, source: str, msg: str):
@@ -101,7 +105,9 @@ class AgentFactory:
     """Agent 工厂类，负责根据配置和类型创建具体的 Agent 实例。"""
 
     @staticmethod
-    def create(agent_type: str, callbacks: Dict[str, Callable], name: str, stage: str, stage_idx: int, model_name: str) -> BaseAgent:
+    def create(agent_type: str, callbacks: Dict[str, Callable], name: str, stage: str,
+               stage_idx: int, model_name: str,
+               role_id: Optional[str] = None) -> BaseAgent:
         """
         创建并返回一个具体的 Agent 实例。
         
@@ -112,6 +118,7 @@ class AgentFactory:
             stage: 当前阶段
             stage_idx: 阶段索引
             model_name: 模型名称
+            role_id: 本次会话承担的角色（A4 的 3.7）。缺省 None 时行为不变。
             
         Returns:
             BaseAgent 的子类实例
@@ -119,13 +126,17 @@ class AgentFactory:
         from ..core.config import is_mock_agent
         
         # 如果全局配置启用了 Mock 模式，则强制返回 MockAgent
+        # A4 的第 4 节：多角色在 mock 下照常解析出 N 个角色，只是都由 mock 承担 ——
+        # A5 的图结构测试需要「N 个分支」这个形状，与分支内跑什么无关。
         if is_mock_agent():
             from .mock import MockAgent
-            return MockAgent(callbacks, name, stage, stage_idx, model_name)
+            return MockAgent(callbacks, name, stage, stage_idx, model_name,
+                             role_id=role_id)
 
         if agent_type == "gemini":
             from .gemini import GeminiAgent
-            return GeminiAgent(callbacks, name, stage, stage_idx, model_name)
+            return GeminiAgent(callbacks, name, stage, stage_idx, model_name,
+                               role_id=role_id)
         
         elif agent_type == "opencode":
             from .opencode import OpenCodeAgent
@@ -134,9 +145,11 @@ class AgentFactory:
             return OpenCodeAgent(
                 callbacks, name, stage, stage_idx, model_name,
                 use_native_tools=True,
+                role_id=role_id,
             )
         
         else:
             # 默认返回 PtyAgent (基础 PTY 封装)
             from .pty import PtyAgent
-            return PtyAgent(callbacks, name, stage, stage_idx, model_name)
+            return PtyAgent(callbacks, name, stage, stage_idx, model_name,
+                            role_id=role_id)

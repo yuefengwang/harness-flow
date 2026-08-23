@@ -119,8 +119,10 @@ class PtyAgent(BaseAgent):
     能够运行本地命令行 AI 工具（如 gemini-cli, opencode）或其他任意 shell 程序。
     """
 
-    def __init__(self, tui_callbacks: Dict[str, Callable], name: str, stage: str, stage_idx: int, agent_name: str):
-        super().__init__(tui_callbacks, name, stage, stage_idx, agent_name)
+    def __init__(self, tui_callbacks: Dict[str, Callable], name: str, stage: str,
+                 stage_idx: int, agent_name: str, role_id: Optional[str] = None):
+        super().__init__(tui_callbacks, name, stage, stage_idx, agent_name,
+                         role_id=role_id)
         self.agent_proc: Optional[subprocess.Popen] = None
         self._master_fd: Optional[int] = None
         self.processor = PTYProcessor()

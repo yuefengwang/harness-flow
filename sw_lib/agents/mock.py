@@ -35,8 +35,11 @@ class MockAgent(BaseAgent):
     支持场景化脚本执行，能够模拟 ask_user 提问并根据回复产生差异化输出。
     """
 
-    def __init__(self, tui_callbacks: Dict[str, Any], name: str, stage: str, stage_idx: int, model_name: str = "mock"):
-        super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
+    def __init__(self, tui_callbacks: Dict[str, Any], name: str, stage: str,
+                 stage_idx: int, model_name: str = "mock",
+                 role_id: Optional[str] = None):
+        super().__init__(tui_callbacks, name, stage, stage_idx, model_name,
+                         role_id=role_id)
         self.running = False
         self.agent_proc = None
         self._master_fd = None

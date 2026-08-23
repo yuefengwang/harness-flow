@@ -2,6 +2,7 @@
 
 import os
 import threading
+from typing import Optional
 from google import genai
 from google.genai import types
 
@@ -13,9 +14,11 @@ from .base import BaseAgent
 
 
 class GeminiAgent(BaseAgent):
-    def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="gemini-2.0-flash"):
-        super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
-        self.toolbox = Toolbox(name, stage, callbacks=tui_callbacks)
+    def __init__(self, tui_callbacks, name, stage, stage_idx,
+                 model_name="gemini-2.0-flash", role_id: Optional[str] = None):
+        super().__init__(tui_callbacks, name, stage, stage_idx, model_name,
+                         role_id=role_id)
+        self.toolbox = Toolbox(name, stage, callbacks=tui_callbacks, role_id=role_id)
         self.running = False
         
         self.api_key = self._get_api_key()

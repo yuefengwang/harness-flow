@@ -32,6 +32,15 @@ harness:
         \u540E\u53EF\u8FDB\u5165\u89C4\u5212\u9636\u6BB5\u3002\n\n## Gate\n- [x] Design\
         \ approved\n- [x] Ready for Planning\n"
   roles:
+    adversary:
+      agent: opencode
+      description: "\u53CD\u4F8B\u5BFC\u5411\u5BA1\u67E5\u8005\uFF1A\u53EA\u63D0\u4EA4\
+        \u53EF\u6267\u884C\u7684\u53CD\u4F8B\uFF0C\u4E0D\u5199\u8BC4\u8BED"
+      model: opencode/mimo-v2.5-free
+      tools:
+      - list_files
+      - read_file
+      - ask_user
     analyst:
       agent: opencode
       description: "\u9700\u6C42\u5206\u6790\u5E08\uFF1A\u64C5\u957F\u5F15\u5BFC\u3001\
@@ -73,6 +82,14 @@ harness:
       - write_file
       - run_command
       - ask_user
+    design_critic:
+      agent: opencode
+      description: "\u8BBE\u8BA1\u5BA1\u67E5\u8005\uFF1A\u53EA\u8BFB\uFF0C\u53EA\u770B\
+        \u8BBE\u8BA1\u8D28\u91CF\u4E0E\u9700\u6C42\u7B26\u5408\u5EA6"
+      model: opencode/mimo-v2.5-free
+      tools:
+      - list_files
+      - read_file
     reviewer:
       agent: opencode
       description: "\u4EE3\u7801\u8BC4\u5BA1\u5458\uFF1A\u5FEB\u901F\u3001\u4E25\u82DB\
@@ -89,4 +106,18 @@ harness:
     03-coding: developer
     04-review: reviewer
     05-archive: archivist
+  # 04 阶段的审查编排（A4 的 3.2）。stage_roles 的 04-review 保留为单角色回落。
+  review:
+    objective:
+      # 客观轨：纯程序判定，无 LLM。实现属 A6，此处只声明意图。
+      enabled: true
+    # 主观轨审查者。**故意留空**：多角色的图编排属 A5，尚未落地，
+    # 此刻填上就会出现「配置声称两个审查者、实际只跑一个」的静默背离。
+    # 角色定义（adversary / design_critic）已就绪，A5 落地后把它们写进来即可，
+    # 无需改 Python（A4 的验收 14）。
+    subjective: []
+    # 默认 false：当前五个角色全是 opencode，开启会直接让配置报错（A4 的 R2）。
+    # **这不是因为同构可接受** —— 关闭时 resolve_review_config() 会把
+    # heterogeneous_status 标成 degraded，A10 的报告须据此标注「审查者同构」。
+    require_heterogeneous: false
   worktree_dir: .worktrees
