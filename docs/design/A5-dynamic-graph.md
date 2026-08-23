@@ -237,3 +237,85 @@ def _dispatch_reviewers(state: WorkflowState):
 
 > 摩擦点记录：若发现 LangGraph 的并行路径难以在单测里稳定复现，
 > 记录下来 —— 这直接影响 A11 变异探针的可行性。
+
+---
+
+## 11. 实施记录
+
+实施于 2026-08-24。落盘：`sw_lib/workflow/review_graph.py`（新增）、
+`sw_lib/workflow/graph.py`（04 展开为子图）、`sw_lib/workflow/state.py`
+（两个并行结果容器）、`sw_lib/workflow/base.py`（`role_id` 与按角色落盘）、
+`sw_lib/core/config.py`（`max_parallel`）、`config/config.yaml`。
+测试 25 条分五个文件。
+
+### 11.1 实测的 langgraph 0.6.11 行为
+
+实现前后用探针实测，以下均为观测结果而非推断：
+
+| # | 行为 | 观测 |
+|---|---|---|
+| 1 | `Send` 复用同一节点承载 N 个分支 | 成立，无需按数量预建节点 |
+| 2 | 分支间看不到兄弟的 reducer 字段 | 成立，隔离天然满足（3.3） |
+| 3 | **失败不隔离** | ⚠️ 一个分支抛异常**整图崩**，其余结果全丢。故 3.4 的失败隔离必须由节点内部 try/except 兜住 |
+| 4 | 真并发 | 4 分支各 sleep 0.3s 总耗时 0.32s，4 个 ThreadPoolExecutor 线程，区间重叠 |
+| 5 | 原生 `max_concurrency` | 有效：4 分支设 2 时运行时峰值确为 2。故 `max_parallel` 走它而非自己分批 |
+| 6 | `dispatch` 返回空列表 | 不报错，正常走到 arbiter |
+
+### 11.2 实现中发现的三个真问题
+
+这三个都不是设计文档预见到的，且都会静默失效：
+
+1. **并行审查者共写 `04-review.md` 会丢产出**。探针实测两个 runnable 并发调
+   `_save_stage_output`，落盘后**只剩后写的那一份**，前者完全消失且无报错。
+   根因是复用同一 nonce 并替换同一产出区。已改为多审查者时按
+   `04-review.<role>.md` 分文件、nonce 按 `stage:role` 分作用域。
+2. **单角色回落时 `role_id` 非空**（值为 `reviewer`），若据此改名会让门禁校验
+   与事实包读不到产出。e2e 现场表现为 `stage file has no AI Output`，
+   **而单元测试全绿** —— 典型的「单元绿 != 机制接通」。已改为只在
+   `len(subjective) >= 2` 时分文件。
+3. **新增属性会被 `flush_output` 的 `except` 吞掉**。既有测试用 `__new__` 手工
+   构造实例，`self.role_id` 直接取会抛 `AttributeError`，被吞成「没有产出」。
+   已改用 `getattr`。静默丢产出正是本任务要防的失效模式，却差点由本任务引入。
+
+### 11.3 验收结果
+
+| # | 判据 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | 两个审查者实际启动 2 个、模型各自不同 | ✅ | `test_two_reviewers_actually_invoke_two_agents`（数真实 invoke 次数）+ `test_each_branch_carries_its_own_model` |
+| 2 | 改三个不动 Python | ✅ | `test_three_reviewers_without_python_change` |
+| 3 | 零主观审查者仅客观轨、不报错 | ✅ | `test_objective_only_when_no_subjective_and_objective_on` |
+| 4 | 分支 payload 不含兄弟产出 | ✅ | `test_branch_payload_excludes_sibling_findings`（含非空守卫，防空转通过） |
+| 5 | 一分支异常其余仍完成、记 `status: error` | ✅ | `test_one_failing_branch_does_not_kill_others`；变异探针证实去掉 try/except 整图崩，故断言有判别力 |
+| 6 | `review_findings` 条目数等于分支数 | ✅ | `test_findings_count_equals_branch_count`（4 分支） |
+| 7 | 既有测试行为不变 | ✅ | 单元 1246 passed / 1 skipped（基线 1213 + 新增 25），e2e 32/32 |
+| — | `max_parallel` 在真实执行路径限流 | ✅ | `test_runtime_peak_concurrency_respects_max_parallel` 数运行时峰值而非批次长度 |
+| — | 多审查者产出不互相覆盖 | ✅ | `test_parallel_role_writes_all_survive`；真实链路验证两份产出均落盘 |
+
+### 11.4 未兑现与需拍板
+
+| # | 事项 | 状态 |
+|---|---|---|
+| 1 | **`config.yaml` 的 `subjective` 仍为空** | ❓ 能力已通但未启用 |
+| 2 | 客观轨节点是占位（`status: not_implemented`） | ❌ 属 A6 |
+| 3 | 仲裁器是空节点 | ❌ 属 A9 |
+| 4 | R2：TUI 单 agent 假设 | 部分缓解 |
+| 5 | R3：`MockAgent` 未按 role 区分产出 | ❓ |
+
+**第 1 项是本任务最重要的拍板点。** A5 已让「填两个角色就真跑两个」成立
+（真实链路实测：两个审查者各自落盘、产出零丢失），但**仲裁器属 A9 尚未实现**：
+实测填上两个审查者后 `StageOutput.route` 为 `None`、`gate_passed` 为 `False`，
+TUI 会卡在 04 阶段推不动。
+
+所以现在填上去的后果不是「声称两个只跑一个」，而是**「两个都跑了但没人下结论」**。
+故仍留空，并用 `test_review_arbiter_contract.py` 的
+`test_config_does_not_enable_multi_reviewers_before_arbiter` 守住这个前置条件 ——
+A9 落地后取消 YAML 注释、删掉该守护测试即可，无需改 Python。
+
+R2 的缓解程度需说清：`review_graph.active_roles()` 提供「当前在跑的全部角色」，
+实测并行 3 分支时峰值确为 3，而同一时刻 `adapter.active_stage` 只反映其中一个。
+但**注册表尚未接入 TUI / Web 的渲染代码** —— 显示层要用它才有意义，
+故 R2 只是「可查」，不是「已显示」。
+
+> 摩擦点（供 A11 参考）：并行路径在单测里**可以**稳定复现 ——
+> 用 `threading.Lock` 数运行时峰值并发比断言耗时可靠得多，后者在 CI 上会抖。
+> 变异探针（去掉 try/except 看是否整图崩）也工作良好，A11 可沿用这个手法。

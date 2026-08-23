@@ -111,11 +111,23 @@ harness:
     objective:
       # 客观轨：纯程序判定，无 LLM。实现属 A6，此处只声明意图。
       enabled: true
-    # 主观轨审查者。**故意留空**：多角色的图编排属 A5，尚未落地，
-    # 此刻填上就会出现「配置声称两个审查者、实际只跑一个」的静默背离。
-    # 角色定义（adversary / design_critic）已就绪，A5 落地后把它们写进来即可，
-    # 无需改 Python（A4 的验收 14）。
+    # 主观轨审查者。**仍然故意留空**，但原因已随 A5 落地而改变：
+    #
+    # A5 已把 fan-out / fan-in 建好并实测通过 —— 填两个角色确实会真的跑起
+    # 两个审查者、各自落到 04-review.<role>.md，产出不再互相覆盖。
+    # 但 fan-in 之后的**仲裁器属 A9，尚未实现**：实测填上两个审查者后
+    # StageOutput.route 为 None、gate_passed 为 False，TUI 会卡在 04 阶段
+    # 推不动（A5 的 11.1）。
+    #
+    # 所以现在填上去的后果不是「声称两个只跑一个」，而是「两个都跑了但没人
+    # 下结论」。A9 落地后把下面两行取消注释即可，无需改 Python：
+    #   - {role: adversary, model: opencode/mimo-v2.5-free, kind: counterexample}
+    #   - {role: design_critic, model: opencode/mimo-v2.5-free, kind: design_review}
+    # tests/unit/workflow/test_review_arbiter_contract.py 会守住这个前置条件。
     subjective: []
+    # 并发上限（A5 的 3.5）。多个 LLM 同时打同一 provider 会撞限流，
+    # 而限流失败若被记成「审查者无发现」，故障就变成了放行理由。
+    max_parallel: 3
     # 默认 false：当前五个角色全是 opencode，开启会直接让配置报错（A4 的 R2）。
     # **这不是因为同构可接受** —— 关闭时 resolve_review_config() 会把
     # heterogeneous_status 标成 degraded，A10 的报告须据此标注「审查者同构」。

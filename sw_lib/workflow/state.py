@@ -30,3 +30,11 @@ class WorkflowState(TypedDict):
     # Flag to indicate if the current stage passed its gate
     gate_passed: bool
 
+    # ── A5 的 3.2：04-review 的并行结果容器 ──
+
+    # 主观轨结果：每个 reviewer 追加一条。**必须用 reducer**，
+    # 否则 fan-in 时并发写相互覆盖，只剩最后一条（A5 的 3.2）。
+    review_findings: Annotated[List[Dict[str, Any]], add]
+
+    # 客观轨结果：单份，直接覆盖。
+    objective_result: Optional[Dict[str, Any]]

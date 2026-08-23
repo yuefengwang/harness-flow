@@ -102,6 +102,7 @@ class StageRunnable(HarnessRunnable):
         output_parser,
         gate_validator,
         agent_factory: Callable[..., Any],
+        role_id: Optional[str] = None,
     ):
         self.stage = stage
         self.stage_idx = stage_idx
@@ -109,6 +110,7 @@ class StageRunnable(HarnessRunnable):
         self.output_parser = output_parser
         self.gate_validator = gate_validator
         self.agent_factory = agent_factory
+        self.role_id = role_id
 
         self._agent_output_lines: List[Tuple[str, str]] = []
         self._agent_text_buffer: List[str] = []
@@ -125,6 +127,54 @@ class StageRunnable(HarnessRunnable):
         self._invoke_done = threading.Event()       # invoke() fully complete
 
     # ── Public API ──
+
+    @property
+    def output_scope(self) -> str:
+        """`.state` 中产出区（nonce）的作用域键。
+
+        多审查者并行时必须按角色分开：探针实测共用 nonce 会让两个角色
+        争抢同一个产出区边界（A5 的 R1）。
+        """
+        role_id = self._scoping_role_id()
+        if role_id:
+            return f"{self.stage}:{role_id}"
+        return self.stage
+
+    @property
+    def output_filename(self) -> str:
+        """本 runnable 的落盘文件名。
+
+        无 role_id 时保持 `04-review.md` **不变** —— 既有的门禁校验、归档与
+        事实包都按这个名字读取（验收 7 的向后兼容）。
+        有 role_id 时按角色分文件：探针实测并发写同一文件会静默丢掉
+        N-1 份审查产出，而报告仍显示「已审查」。
+        """
+        role_id = self._scoping_role_id()
+        if role_id:
+            return f"{self.stage}.{role_id}.md"
+        return f"{self.stage}.md"
+
+    def _scoping_role_id(self) -> Optional[str]:
+        """需要按角色分文件时返回 role_id，否则返回 None。
+
+        只有**真的配了多个主观审查者**时才分文件。单角色回落时 role_id 也非空
+        （值为 `reviewer`），若据此改名，门禁校验和事实包都会读不到产出 ——
+        e2e 实测现场是「stage file has no AI Output」，而单元测试全绿。
+
+        getattr 而非直接取属性：既有测试与部分调用方用 `__new__` 手工构造实例、
+        只设几个字段，直接取会抛 AttributeError 并被 flush_output 的 except
+        吞成「没有产出」—— 静默丢产出正是本改动要防的事。
+        """
+        role_id = getattr(self, "role_id", None)
+        if not role_id:
+            return None
+        try:
+            from ..core.config import resolve_review_config
+            if len(resolve_review_config().subjective) < 2:
+                return None
+        except Exception:
+            return None
+        return role_id
 
     def flush_output(self, task_name: str) -> bool:
         """把 agent 目前为止的产出落盘，不关闭 agent。返回是否写入。
@@ -522,13 +572,13 @@ class StageRunnable(HarnessRunnable):
             return
 
         task_dir = TASKS / task_name
-        stage_file = task_dir / f"{self.stage}.md"
+        stage_file = task_dir / self.output_filename
 
         existing = ""
         if stage_file.exists():
             existing = stage_file.read_text(encoding="utf-8")
 
-        nonce = stage_state.issue_output_nonce(task_name, self.stage)
+        nonce = stage_state.issue_output_nonce(task_name, self.output_scope)
         block = stage_state.render_output_block(nonce, output)
 
         region = stage_state.split_output_region(existing)

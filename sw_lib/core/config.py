@@ -105,6 +105,22 @@ class SubjectiveReviewer:
     tools: Optional[List[str]] = None
 
 
+DEFAULT_MAX_PARALLEL = 3
+
+
+def _parse_max_parallel(raw: Any) -> int:
+    """解析 review.max_parallel。非法值回落默认值而不是崩。
+
+    0 或负数会让 plan_batches 无法分批（无限循环或空批），
+    所以下限钳到 1：宁可串行，不可不跑。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PARALLEL
+    return max(1, value)
+
+
 @dataclass
 class ReviewConfig:
     """harness.review 的解析结果。供 A5 的图构建消费。"""
@@ -112,6 +128,9 @@ class ReviewConfig:
     subjective: List[SubjectiveReviewer] = field(default_factory=list)
     require_heterogeneous: bool = False
     heterogeneous_status: str = "unknown"
+    # 并发上限（A5 的 3.5）。多个 LLM 同时打同一 provider 会撞限流，
+    # 而限流失败会被误记为「审查者无发现」—— 故障不该变成放行理由。
+    max_parallel: int = 3
 
 @dataclass
 class MockAgentConfig:
@@ -214,6 +233,7 @@ class ConfigManager:
             # **不是因为同构可接受** —— 关闭时 resolve_review_config()
             # 会把状态标成 degraded，供 A10 的报告标注「审查者同构」。
             require_heterogeneous=bool(review_data.get("require_heterogeneous", False)),
+            max_parallel=_parse_max_parallel(review_data.get("max_parallel")),
         )
 
     def _load_raw_yaml(self) -> Dict[str, Any]:
@@ -566,6 +586,7 @@ def resolve_review_config() -> ReviewConfig:
         subjective=list(review.subjective),
         require_heterogeneous=review.require_heterogeneous,
         heterogeneous_status=status,
+        max_parallel=review.max_parallel,
     )
 
 
