@@ -9,6 +9,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -237,6 +238,11 @@ class Verifier:
                 self.check("04-review", "Route decision recorded", False,
                            "no route in .state")
 
+        # ── 事实包（A3）与 03 声明 ──
+        # A3 交付时 e2e 完全不看 facts，事实包是否正常只有手工验证过 ——
+        # 那不是自动回归。这里补上。
+        self.verify_fact_pack()
+
         # ── 汇总 ──
         total = len(self.results)
         passed = total - self.errors
@@ -245,6 +251,81 @@ class Verifier:
         print(f"{'='*50}")
 
         return self.errors == 0
+
+    def verify_fact_pack(self):
+        """04 的事实包必须真的生成、且 manifest 与磁盘一致（A3）。
+
+        判据不是「facts 目录存在」—— 空目录也存在。要数文件、验哈希、
+        并确认 03 的结构化声明真的落了盘。
+        """
+        print(f"\n--- Fact Pack (A3) ---")
+        facts = self.task_dir / "facts"
+        if not facts.is_dir():
+            self.check("facts", "Fact pack generated", False, "facts/ 不存在")
+            return
+
+        manifest_file = facts / "manifest.json"
+        self.check("facts", "manifest.json exists", manifest_file.is_file())
+        if not manifest_file.is_file():
+            return
+
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            self.check("facts", "manifest.json parseable", False, str(e))
+            return
+
+        digests = manifest.get("files") or {}
+        self.check("facts", "Fact files recorded in manifest",
+                   len(digests) >= 8, f"{len(digests)} files")
+
+        # 哈希逐个复算：manifest 声称的摘要必须与磁盘一致，
+        # 否则「事实包未被篡改」这句话没有依据。
+        mismatched = []
+        missing = []
+        for name, expect in digests.items():
+            p = facts / name
+            if not p.is_file():
+                missing.append(name)
+                continue
+            actual = hashlib.sha256(p.read_bytes()).hexdigest()
+            if actual != expect:
+                mismatched.append(name)
+        self.check("facts", "All manifest files present", not missing,
+                   f"missing={missing}" if missing else "")
+        self.check("facts", "Manifest hashes match disk", not mismatched,
+                   f"mismatched={mismatched}" if mismatched else "")
+
+        # tests.json 必须给出**显式**判据。三态不得二态化：mock 模式记
+        # `parse_status: mock` 且 `ran: false`，那是「未执行」不是「通过」。
+        tj = facts / "tests.json"
+        if tj.is_file():
+            try:
+                tests = json.loads(tj.read_text(encoding="utf-8"))
+                status = tests.get("parse_status")
+                self.check("facts", "tests.json has explicit status",
+                           status not in (None, ""), f"parse_status={status}")
+                # `ran` 必须存在且是布尔 —— 缺失意味着无法分辨「跑了没发现问题」
+                # 与「根本没跑」，而后者被当成前者正是要防的失效模式。
+                self.check("facts", "tests.json declares whether it ran",
+                           isinstance(tests.get("ran"), bool),
+                           f"ran={tests.get('ran')}")
+                if tests.get("ran") is False:
+                    self.check("facts", "Not-run is not reported as pass",
+                               tests.get("passed") is None
+                               and status in ("mock", "unavailable", "not_run"),
+                               f"status={status} passed={tests.get('passed')}")
+            except Exception as e:
+                self.check("facts", "tests.json parseable", False, str(e))
+
+        # 03 的结构化声明（A3 的 3.5）。mock 场景下 MockAgent 未必填写，
+        # 所以只要求「字段存在」而不要求非空 —— 但字段缺失说明没人调用
+        # record_claims()，那是真缺口。
+        claims = ((self.state().get("stages") or {})
+                  .get("03-coding", {}).get("claims"))
+        self.check("facts", "03 claims recorded in .state",
+                   isinstance(claims, dict),
+                   f"claims={claims}" if claims is not None else "claims 字段缺失")
 
     def save_report(self):
         """保存验收报告到任务目录。"""

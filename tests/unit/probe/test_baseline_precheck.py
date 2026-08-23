@@ -21,24 +21,31 @@ ROOT = Path(__file__).resolve().parents[3]
 
 # ── 验收 1：识别 A6-A9 的实施状态 ──
 
-def test_review_side_modules_are_the_four_plus_probe():
-    """被检查的对象必须是审查侧四件套（A6-A9 的核心产出）。
+def test_review_side_modules_cover_a5_too():
+    """被检查的对象必须覆盖全部改了审查侧的任务，不止 A6-A9。
 
-    少一个就意味着那个维度的污染检不出来，而基线会自称干净。
+    原判据只列 A6-A9 四件套，于是 A5 落盘（04 展开为并行子图）之后判据
+    仍报 clean —— 基线会把 A5 的效果算进 A6-A9 的功劳。
+    少一个维度就意味着那个维度的污染检不出来，而基线会自称干净。
     """
     names = {Path(p).name for p in bl.REVIEW_SIDE_MODULES}
 
     assert names == {"objective_check.py", "counterexample.py",
-                     "design_review.py", "arbiter.py"}, names
+                     "design_review.py", "arbiter.py",
+                     "review_graph.py"}, names
 
 
-def test_check_detects_clean_review_side():
-    """当前仓库审查侧应为原始状态 —— 这是 B0 能成立的前提（2.1）。"""
+def test_check_reports_a4_a5_as_contaminated():
+    """A4/A5 已落盘，必须如实报出污染 —— 不得自称干净。
+
+    这条原本断言 `clean is True`。A4/A5 落地后那个前提不再成立，
+    继续断言干净等于让基线说谎。
+    """
     result = bl.check_review_side_clean()
 
-    assert result.get("clean") is True, (
-        f"审查侧已被改造，基线的对应维度已污染: {result}")
-    assert result.get("contaminated_dimensions") == [], result
+    assert result.get("clean") is False, result
+    dims = result.get("contaminated_dimensions", [])
+    assert "A4" in dims and "A5" in dims, f"A4/A5 已落盘却未报污染：{dims}"
 
 
 def test_check_reports_contamination_when_module_exists(tmp_path, monkeypatch):
@@ -69,14 +76,19 @@ def test_purity_detail_records_a0_a1_as_already_implemented():
     detail = bl.check_review_side_clean().get("purity_detail", {})
 
     assert detail.get("implemented_before_capture") == ["A0", "A1", "A2"], detail
+    # A4/A5 已落盘，不再属于 untouched；A6-A9 仍未实施。
     assert set(detail.get("review_side_untouched", [])) == {"A6", "A7", "A8", "A9"}, detail
     assert detail.get("note"), "必须写明该基线只对『审查能力』这一观测量有效"
 
 
-def test_purity_label_is_review_side_clean():
-    """`baseline_purity` 的取值不得是「完整改造前基线」（1.3）。"""
+def test_purity_label_reflects_actual_contamination():
+    """`baseline_purity` 必须反映实际污染状态。
+
+    A4/A5 已落盘时报 `review_side_clean` 是不诚实的 —— 那正是
+    「用一个未经自校验的实现去构建自校验机制」的具体形态。
+    """
     assert bl.check_review_side_clean().get("baseline_purity") == \
-        "review_side_clean"
+        "partially_contaminated"
 
 
 # ── 验收 2：git 指纹如实记录 ──

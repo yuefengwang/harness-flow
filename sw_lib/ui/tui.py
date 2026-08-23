@@ -568,7 +568,17 @@ class MonitorTUI:
         if self.state.agent_status == "connecting": status_text = " [yellow]连接中...[/]"
         elif self.state.agent_status == "waiting": status_text = " [yellow]Agent 正在思考...[/]"
         elif self.state.agent_status == "error": status_text = " [bold red]连接异常[/]"
-        
+
+        # 04 并行审查时 active_stage 是单值、只反映其中一个分支，
+        # 直接显示会让用户以为只跑了一个审查者（A5 的 R2）。
+        try:
+            from ..workflow.review_graph import active_roles_label
+            reviewers = active_roles_label()
+        except Exception:
+            reviewers = ""
+        if reviewers:
+            status_text += f" [cyan]({reviewers})[/]"
+
         return Panel(
             Text.from_markup(f"{title}{status_text}"),
             box=box.ROUNDED,

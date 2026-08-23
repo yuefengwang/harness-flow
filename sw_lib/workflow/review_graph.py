@@ -269,6 +269,18 @@ def active_roles() -> Set[str]:
         return set(_active_roles)
 
 
+def active_roles_label() -> str:
+    """供显示层用的聚合标签，无并行审查者时为空串。
+
+    单值的 `adapter.active_stage` 在并行时只反映其中一个分支，
+    直接显示它会让用户以为只跑了一个审查者。排序固定，避免界面逐帧抖动。
+    """
+    roles = sorted(active_roles())
+    if not roles:
+        return ""
+    return f"{len(roles)} 审查者: {', '.join(roles)}"
+
+
 def ui_multi_agent_status() -> Dict[str, Any]:
     """R2 的状态声明，供 A10 的报告消费。
 

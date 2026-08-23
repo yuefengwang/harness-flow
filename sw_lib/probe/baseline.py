@@ -47,6 +47,10 @@ REVIEW_SIDE_MODULES: Tuple[str, ...] = (
     "sw_lib/workflow/counterexample.py",    # A7 攻击者
     "sw_lib/workflow/design_review.py",     # A8 设计审视者
     "sw_lib/workflow/arbiter.py",           # A9 仲裁器
+    # A4/A5 也改了审查侧：04-review 不再是单 reviewer，
+    # 审查者数量与模型都由配置决定。漏掉它们会让基线把 A4/A5 的效果
+    # 算进 A6-A9 的功劳（实测：A5 落盘后判据仍报 clean）。
+    "sw_lib/workflow/review_graph.py",      # A5 动态并行子图
 )
 
 _MODULE_TO_TASK = {
@@ -54,7 +58,12 @@ _MODULE_TO_TASK = {
     "counterexample.py": "A7",
     "design_review.py": "A8",
     "arbiter.py": "A9",
+    "review_graph.py": "A5",
 }
+
+# A4 没有独立模块文件（改的是 config.py），靠配置形态判定：
+# `harness.review` 段存在即说明多角色审查编排已落地。
+_A4_MARKER = "config/config.yaml"
 
 # 采集时点已落盘的改造。它们构成基线的既有污染，必须如实记录 ——
 # 严格的「改造前」应在 A0 之前，那个时点已经错过（B0 的 1.3）。
@@ -63,10 +72,12 @@ IMPLEMENTED_BEFORE_CAPTURE: Tuple[str, ...] = ("A0", "A1", "A2")
 _PURITY_NOTE = (
     "严格的改造前基线应在 A0 之前，该时点已错过。"
     "本基线仅对『审查能力』这一观测量有效："
-    "采集时 04-review 仍是单 reviewer 角色，"
-    "客观轨 / 攻击者 / 设计审视者 / 仲裁器均未实施。"
+    "污染维度以 contaminated_dimensions 为准，"
+    "未实施维度以 review_side_untouched 为准 —— "
+    "两者都由文件存在性实测得出，不靠文档标记。"
     "A11 引用本数据时只能表述为「审查侧改造带来的提升」，"
-    "不得表述为「全套设计带来的提升」。"
+    "不得表述为「全套设计带来的提升」，"
+    "且必须扣除 contaminated_dimensions 中已落盘维度的贡献。"
 )
 
 
@@ -83,7 +94,13 @@ def check_review_side_clean() -> Dict[str, Any]:
             if task:
                 contaminated.append(task)
 
-    untouched = [t for t in _MODULE_TO_TASK.values() if t not in contaminated]
+    # A4 改的是 config.py 与 config.yaml，没有独立模块文件，
+    # 用配置形态判定：`harness.review` 段存在即说明多角色编排已落地。
+    if _a4_landed():
+        contaminated.append("A4")
+
+    untouched = [t for t in set(_MODULE_TO_TASK.values()) | {"A4"}
+                 if t not in contaminated]
     return {
         "clean": not contaminated,
         "contaminated_dimensions": sorted(contaminated),
@@ -95,6 +112,20 @@ def check_review_side_clean() -> Dict[str, Any]:
             "note": _PURITY_NOTE,
         },
     }
+
+
+def _a4_landed() -> bool:
+    """A4（多角色审查编排）是否已落盘。
+
+    判据是 `harness.review` 段存在，而不是文档标记 ——
+    PARALLEL.md 的教训是 README 的 ✅ 只表示设计写完。
+    """
+    try:
+        import yaml
+        raw = yaml.safe_load((ROOT / _A4_MARKER).read_text(encoding="utf-8")) or {}
+        return isinstance((raw.get("harness") or {}).get("review"), dict)
+    except Exception:
+        return False
 
 
 def _git(*args: str) -> str:

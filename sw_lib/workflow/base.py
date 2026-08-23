@@ -602,3 +602,47 @@ class StageRunnable(HarnessRunnable):
         fixed = apply_mock_template_fixups(new_content, self.stage)
         if fixed != new_content:
             stage_file.write_text(fixed, encoding="utf-8")
+
+        # 03 的结构化声明落进 .state（A3 的 3.5）。
+        # 这里而不是 invoke() 末尾：多轮模式下 flush_output 也会走到这条路径，
+        # 声明应当随每次落盘一起刷新，否则 04 读到的是上一轮的旧声明。
+        if self.stage == "03-coding":
+            self._record_coding_claims(task_name, stage_file)
+
+    def _record_coding_claims(self, task_name: str, stage_file):
+        """把 03 产出里的声明解析出来写进 `.state`。
+
+        失败只记日志不抛：声明是给 04 对照用的辅助信息，
+        解析失败不该让整个阶段的产出落盘失败。
+        """
+        try:
+            from . import fact_pack
+            body = stage_file.read_text(encoding="utf-8", errors="replace")
+            # 只解析围栏内的 AI 产出区。整篇解析会先撞上模板里的空占位段
+            # （`- **Verify cmd**: `___`` 与空的 Files Touched），
+            # 于是 agent 的真实声明被抢先匹配掉 —— 实测过这个现象。
+            body = self._agent_output_region(body)
+            claims = fact_pack.extract_claims(body)
+            fact_pack.record_claims(
+                task_name,
+                task_ids=claims["task_ids"],
+                verify_cmd=claims["verify_cmd"],
+                files_touched=claims["files_touched"],
+            )
+        except Exception as e:
+            sw_log(task_name, f"03 声明解析失败（不影响产出）: {e}", "sw")
+
+    @staticmethod
+    def _agent_output_region(content: str) -> str:
+        """取出围栏内的 agent 产出。没有围栏时返回原文。
+
+        围栏由 sw 写入、nonce 不可预测，所以「哪段是 agent 说的」是确定的，
+        不需要靠猜标题位置。
+        """
+        region = stage_state.split_output_region(content)
+        if region is None:
+            return content
+        before, after = region
+        # split_output_region 给的是区前与区后，产出区本身要从原文里减出来。
+        inner = content[len(before):len(content) - len(after)] if after else content[len(before):]
+        return inner or content

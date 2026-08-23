@@ -16,6 +16,11 @@
 - **Pattern**: ___
 - **Decisions**: ___
 
+## Files Touched
+<!-- 逐条列出本次改动的文件路径。这是**声明**，不是事实：
+     04 阶段会把它与真实 diff 对照，漏报或多报都会被指出。 -->
+- ___
+
 ## Gate
 <!-- 由 sw 渲染，编辑无效；签署状态存于 .state -->
 - [ ] Code builds & tests pass

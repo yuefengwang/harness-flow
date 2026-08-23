@@ -8,6 +8,7 @@ sw_lib.config — 路径定义、阶段声明及配置模型化管理。
 """
 
 import os
+import re
 
 import yaml
 from pathlib import Path
@@ -44,6 +45,40 @@ AUTO_ADVANCE_MAX_STAGES = 12
 
 # ── 配置模型 ──
 
+# 已知的模型族前缀。用于把网关路径（`opencode/glm-5-free`）归约到厂商
+# （`glm`），因为异构性看的是「谁训练的」，不是「从哪个网关调的」。
+#
+# 顺序有意义：先匹配长的，避免 `gpt-5` 抢在 `gpt-5-codex` 之前之类的歧义。
+# 表里没有的模型会走通用切分兜底，所以新增免费模型无需改这里。
+_MODEL_FAMILIES = (
+    "claude", "gemini", "deepseek", "minimax", "nemotron", "trinity",
+    "longcat", "laguna", "muse-spark", "big-pickle", "north-mini",
+    "mimo", "kimi", "qwen", "grok", "glm", "gpt", "ling", "ring", "hy",
+)
+
+
+def model_family(model: str) -> str:
+    """从模型标识里取出厂商/模型族，取不出时返回空串。
+
+    `opencode/glm-5-free` -> `glm`，`gemini-2.0-flash` -> `gemini`。
+
+    兜底策略是按分隔符切首段而不是返回空：这样表里没登记的新模型
+    （免费模型列表在不断变动）仍能得到一个稳定且大概率正确的族名，
+    而不是静默退化成「全部同构」。
+    """
+    if not model:
+        return ""
+    tail = model.rsplit("/", 1)[-1].strip().lower()
+    if not tail:
+        return ""
+    for family in _MODEL_FAMILIES:
+        if tail.startswith(family):
+            return family
+    # 兜底：切到第一个数字或分隔符之前，例如 `foobar-3.1-free` -> `foobar`。
+    head = re.split(r"[-_.]|\d", tail, maxsplit=1)[0]
+    return head or tail
+
+
 @dataclass
 class RoleConfig:
     """单个 AI 角色/座席的配置"""
@@ -71,7 +106,11 @@ class RoleConfig:
     def provider(self) -> str:
         """角色所属的模型供应方（A4 的 3.5）。
 
-        `opencode/mimo-v2.5-free` -> `opencode`；无 `/` 时回落到 `agent` 字段。
+        取的是**模型族**而不是网关名：`opencode/glm-5-free` -> `glm`。
+
+        为什么不能用网关名：`opencode` 背后代理了 29 个不同厂商的免费模型，
+        取 `model.split("/")[0]` 会让 glm 与 kimi 都变成 `opencode`，
+        于是不同厂商被判同构、`require_heterogeneous` 永远开不起来。
 
         ⚠️ 这是**廉价代理指标，不是先验独立性的证明**（A4 的 U4-3）：
         同一家的两个模型 provider 相同会被拒，而不同家的模型若共享训练数据，
@@ -79,9 +118,7 @@ class RoleConfig:
         """
         if self.provider_override:
             return self.provider_override
-        if "/" in self.model:
-            return self.model.split("/", 1)[0]
-        return self.agent
+        return model_family(self.model) or self.agent
 
 
 class ConfigError(Exception):
@@ -428,8 +465,10 @@ def _heterogeneity_issues(cfg: "HarnessConfigModel") -> List[ConfigIssue]:
 
     def provider_of(entry: SubjectiveReviewer) -> str:
         role = cfg.roles[entry.role]
+        # subjective[].model 覆盖角色默认模型时，provider 也应随之变化；
+        # 但显式 provider_override 优先（R3 的自建网关场景）。
         if entry.model and not role.provider_override:
-            return entry.model.split("/", 1)[0] if "/" in entry.model else role.agent
+            return model_family(entry.model) or role.agent
         return role.provider
 
     violations: List[str] = []

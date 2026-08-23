@@ -123,7 +123,13 @@ def test_no_reviewer_at_all_is_error():
 # ── 验收 7：provider 派生 ──
 
 def test_provider_from_model_prefix():
-    assert _role(model="opencode/mimo-v2.5-free").provider == "opencode"
+    """provider 取**模型族**而不是网关名。
+
+    原判据是 `opencode/mimo-v2.5-free` -> `opencode`，那让 `opencode` 网关下
+    29 个不同厂商的免费模型全部同构，`require_heterogeneous` 永远开不起来。
+    详见 tests/unit/core/test_provider_model_family.py。
+    """
+    assert _role(model="opencode/mimo-v2.5-free").provider == "mimo"
 
 
 def test_provider_falls_back_to_agent_when_model_has_no_slash():
@@ -143,16 +149,17 @@ def test_same_provider_reviewers_rejected_when_heterogeneous_required():
     cfg = C._manager.config
     cfg.roles = {
         "developer": _role(model="gemini/gemini-2.0-flash"),
-        "adversary": _role(model="opencode/mimo-v2.5-free"),
-        "design_critic": _role(model="opencode/other-model"),
+        # 同厂商不同版本 —— 盲区重合看厂商，不看版本号。
+        "adversary": _role(model="opencode/glm-5-free"),
+        "design_critic": _role(model="opencode/glm-4.7-free"),
     }
     cfg.stage_roles = {"03-coding": "developer", "04-review": "adversary"}
     cfg.review = C.ReviewConfig(
         require_heterogeneous=True,
         subjective=[
-            C.SubjectiveReviewer(role="adversary", model="opencode/mimo-v2.5-free",
+            C.SubjectiveReviewer(role="adversary", model="opencode/glm-5-free",
                                  kind="counterexample"),
-            C.SubjectiveReviewer(role="design_critic", model="opencode/other-model",
+            C.SubjectiveReviewer(role="design_critic", model="opencode/glm-4.7-free",
                                  kind="design_review"),
         ],
     )

@@ -495,6 +495,55 @@ def record_claims(task: str, *, task_ids: Optional[List[str]] = None,
     update_state(task, mutate)
 
 
+# 模板占位符。把 `___` 当成真实声明会让对照凭空多出不存在的条目。
+_PLACEHOLDERS = {"___", "[task id]", "n/a", "none", "-"}
+
+
+def _is_placeholder(value: str) -> bool:
+    v = value.strip().strip("`").strip().lower()
+    return (not v) or v in _PLACEHOLDERS or set(v) == {"_"}
+
+
+def extract_claims(text: str) -> Dict[str, Any]:
+    """从 03 产出里解析 agent 的结构化声明（A3 的 3.5）。
+
+    方案是**由 agent 声明**，而不是从 diff 反推：后者会让「声明对照 diff」
+    变成 diff 自己跟自己比，对照就失去了全部意义。
+
+    命名沿用 `claims` 而非 facts —— 这是 agent 的说法，未经核实。
+    A6 的职责之一是把 `files_touched` 与真实 diff 对照。
+    """
+    if not text:
+        return {"task_ids": [], "verify_cmd": "", "files_touched": []}
+
+    task_ids: List[str] = []
+    for raw in re.findall(r"^\s*`([^`]+)`\s*:", text, re.MULTILINE):
+        if not _is_placeholder(raw):
+            task_ids.append(raw.strip())
+
+    verify_cmd = ""
+    m = re.search(r"\*\*Verify cmd\*\*\s*:\s*`?([^`\n]*)`?", text, re.IGNORECASE)
+    if m and not _is_placeholder(m.group(1)):
+        verify_cmd = m.group(1).strip()
+
+    files: List[str] = []
+    section = re.search(
+        r"^##+\s*Files?\s+Touched\s*$(.*?)(?=^##|\Z)",
+        text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+    if section:
+        for line in section.group(1).splitlines():
+            item = line.strip()
+            if not item.startswith(("-", "*")):
+                continue
+            item = item.lstrip("-* ").strip()
+            # 两种写法都认：有人写反引号，有人不写。
+            item = item.strip("`").strip()
+            if item and not _is_placeholder(item) and item not in files:
+                files.append(item)
+
+    return {"task_ids": task_ids, "verify_cmd": verify_cmd, "files_touched": files}
+
+
 def read_claims(task: str) -> Dict[str, Any]:
     from ..core.state import read_state
 

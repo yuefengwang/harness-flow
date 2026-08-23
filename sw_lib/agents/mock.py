@@ -356,6 +356,27 @@ class MockAgent(BaseAgent):
             sw_log(self.name, f"mock coding write failed: {e}", "error")
         return written
 
+    # 各审查角色的关注点。mock 不做真判断，但产出必须**可区分** ——
+    # 否则「两个审查者」与「一个跑两遍」在产出上无从分辨，
+    # 多轨测试就失去了意义（A5 的 R3）。
+    _ROLE_FLAVORS = {
+        "adversary": "反例导向：只提可执行的反例，不写评语",
+        "design_critic": "设计视角：只看设计质量与需求符合度",
+        "reviewer": "通用审查：逻辑与实现一致性",
+    }
+
+    def role_flavored_output(self, body: str) -> str:
+        """给产出打上角色标记。无 role_id 时**原样返回**。
+
+        向后兼容是硬要求：单角色路径的既有 e2e 断言依赖具体文本，
+        无条件加装饰会把它们全部弄红。
+        """
+        role_id = getattr(self, "role_id", None)
+        if not role_id:
+            return body
+        flavor = self._ROLE_FLAVORS.get(role_id, "自定义审查角色")
+        return f"[role: {role_id}] {flavor}\n\n{body}"
+
     def _scenario_review(self):
         """04-review 专用场景：模拟代码审查并输出 Route 决策。
 
@@ -420,7 +441,7 @@ class MockAgent(BaseAgent):
                 "| 2 | 需修复项 | med | coding | 详见审查结论 |\n"
             )
 
-        self._say(output)
+        self._say(self.role_flavored_output(output))
 
     def _scenario_generic(self, stage_key: str):
         stage_name = STAGE_NAMES[self.stage_idx] if self.stage_idx < len(STAGE_NAMES) else stage_key
