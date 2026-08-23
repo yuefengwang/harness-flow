@@ -6,8 +6,6 @@ harness:
   # 与 auto_advance 正交 —— 默认 false，提问始终交还用户决策。
   # 无人值守跑批时用 ./sw init --unattended 临时开启。
   auto_answer: false
-  base_branch: dev
-  branch_prefix: harness
   repo_path: repo
   coding:
     # Red 见证（A2）。false = 03 阶段不拆子状态，走原有的 run_project_tests，

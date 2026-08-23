@@ -23,25 +23,48 @@ class TaskError(Exception):
     pass
 
 
-def _write_context_marker(target_dir: str, project_name: str, task_type: str):
-    """在目标目录创建 .sw-context 标记文件，用于项目自动发现"""
-    import json
-    marker_dir = Path(target_dir)
-    if not marker_dir.is_absolute():
-        marker_dir = Path.cwd() / target_dir
+def _prepare_target_dir(target_dir: str) -> Path:
+    """显式创建目标目录，失败即抛 TaskError。
+
+    A1 的 2.6：此前目录是 `_write_context_marker` 顺手建的，而那个函数整段包在
+    `except Exception: pass` 里 —— 创建失败被静默吞掉，`.state` 里仍留着一个
+    指向不存在目录的 `target_dir`，直到 deploy 或归档才炸，那时上下文已丢失。
+
+    相对路径的锚点**必须与 git_repo 一致**（都锚 harness 根），不能用
+    `Path.cwd()`：`repo_path: repo` 指的是 harness 根下的 `repo/`，而 `sw`
+    可以从任意目录调用。两处锚点不一致时目录建在一处、仓库初始化在另一处。
+    """
+    from .git_repo import resolve_target_dir
+    d = resolve_target_dir(target_dir)
     try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        marker = {
-            "project": project_name,
-            "target_dir": str(marker_dir.resolve()),
-            "type": task_type,
-            "created": now(),
-        }
-        (marker_dir / ".sw-context").write_text(
-            json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception:
-        pass  # marker 文件创建失败不阻塞任务创建
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise TaskError(
+            f"无法创建任务目标目录: {d}\n  原因: {e}\n"
+            f"  请检查路径是否可写、父路径是否为文件。") from e
+    if not d.is_dir():
+        raise TaskError(f"任务目标目录不可用: {d}")
+    return d
+
+
+def _write_context_marker(target_dir: str, project_name: str, task_type: str):
+    """在目标目录创建 .sw-context 标记文件，用于项目自动发现。
+
+    ⚠️ 时序：必须在**基线提交之前**写入（A1 的 2.5 实测）。
+    基线之后写会让 `git status` 显示 `?? .sw-context`，被误当成 agent 的产出
+    计入 diff；由 A3/A6/A10 各自过滤则是散落的隐性知识，漏一处就产生假事实。
+    """
+    import json
+    marker_dir = _prepare_target_dir(target_dir)
+    marker = {
+        "project": project_name,
+        "target_dir": str(marker_dir.resolve()),
+        "type": task_type,
+        "created": now(),
+    }
+    (marker_dir / ".sw-context").write_text(
+        json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 class TaskService:
@@ -116,11 +139,30 @@ class TaskService:
             target_dir=target_dir,
             created_at=state_data["created_at"])
 
-        if target_dir and target_dir != ".":
-            _write_context_marker(target_dir, clean_name, task_type)
+        # 目标仓库与基线锚定（A1 的 3.5）。
+        # 失败**必须让 create_task 抛错** —— 带着无效 target_dir 的任务在归档时
+        # 才炸，那时上下文已丢失（A1 的 2.6）。
+        self._init_task_repo(clean_name, target_dir, task_type)
 
         sw_log(clean_name, f"task created: {clean_name} (type={task_type})", "sw")
         return clean_name
+
+    def _init_task_repo(self, name: str, target_dir: str, task_type: str):
+        """建立任务级独立仓库并把基线写入 `.state` 的 `review` 键。
+
+        顺序不可调换：marker 与 `.gitignore` 都要**一并计入基线**，
+        这样 `.sw-context` 既不出现在后续 diff 里，也不会被当作 agent 产出。
+        """
+        from .git_repo import GitRepoError, record_baseline
+
+        if not target_dir:
+            return
+        if target_dir != ".":
+            _write_context_marker(target_dir, name, task_type)
+        try:
+            record_baseline(name, target_dir)
+        except GitRepoError as e:
+            raise TaskError(f"任务 {name} 的基线仓库初始化失败:\n{e}") from e
 
     def list_tasks(self, from_trash: bool = False) -> List[Dict[str, Any]]:
         """
