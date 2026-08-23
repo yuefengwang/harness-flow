@@ -60,9 +60,15 @@ class PromptBuilder:
         if project_info:
             parts.append(project_info)
 
-        previous = self._read_previous_stage(task_name, stage_idx)
-        if previous:
-            parts.append(previous)
+        # 04 阶段读事实包，其余阶段读上一阶段产出（A3 的 1.1 / 3.5）。
+        if stage == "04-review":
+            facts = self._read_fact_pack(task_name)
+            if facts:
+                parts.append(facts)
+        else:
+            previous = self._read_previous_stage(task_name, stage_idx)
+            if previous:
+                parts.append(previous)
 
         current_tpl = self._read_current_template(task_name, stage, stage_name)
         if current_tpl:
@@ -123,6 +129,43 @@ class PromptBuilder:
             if content:
                 return f"=== 前一阶段产出 ({prev_stage} / {STAGE_NAMES[stage_idx - 1]}) ===\n{content}"
         return None
+
+    #: 注入 04 prompt 的事实文件，及其顺序。
+    #: `03-coding.md` **不在其中，也不得被加入** —— 那正是 C1 的来源。
+    _FACT_ORDER = ("spec.md", "plan.md", "diff.stat", "diff.numstat",
+                   "tests.json", "diff.truncated", "diff.patch")
+
+    def _read_fact_pack(self, task_name: str) -> Optional[str]:
+        """把 `facts/` 注入 04 的 prompt，替代 developer 的自述。
+
+        C1（上下文污染）的直接落点：改造前这里读 `03-coding.md`，于是 04
+        拿到的是「我做完了，测试都过了」这类叙述，复核的对象是**叙述**
+        而不是事实。现在只注入 harness 用确定性程序生成的内容。
+
+        事实包不存在时返回**显式的缺失说明**，不静默回落到读 md ——
+        回落等于 C1 复原，且无人知晓（A3 的第 10 节把这条列为决策记录项）。
+        """
+        facts_dir = TASKS / task_name / "facts"
+        if not facts_dir.is_dir():
+            return ("=== 事实包（缺失）===\n"
+                    "harness 未能生成本任务的事实包。**不得据此判定通过** ——\n"
+                    "审查所需的客观输入不可得，应按 unavailable 处置并汇报。")
+
+        chunks = [
+            "=== 审查事实（由 harness 生成，developer 未参与编辑）===",
+            "本阶段**不提供** 03-coding 阶段的自由叙述：审查对象是事实，不是自述。",
+        ]
+        for name in self._FACT_ORDER:
+            path = facts_dir / name
+            if not path.is_file():
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+            if not content:
+                continue
+            chunks.append(f"--- facts/{name} ---\n{content}")
+        if len(chunks) == 2:
+            chunks.append("（事实包为空 —— 同样不得据此判定通过）")
+        return "\n\n".join(chunks)
 
     def _read_current_template(self, task_name: str, stage: str, stage_name: str) -> Optional[str]:
         path = TASKS / task_name / f"{stage}.md"

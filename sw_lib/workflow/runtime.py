@@ -184,4 +184,34 @@ class WorkflowRuntime:
         upsert_task_summary(name, stage=next_stage, stage_idx=next_idx,
                             stage_status="pending")
         sw_log(name, f"advanced to {next_stage} (via chain logic)", "sw")
+
+        # 进入 04 就重新生成事实包（A3 的 4.2：每次进入都重新生成）。
+        # 放在状态写盘之后：生成依赖 target_dir 与基线，而失败不该阻断推进 ——
+        # 但**必须留痕**。事实包缺失时 prompt 会注入显式的「缺失」说明
+        # （builder 的 _read_fact_pack），04 因此拿不到可据以判通过的输入，
+        # 而不是静默回落到读 03-coding.md 的自述。
+        if next_stage == "04-review":
+            cls._generate_fact_pack(name)
+
         return st
+
+    @staticmethod
+    def _generate_fact_pack(name: str) -> None:
+        """为 04 阶段生成事实包。失败只记日志，不抛。
+
+        为什么不抛：推进已经落盘，抛出去会让调用方看到「推进失败」而状态
+        已经变了。为什么不静默：C1 的解法依赖这份数据，缺了它审查就退回
+        自问自答 —— 所以失败必须出现在任务日志里，且 prompt 侧会显式声明缺失。
+        """
+        try:
+            from .fact_pack import FactPackError, generate
+
+            pack = generate(name)
+        except Exception as exc:   # noqa: BLE001 —— 生成失败不得阻断推进
+            sw_log(name, f"⚠️ 事实包生成失败: {exc}", "error")
+            return
+        if pack.warnings:
+            for w in pack.warnings:
+                sw_log(name, f"⚠️ 事实包: {w}", "sw")
+        else:
+            sw_log(name, "事实包已生成（facts/）", "sw")

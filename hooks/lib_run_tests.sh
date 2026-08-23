@@ -118,6 +118,16 @@ run_project_tests() {
             echo "$out" | tail -25 | sed 's/^/    /'
             return 1
         fi
+        # 成功时也要回显计数（A3 的 2.5）。此前 out 在成功分支被整个丢弃，
+        # collected / passed / skipped 全部丢失，A6 的 O3 无从判定 ——
+        # 「全部 skip」与「真的全绿」在退出码上都是 0，只有计数能区分。
+        echo "$out" | grep -E '(passed|failed|skipped|no tests ran)' | tail -3 \
+            | sed 's/^/    /' || true
+    else
+        # 没有 pytest 语义的测试面。此前这里什么都不打印就 return 0，
+        # 于是「没跑」和「跑过且全绿」在输出上无从区分（A3 的 2.4）。
+        # 判定不在这里做（属 A6），但事实必须说出来。
+        echo "    ⓘ 未发现 pytest 测试面（未执行 pytest，非『通过』）"
     fi
 
     if [ -f "$dir/package.json" ] && grep -q '"test"' "$dir/package.json"; then

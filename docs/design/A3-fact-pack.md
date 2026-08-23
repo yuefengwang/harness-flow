@@ -721,3 +721,78 @@ worktree 下的 objects 路径）会各错一次，而 A1 侧的回归测试**�
 > 最后一行的意思是：回滚 A3 会让「reviewer 读 developer 自述」这件事复原。
 > 那不是一个中性的技术回退，而是**放弃本任务的全部目的**，
 > 应当作为决策记录下来。
+
+---
+
+## 11. 实施记录
+
+实施于 2026-08-24。落盘：`sw_lib/workflow/fact_pack.py`（新增）、
+`sw_lib/prompts/builder.py`（04 改读事实包）、`sw_lib/workflow/runtime.py`
+（进入 04 触发生成）、`hooks/lib_run_tests.sh`（计数回显）。
+测试 43 条分六个文件。
+
+### 11.1 验收结果
+
+| # | 判据 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | 九文件齐备且 `verify()` 空 | ✅ | `test_all_nine_files_present_and_verify_clean` |
+| 2 | manifest 哈希与磁盘一致 | ✅ | `test_manifest_hashes_match_disk` |
+| 3 | 每次进入 04 重新生成 | ✅ | `test_regeneration_reflects_new_changes` |
+| 4 | `tests.json` 六字段 | ✅ | `test_tests_json_has_six_fields` |
+| 5 | 零测试 `exit_code: 5` | ✅ | `test_zero_tests_exit_code_is_five`（按 2.3 真实退出码，非 A6 原文的 0） |
+| 6 | 全 skip 计数 | ✅ | `test_all_skipped_suite` |
+| 7 | 不可解析记 `unparsed` 且数字为 None | ✅ | `test_unparsable_summary_keeps_raw_and_nulls_numbers` |
+| 8 | 三段带可信度、空态显式 | ✅ | `test_spec_has_three_sections_with_confidence_labels` 等 3 条 |
+| 9 | 占位符不外泄 | ✅ | `test_adr_placeholders_do_not_leak_into_spec` |
+| 10 | `spec_availability` 三态 | ✅ | `test_spec_availability_reports_three_states` |
+| 11 | `claims` 经 `update_state` 且不抹 Gate | ✅ | `test_claims_written_through_update_state` |
+| 12 | 缺基线硬失败且零残留 | ✅ | `test_missing_baseline_raises_and_creates_nothing` |
+| 13 | pytest 不可用记 `unavailable` 不抛 | ✅ | `test_pytest_unavailable_is_recorded_not_raised` |
+| 14 | 既有测试全通过 | ✅ | 1213 passed / 1 skipped；e2e 32/32 |
+| 15 | **未 add 的产出进 diff** | ✅ | `test_untracked_file_appears_in_numstat`（断言前先验 status 为 `??`） |
+| 16 | 不改暂存状态 | ✅ | `test_generate_preserves_staged_state` |
+| 16b | 不写对象库 | ✅ | `test_generate_writes_no_objects_into_observed_repo`（按差值断言） |
+| 16c | 只读对象库可用 | ✅ | `test_generate_works_with_readonly_object_store`（真 `chmod 500`） |
+| 17 | **04 输入不含 03-coding.md** | ✅ | `test_no_developer_narrative_reaches_facts` + prompt 层 `test_review_prompt_excludes_coding_narrative` |
+| 18 | claims 与 diff 不一致被记录 | ✅ | `test_claims_diff_mismatch_is_recorded_in_warnings` |
+| 19 | 篡改可检出（两半） | ✅ | `test_tampered_fact_file_is_detected_by_verify` + `test_manifest_hash_lands_under_signed_facts_key` |
+| 20 | 归属错误不生成 | ✅ | `test_ownership_violation_raises_and_leaves_no_patch` |
+
+**真实链路实测**（单元全绿不等于机制接通）：跑 `WorkflowRuntime.advance`
+从 03 推进到 04，`facts/` 九文件落盘；两个**未 `git add`** 的文件
+（`feature.py`、`test_feature.py`）都出现在 `diff.numstat`；`tests.json` 记
+`collected: 1, passed: 1, pytest_version: 9.1.1, ran: true`；
+`03-coding.md` 里的哨兵未出现在任一事实文件；`.state.facts.manifest_sha256`
+已写入且 `verify_evidence` 为 `valid`。
+
+### 11.2 实施中的两处偏离
+
+1. **C1 的真实落点在 `prompts/builder.py:63`**，文档只写了「04 不读
+   `03-coding.md`」但没指出代码位置。`_read_previous_stage` 对全部阶段
+   一律读上一阶段 md —— 04 因此读到自述。已改为 04 走 `_read_fact_pack`，
+   其余四阶段行为不变（有单调性测试锚住）。
+   **事实包缺失时注入显式的「缺失」说明，不回落到读 md** ——
+   回落等于 C1 复原且无人知晓。
+2. **测试自身缺陷（按 DEV-PROTOCOL 1.2 显式声明后重做）**：
+   prompt 测试最初写成 `PromptBuilder()`，而其构造需要 `registry`
+   参数、`PromptRegistry` 又需要 `templates_dir`。连续两轮 TypeError
+   都不是有效的红，已修正为真实构造后重跑。
+
+### 11.3 遗留（❓ 与决策项）
+
+- **`coverage.json` 恒为 `unavailable`**。覆盖率采集未实施 ——
+  阈值策略属 A6 的 O8，且本机未装 `coverage`。这是 ❓ 而非 ✅：
+  文件存在、字段正确，但**从未产出过真实覆盖率数据**。
+- **`claims` 无人写入**。`record_claims()` 已实现并有测试，但 03 准出
+  流程**尚未调用它** —— 需要 agent 侧或 hook 侧提供 task_ids / verify_cmd
+  的来源，而那涉及 03 阶段的产出结构，不在 A3 范围。
+  当前 `claims` 始终为空，故验收 18 的对照逻辑在真实运行中**从未触发**。
+  **这一条需要拍板**：是让 agent 在 03 产出里结构化声明，还是由 hook 从
+  diff 反推（后者会让「对照」变成自己和自己比，失去意义）。
+- **U3-1 / U3-2 / U3-3 未变**：事实包只覆盖文件系统事实；`spec.md` 不是
+  规格判据；`claims` 的「忘了报」与「刻意隐瞒」无法区分。
+- **`facts/` 仍可被 agent 的 `bash` 改写**（R4，不解决）。检出依赖签名链，
+  已实测 `verify()` + `manifest_matches_state()` + `verify_evidence` 三层。
+- **e2e 未覆盖事实包**。`driver.py` 的 32 项检查里没有 facts 相关项，
+  所以「mock 全流程下事实包是否正常」由我手工验证，**不是自动回归**。
+  建议后续给 driver 加一项。
