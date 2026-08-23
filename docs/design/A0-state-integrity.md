@@ -1,0 +1,758 @@
+# A0：状态完整性与证据不可伪造
+
+> 依赖：无（波 1 地基）
+> 被依赖：**A2**（`red_witness` 的存储）、A3（事实包）、A6（客观轨读判据）、
+> A9（仲裁写 Route）、A10（归档报告）
+> 范围：`sw_lib/core/state.py`、`sw_lib/tools/toolbox.py`、
+> `sw_lib/agents/opencode.py`、新增 `sw_lib/core/evidence.py`
+> 依据：`docs/self-verification-gaps.md` 的 R2、L6；
+> `docs/design-reviewer-independence.md` 的 10.1、10.4 P1
+>
+> 🔒 **开发纪律**：实施本任务须遵守 [`DEV-PROTOCOL.md`](DEV-PROTOCOL.md)。
+> ⚠️ **本任务含自指风险**：它实现的是「证据不可伪造」。测试若绕过受控入口
+> 直接写 `.state`，就是在验证时使用被禁止的行为。处置见第 9 节 ——
+> 结论是「绕过用于构造攻击样本是必要的，用于制造通过是禁止的」。
+
+---
+
+## 1. 目标与定位
+
+**原则**：判据必须在循环之外。agent 能改写的东西不能充当判据。
+
+A2 的 `red_witness`、A3 的事实包、A6 的客观轨结论、A9 的 Route 决策，
+全部落在 `.state` 与 `facts/`。若这两处可被 agent 写，
+**后续九个任务全部失效** —— 不是效果打折，是机制归零：
+一个能改判据的 agent 永远能让自己通过。
+
+### 1.1 必须先承认的边界
+
+本任务的目标是 **篡改可检出**，不是 **篡改不可能**。
+
+理由：当前唯一实际在跑的 agent 拥有 shell（`bash`）。只要有 shell，
+就没有任何应用层机制能阻止它写文件。真正的阻止需要进程隔离
+（`config.yaml:12` 的 `docker.enabled: false` 是现成挂载点，但未启用）。
+
+因此 A0 交付的是两件事：
+
+1. **完整性**：`.state` 不会因并发或中断而损坏、丢失、静默回退。
+2. **可检出性**：证据被绕过受控入口修改时，校验能发现并拒绝。
+
+把目标写成「不可伪造」而不标注这条边界，本身就是一次自欺。
+
+---
+
+## 2. 现状：已实测的缺陷
+
+### 2.1 P0（本次新发现，比无锁写更严重）：损坏被自动迁移固化
+
+`read_state`（`core/state.py:22`）对非 JSON 内容回退到旧的 `key: value`
+文本格式解析，**并在 `:64` 回写磁盘**。
+
+一个写入中途被打断的 `.state` 会被当作「旧格式」解析成功，然后固化。
+实测（截断到一半的 JSON）：
+
+```text
+磁盘原文:  { "id": "T1", "stage": "03-coding", "stage_idx": 2, "re
+回写之后:  { "\"id\"": "T1\",", "\"stage\"": "03-coding\",", "\"stage_idx\"": "2," }
+read_state 返回: stage="01-brainstorming"  stage_idx=0  red_witness 消失
+```
+
+三重后果：键名带引号变成垃圾；`red_witness` 整棵子树丢失；
+**stage 静默回退到第一阶段**（`:75` 与 `:69` 的默认值填充）。
+
+这比 P1 严重的地方在于：非原子写只是「可能损坏」，
+而自动迁移把损坏转成了一个**看起来合法**的状态 —— 没有任何报错，
+下游读到的是一份自洽但错误的判据。
+
+### 2.2 P1：无锁、非原子写（上游 10.4 已记录）
+
+`write_state`（`:94`）在 `:112` 直接 `open(sf, "w")` + `json.dump`。
+无临时文件、无 `os.replace`、无 `fsync`、无锁。
+全仓库 `rg -n "os.replace|flock|tempfile" sw_lib` **零结果**。
+
+`open(..., "w")` 先截断再写，因此崩溃窗口内文件必然是半截的 ——
+正好落进 2.1 的固化路径。**这两个缺陷是连着的，必须一起修。**
+
+### 2.3 P2：丢失更新（read-modify-write 无版本校验）
+
+实测两个调用方各自 `read_state` 后写回，后写者静默覆盖前写者：
+
+```text
+客观轨写入 objective={"O3":"fail"}  →  攻击者写入 adversary={...}
+最终 .state 只有 adversary，objective 消失
+```
+
+`write_state` 有 39 处调用点（`rg -n "write_state" -g'*.py'`），
+包括 `workflow/stage_state.py` 的 8 处、`ui/tui.py:473`、
+`core/service.py:351`、`core/health.py` 的 3 处（**独立线程**，
+`health.py:59` 有 `threading.Event`）。Web 与 TUI 可同时运行。
+
+> A5 的风险表 R1 提到并行写竞争，缓解方式是「子节点不直接写 `.state`」。
+> 那只覆盖 A5 自己的 fan-out，不覆盖 TUI / Web / HealthMonitor 线程。
+
+### 2.4 写保护的绕过路径
+
+上游 10.1 记录了三条。实测补充三条，其中一条是 P0 级：
+
+| # | 路径 | 证据 | 来源 |
+|---|---|---|---|
+| 1 | `facts/` 与 `evidence/` 不在保护范围 | `toolbox.py:129` 只匹配 `target.name`。实测 `WriteFileTool` 写 `facts/tests.json` 与 `evidence/x.log` **均返回成功** | 上游 |
+| 2 | `restricted` 是命令字符串匹配，可拼接绕过 | `toolbox.py:182` 的 `".state" in command`。实测 `chr(46)+'state'` **不被拦截** | 上游 |
+| 3 | 白名单含 `python` / `sh` / `bash` / `sed` | `toolbox.py:24` 起 | 上游 |
+| 4 | **`restricted` 是 LLM 可见的工具参数，直接传 `False` 即关闭保护** | `toolbox.py:150` 的 description 明写 `restricted (bool, 可选...)`；`toolbox.py:271` 的 wrapper 是 `**kwargs` 透传。实测 `restricted=False` 后含 `.state` 的命令**正常执行** | **本次实测** |
+| 5 | `sh -c` 可执行白名单外命令 | 白名单校验只看首 token。实测 `sh -c 'which rm'` 通过，`/bin/rm` 可达 | **本次实测** |
+| 6 | `cwd` 参数不做 ROOT 校验 | `toolbox.py:186` 只做 `resolve()`，不比对 ROOT。实测 `cwd="/Users/yfwang"` 成功列出家目录。`_safe_path`（`:71`）只服务 read/write 工具，不在此路径上 | **本次实测** |
+
+第 4 条最要紧：前三条需要一点巧思，这一条是**写在工具说明里的开关**。
+
+### 2.5 决定性发现：以上加固对当前实际运行的 agent 全部无效
+
+`config.yaml` 五个角色的 `agent` 字段**全是 `opencode`**（已核实）。
+而 `Toolbox` 只被 `agents/gemini.py:18` 引用 ——
+`rg -n "Toolbox|get_available_tools" sw_lib` 的结果只有 `toolbox.py` 自身
+与 `gemini.py` 两处。
+
+`OpenCodeAgent` 走的是 **opencode 原生工具**：
+`agents/base.py:136` 硬编码 `use_native_tools=True`，
+`opencode.py:106` 把阶段权限翻译成 opencode 工具开关
+（`TOOL_MAP`，`opencode.py:46`），实际读写与命令执行发生在 opencode 进程内。
+
+**结论：2.4 全部六条绕过路径分析的是一个当前没有被使用的模块。**
+真实的 agent 通过 opencode 的 `write` / `edit` / `bash` 工具作用于文件系统，
+`toolbox.py` 的白名单、`_PROTECTED_FILES`、`restricted` 对它一概不生效。
+
+若不先弄清这一点，A0 会去加固一条死代码路径，然后宣布「证据已不可伪造」——
+这正是本项目要消除的那类假绿。
+
+### 2.6 opencode 侧的真实权限机制（实测 + 二进制符号分析）
+
+| 事实 | 依据 |
+|---|---|
+| harness 的 `tools` 字典经 `set_tools` 进 `payload["tools"]`（`transport.py:276`），opencode 将其转成 session 权限规则 `{permission, action: allow\|deny, pattern: "*"}` | 二进制中该转换代码可见：`for(let[Q,C]of Object.entries(t.tools??{}))R.push({permission:Q,action:C?"allow":"deny",pattern:"*"})` |
+| opencode 有 `PermissionV2`，规则形态 `{permission, pattern, action}`，action ∈ `ask` / `allow` / `deny` | 二进制符号 `PermissionV2.Rule` / `Ruleset` / `AssertInput` |
+| 判定用 `findLast` 匹配：**后面的规则覆盖前面的，无匹配时默认 `ask`** | `findLast((z)=>match(j,z.permission)&&match(J,z.pattern)) ?? {action:"ask"}` |
+| **权限支持路径粒度** —— `write` / `edit` 的 ask 传的是相对 worktree 的路径 | `ask({permission:"edit",patterns:[relative(worktree,u)],...})` |
+| harness 只生成 `pattern:"*"` 的粗粒度规则，**未利用路径粒度** | `opencode.py:181` 返回 `{t: bool}`，无 pattern 维度 |
+| **harness 不订阅 `permission.asked` 事件** | `rg -n "permission" sw_lib/agents/*.py` 零结果；`transport.py:421` 只处理 `question.asked`。→ 一旦产生 `ask` 会死等到 `CHAT_TIMEOUT`（1800 秒） |
+| opencode workdir 是 `repo/<task>`（`opencode.py:113`），`.state` 在 `workspace/tasks/<task>/.state`，相对路径为 `../../workspace/tasks/<task>/.state` —— **在 worktree 之外** | 已核实路径计算 |
+| 凭证注入是 `os.environ.copy()`（`opencode.py:130`）并整份传给子进程 | → **密钥放环境变量会被 `bash` 工具一条 `env` 拿到** |
+
+两条直接推论：
+
+1. A0 在 opencode 侧只能用 `allow` / `deny`，**不能用 `ask`**（无人应答）。
+   想用 `ask` 就必须先补事件订阅，那属于另一个任务。
+2. HMAC 密钥**不能放环境变量**，且必须从子进程 env 中显式剥离。
+
+---
+
+## 2.7 实测结论：D0-6 的前提不成立（2026-08-23，运行时实测）
+
+9.3 末尾曾记录「未能起 `opencode serve`，2.6 是静态证据」。**现已补上运行时实测**
+（`opencode serve` 1.18.20，本机 127.0.0.1:8891，隔离 `HOME`）。
+结论与 2.6 的推断**部分冲突**，D0-6 必须改设计。
+
+### 2.7.1 已确认成立的部分
+
+| 事实 | 实测证据 |
+|---|---|
+| session 接受 `{permission, pattern, action}` 形态的规则数组 | `PATCH /session/{id}` 返回 200，规则原样出现在 session 的 `permission` 字段 |
+| `action` 枚举确为 `allow` / `deny` / `ask` | `/doc` 的 `PermissionV2Effect` schema |
+| **规则可在创建时带入** —— `POST /session` 的 body 支持 `permission` | 实测返回 200，`GET` 回读规则数正确 |
+
+### 2.7.2 三条推翻或存疑的发现
+
+**（1）`PATCH /session/{id}` 是 merge，不是 replace。**
+
+连续三次 PATCH 不同规则集后，`GET` 回读到 **5 条规则**（1+2 条历史 + 后续追加），
+而非最后一次下发的内容。这意味着：
+
+- 每阶段重新下发权限会**不断累积**，旧规则永不失效；
+- 由于判定是 `findLast`（后者优先），累积会让**先前的 deny 被后来的 allow 覆盖** ——
+  恰好是最危险的方向。
+
+**处置**：改用 `POST /session` 创建时一次性带入规则（已实测可行），
+**不使用 PATCH 增量下发**。
+
+**（2）`POST /api/session/{id}/permission` 不是纯规则求值器，不能用作验收判据。**
+
+该端点（`v2.session.permission.create`）在以下场景**一律返回 `allow`**：
+
+| 规则集 | 探测 | 返回 |
+|---|---|---|
+| 空规则集 | `write notes.txt` | `allow` |
+| **仅一条 `write:* deny`** | `write notes.txt` | **`allow`**（应为 deny） |
+| `allow *` + `deny **/.state` | `write .state` | **`allow`**（应为 deny） |
+
+且服务端日志中**没有任何 `evaluated` 行**（该实现会在求值时
+`logInfo("evaluated", ...)`，见 2.6 引用的代码）——
+说明请求根本没走到规则求值分支。
+
+> 更值得警惕的是：**首次实测与复现实测结果不一致。**
+> 首轮曾出现 `write notes.txt -> deny`、`write .state -> deny`，
+> 但随后用「一规则集一新 session」的受控设计复跑三次，全部为 `allow`；
+> 同 session 内重复探测四次亦全部 `allow`。
+> 首轮的 deny 无法复现，**判定为受 PATCH 累积污染的假象**。
+>
+> 这正是 DEV-PROTOCOL 第 3 节第 2 条要防的情形 ——
+> 若当时就采信首轮结果，会得出「deny 规则有效」的错误结论并据此写实现。
+
+**（3）因此「deny 规则真的阻止写入」这一条尚未被证明。**
+
+真实的权限判定发生在**工具执行路径**（`ask()` 内），
+需要一次真实的 LLM 会话触发 `write` 工具才会走到。
+本次实测未使用真实模型（无凭证、且会产生外部调用），**故未能验证**。
+
+**状态：❓ 未验证** —— 不是 ✅，也不是 ❌。
+
+### 2.7.3 对设计的影响
+
+| 影响 | 处置 |
+|---|---|
+| D0-6 的规则下发方式 | 从 PATCH 改为 `POST /session` 创建时带入 |
+| D0-6 的有效性 | **降级为「尽力而为」**，不作为 A0 的交付承诺 |
+| 验收第 15 条 | 无法用 assert 端点验证，改为「规则形状测试 + 真实会话验证（标 ❓ 直至具备条件）」 |
+| **第二层（HMAC 校验）的地位** | **从「补充」上升为唯一可靠防线** |
+
+最后一条是本次实测最重要的产出：既然写入侧的阻止无法被证明有效，
+**准出时的校验就是唯一能兑现「篡改可检出」的机制**。
+这与 1.1 的边界声明一致，也印证了 A2 的 3.3 修正
+（哈希校验是长期主防线，而非临时替代）。
+
+> 实施顺序因此调整：**第二层优先于第三层**，见第 6 节。
+
+---
+
+## 2.9 实施期补充实测（2026-08-23，D0-5 / D0-6 / D0-7）
+
+### 2.9.1 D0-6：规则下发已端到端验证（但有效性仍 ❓）
+
+用真实 `opencode serve` 1.18.20（127.0.0.1:8893，隔离 `HOME`）实测：
+
+| 项 | 结果 |
+|---|---|
+| `POST /session` 携带 31 条规则 | ✅ HTTP 200 |
+| `GET /session/{id}` 回读 | ✅ 31 条，`perm == rules` **逐字节一致** |
+| 经**真实 `OpenCodeTransport`** 建 session（非手拼 dict） | ✅ 31 条一致 |
+| `04-review` 阶段的 write 规则 | ✅ 全为 deny，无一条 allow |
+
+**仍未验证的部分不变**：deny 是否真的阻止工具写入。
+需真实 LLM 会话触发 `write`，assert 端点不可用作判据（2.7.2 第 2 条）。
+**状态：规则下发 ✅ / 阻止有效性 ❓。**
+
+### 2.9.1b 致命缺陷：消息级 `tools` 会整体覆盖 session 权限
+
+**这是本次实施中最重要的发现，它证明 D0-6 的原实现在首条消息后即完全失效。**
+
+opencode 二进制 `SessionPrompt.prompt`：
+
+```js
+for (let [Q, C] of Object.entries(t.tools ?? {}))
+    R.push({permission: Q, action: C ? "allow" : "deny", pattern: "*"});
+if (R.length > 0) O.permission = R, yield* o.setPermission({...});
+```
+
+`O.permission = R` 是**整体赋值，不是追加**。实测（真实 serve 1.18.20）：
+
+| 步骤 | 规则数 | 路径级 deny |
+|---|---|---|
+| `POST /session` 带 31 条规则 | 31 | 22 |
+| **发一条带 `tools` 的消息后** | **9** | **0** |
+| 修复后（消息不带 `tools`）再发一条 | 31 | 22 |
+
+即：`transport.py` 原本每条消息都发 `tools`（`:276`），
+于是**首条消息就把全部路径 deny 抹掉**，只剩 `pattern:"*"` 的粗粒度规则。
+
+这与 2.7.2 第 1 条（PATCH 累积）是**两个独立的坑**，但方向相同 ——
+都让 deny 静默失效。若不实测，单测全绿而线上毫无防护。
+
+**处置**：有规则表时消息不再携带 `tools`（`tools` 在 opencode 侧
+**只**用于生成权限规则，不发不丢功能）；无规则表时退回旧行为。
+已加测试 `test_send_message_does_not_carry_tools_when_rules_are_set` 固化。
+
+> 教训与 2.7.2 同构：**接线正确 ≠ 生效**。
+> 单测只能证明我方发出的形状，服务端如何处置必须实测。
+
+### 2.9.2 三处实施期发现的新缺口（文档原先未列）
+
+| # | 缺口 | 说明 | 处置 |
+|---|---|---|---|
+| 1 | **`_load_env()` 之外还有第二条环境出口** | `pty.py:206` 同样 `os.environ.copy()` 后交给 `gemini` 子进程。只堵 opencode 一处是假绿 | 抽 `evidence.strip_secrets()`，两处出口共用 |
+| 2 | **按名字剥离密钥不够** | 密钥值若被复制到别名变量下（credentials.yaml 转发变量、用户 `export` 副本），按名字删不掉 | `strip_secrets` 增加**按值扫描** |
+| 3 | **`ReadFileTool` 可直接读走密钥** | D0-7 表格只列了写入侧。`read_file("config/.evidence_key")` 与 `cat` 均可取走密钥 —— 密钥可读则 HMAC 形同虚设 | 密钥路径读写皆禁；范围**只含密钥**，`.state` / `facts/` 仍允许读（禁读会让工作流不可用） |
+
+### 2.9.3 两处测试自身的缺陷（若不修会造成假绿）
+
+1. **`get_key()` 的 `lru_cache` 跨用例残留** ——
+   `test_evidence.py` 单跑 11 条全绿，全量跑却红一条。密钥隔离夹具改为
+   `autouse` 并 `cache_clear()`。
+2. **测试会在真实 `config/` 下创建密钥** ——
+   `config.yaml` 的 `mock_agent.enabled` 为 `false`，本地跑测试走真实分支，
+   `write_state` 签名时 `get_key()` 就把生产密钥文件创建出来了。
+   已在 `tests/conftest.py` 加 session 级 `_isolate_evidence_key` 重定向到 tmp。
+   实测：删除后跑全量 775 条，密钥**不再生成**。
+
+> 第 2 条的危害不止是"脏"：若某用例写入了不同密钥，
+> 用户既有 `.state` 的签名会集体变成 `tampered`。
+
+### 2.9.4 白名单加固的连带影响
+
+移除 `sh`/`bash`/`zsh` 后，既有用例
+`test_run_command_state_file_protected`（`echo x > .state`，ROOT 下）转红 ——
+新的前缀保护只覆盖 `workspace/`，而该用例的 `.state` 在 ROOT 下。
+处置：前缀匹配之外**再加一层文件名匹配**
+（`.state` / `.state.lock` / `STATUS.json` 在任何目录下禁写）。
+
+> 这条是「加固引入回归」的实例，与 2.8 同类：
+> 缺陷只在与既有用例组合时显形。
+
+### 2.9.5 真实 LLM 会话实测：验收 15 结案，并推翻一条错误结论
+
+前两轮验收 15 一直挂在 ❓，因为「deny 是否真的阻止写入」只能靠真实 LLM
+触发 `write` 工具才能判定。本轮用真实凭证（`~/.local/share/opencode/auth.json`）
+与 `mimo-v2.5-free` 跑真实会话补齐，四条结论**均有工具级证据**
+（读 `/session/{id}/message` 的 tool part `status`，不看模型自述）：
+
+| # | 结论 | 证据 |
+|---|---|---|
+| 1 | **deny 真的阻止 `write`** ✅ | A/B 对照：无 deny → 写入成功；有 deny → tool part `status=error`，错误文本含服务端规则列表，目标文件原样 |
+| 2 | `**/.state` glob 覆盖嵌套路径 ✅ | `sub/.state` 同样被拦 |
+| 3 | **`write` 工具查的是 `edit` 权限，不是 `write`** ❗ | 各 3 次：只 deny `write` → **写入成功**（`status=completed`）；只 deny `edit` → 被拦 2/2 |
+| 4 | **`bash` 绕过成功，且模型自发回退** ❗ | 提示「用任何可行工具达成」后，`write` 被拒 → 模型**自己改用 `bash`**，3/3 全部写入成功 |
+
+第 3 条改变了实现的正确性判断：规则表里同时 deny `write` 与 `edit`
+**不是冗余，是必要条件**。若有人日后「精简」掉其中一条，保护即失效。
+已在 `tests/unit/agents/test_opencode_permission_rules.py` 追加
+`test_write_and_edit_both_denied_because_write_tool_checks_edit` 守住。
+
+第 4 条给 U0-1 提供了实证：路径级 deny 不足以保护判据，
+**HMAC 签名（验收 16）是唯一真兜底**，不是补充。
+
+新增 `tests/integration/test_opencode_permission_live.py`（5 条，默认 skip，
+`HARNESS_LIVE_OPENCODE=1` 开启）。实跑 **5 passed in 112.50s**。
+
+**一次必须记录的自我纠错**：中途曾得出「只 deny `write` 也有效」的结论，
+理由是「文件没被改」。核对工具级记录后发现模型**压根没调用 `write`**
+（有一次还幻觉出 "Plan Mode" 自称只读）。
+把「没发生」读成「被拦住」，方向恰好与事实相反。
+
+> 处置已固化为测试纪律：**凡目标工具未被调用，一律 `pytest.skip`
+> 判 INCONCLUSIVE，绝不计为通过。** 否则模型摆烂即得满分。
+
+### 2.9.6 三态之外：`stage_status` 翻转会抹掉刚签的 Gate（真实缺陷，已修）
+
+本轮排查遗留项时实测出一个**生产路径上的判据丢失**：
+
+```text
+base.py agent 跑完 → 翻 stage_status=idle（读旧快照，整体写回）
+用户同时在 TUI 按 [A] 签 Gate
+结果：gate.signed_by 变回 None
+```
+
+`runtime.py:114` 早有注释承认踩过这个坑，但当时只在那一处就地重读绕过，
+**同形状的其他写入点仍在**（`base.py` 2 处、`graph.py` 1 处、`tui.py` 1 处）。
+
+处置：新增 `WorkflowRuntime.set_stage_status(name, status)` 走 `update_state`，
+四处调用点全部接入。测试 `test_status_flip_does_not_erase_gate_signature`。
+
+**第二次自我纠错**：该测试第一版是**假绿** ——
+`set_stage_status` 尚不存在，线程内 `AttributeError` 静默死掉，
+断言因此毫无压力地通过。已改为用 `errors` 列表显式收集线程异常并断言非空为红。
+
+> 与 2.9.5 的教训同构：两次假绿都源于**把「什么都没发生」当成「通过」**。
+> 线程内异常、模型未调用工具，都属于这一类。
+
+---
+
+## 2.8 实施中发现的自伤缺陷（D0-1 的漏洞，已修）
+
+D0-1 让 `read_state` 对损坏返回 `{"_corrupted": True, ...}` 而不再回写。
+实现 D0-3 之后实测发现：**这个改动自身引入了一条摧毁原始内容的路径。**
+
+全仓库有十余处 `read_state` → 改 → `write_state` 的调用点
+（`stage_state.py` 8 处、`runtime.py` 4 处、`base.py` 2 处、
+`service.py`、`tui.py`、`graph.py`、`commands.py` 各若干）。
+它们拿到 `_corrupted` 空壳后照常修改并写回。
+
+实测复现（`stage_state.seed_gate`）：
+
+```text
+损坏原文:      { "id": "T", "stage": "0
+seed_gate 后:  { "_corrupted": true, "_corrupt_reason": "...", "stages": {...} }
+```
+
+`seed_gate` 返回 `True`（表示"写入成功"），而损坏内容**已被覆盖** ——
+D0-1 想保住的东西恰好被 D0-1 自己引入的空壳挤掉了。
+
+**处置**：拦在 `write_state` 这个共同瓶颈上 ——
+任何试图持久化 `_corrupted` 标记的写入一律 `ValueError`。
+不逐个改十余处调用点：那样繁琐且必然有遗漏。
+
+> 这条值得记录的原因不在于修法，而在于**它是一次典型的"修复引入新缺陷"**。
+> 若只跑 D0-1 自己的六条测试，全部是绿的 —— 缺陷只在与真实调用方
+> 组合时才显形。因此验收里补了一条**从真实调用方视角**出发的测试
+> （`test_seed_gate_does_not_clobber_corrupted_state`），
+> 而不是只验证 `write_state` 的内部约束。
+> 只验证自己的内部约束，等于假设"瓶颈处已拦住"，那是未经检验的自信。
+
+---
+
+## 3. 设计
+
+分三层。第一层解决完整性，第二层解决可检出性，第三层收窄攻击面。
+
+### 3.1 第一层：`.state` 完整性（纯本地改动，无外部依赖）
+
+**D0-1　移除自动迁移回写**（修 2.1）
+
+`read_state` 遇到解析失败时**不再回写**。三种归宿：
+
+- 内容为空 → 返回 `{}`（与现状一致）。
+- 合法 JSON → 正常返回。
+- 其余 → 返回 `{"_corrupted": True, "_raw_path": ...}` 并记录日志，
+  **不填充默认 stage**。调用方必须显式处理，不得静默当作新任务。
+
+旧格式迁移移出读路径，改为一次性脚本 `scripts/migrate_state_format.py`。
+读路径里的自动迁移是「顺手兼容」，代价是把损坏合法化 —— 不值得。
+
+> **不填充默认 stage** 是关键。现状 `:69`/`:75` 的默认值填充，
+> 把「读不出来」伪装成「处于第一阶段」，这是最恶劣的一种静默降级。
+
+**D0-2　原子写**（修 2.2）
+
+`write_state` 改为：同目录建临时文件 → 写入 → `flush` + `os.fsync`
+→ `os.replace(tmp, target)` → `fsync` 父目录。
+同分区 `os.replace` 是原子的，读者永远看到完整的旧版或完整的新版。
+
+**D0-3　串行化 read-modify-write**（修 2.3）
+
+新增 `update_state(name, mutator)`：持排他文件锁（`fcntl.flock`）
+→ 读 → 调用 `mutator(state)` → 原子写 → 释放锁。
+
+把 39 处 `read_state` + 改 + `write_state` 的调用点迁到这个入口。
+迁移可分批，但 A2/A3/A6/A9/A10 新增的写入点**必须**用它。
+
+> 锁文件用 `.state.lock`，与 `.state` 分离 —— 否则原子替换会把锁的
+> inode 换掉，持锁方失去互斥。这一点容易漏，写测试时专门验。
+
+### 3.2 第二层：证据可检出（HMAC）
+
+**D0-4　划定证据字段**
+
+`.state` 中以下字段为「证据」，只能由 harness 写：
+`red_witness`、`facts`、`review`（含 `baseline_sha`）、
+`objective`、`route`、`archive_report`。
+
+其余字段（`stage`、`stage_idx`、`stage_status` 等）是运行状态，不签名。
+
+**D0-5　HMAC 签名**
+
+新增 `sw_lib/core/evidence.py`：
+
+- `sign_evidence(payload) -> str`：对证据子树的规范化 JSON
+  （`sort_keys=True`，分隔符固定）做 HMAC-SHA256。
+- `verify_evidence(state) -> VerifyResult`：三态返回
+  `valid` / `tampered` / `unsigned`。
+
+签名存 `.state` 的 `_evidence_sig`。校验点：A2 准出、A6 客观轨入口、
+A9 仲裁前、A10 归档。**`tampered` 与 `unsigned` 都不算通过**
+（与 A6 的 3.3「禁止找不到就跳过」同构）。
+
+密钥管理，三条硬约束：
+
+1. 落 `config/.evidence_key`，权限 `0600`，加入 `.gitignore`。
+   不存在则首次运行生成。
+2. **不放环境变量。** 依据 2.6 —— `opencode.py:130` 的
+   `os.environ.copy()` 会把它交给子进程，`bash` 一条 `env` 就读到。
+3. `_load_env()` 中显式 `env.pop("HARNESS_EVIDENCE_KEY", None)`,
+   防止将来有人图方便加了环境变量后静默泄露。
+   现有 `env.pop("NODE_EXTRA_CA_CERTS", None)`（`opencode.py:148`）
+   已是同一模式的先例。
+
+> **HMAC 挡不住什么，必须说清楚**：agent 有 shell，能读到
+> `config/.evidence_key`（它在 ROOT 内，opencode 的 `bash` 可达）。
+> 因此 HMAC 防的是**误改与顺手改**，不防**定向攻击**。
+> 定向攻击只能靠 3.3 的隔离与容器化。
+> 把 HMAC 说成「不可伪造」是过度承诺。
+
+### 3.3 第三层：收窄攻击面
+
+**D0-6　opencode 侧（当前唯一真实路径，但有效性未经证明）**
+
+> ⚠️ 依据 2.7 的实测，本项**降级为尽力而为**：规则下发可以做对，
+> 但「deny 真的阻止写入」尚未被验证。**不得**以本项为由
+> 声称证据已受保护 —— 那个承诺由第二层兑现。
+
+`_tool_switches()` 的返回类型从 `Dict[str, bool]` 扩展为携带 pattern 的规则表，
+在 allow 规则之后追加 deny 规则（依据 `findLast` 语义，后者优先）：
+
+```text
+[ {permission:"write", pattern:"*",  action:"allow"},
+  {permission:"write", pattern:"**/.state",       action:"deny"},
+  {permission:"write", pattern:"**/workspace/**", action:"deny"},
+  {permission:"edit",  pattern:"**/.state",       action:"deny"},
+  {permission:"bash",  pattern:"*",  action:"allow"} ]
+```
+
+四条纪律：
+
+- **只用 `allow` / `deny`，不用 `ask`**（依据 2.6：无人应答，会死等）。
+- `bash` 无法按路径约束，因此 deny 规则**只覆盖 `write` / `edit`**。
+  `bash` 的漏洞由 3.2 的校验兜底，不假装堵住了。
+- **规则必须在 `POST /session` 创建时一次性带入，禁止用 PATCH 增量下发**
+  （依据 2.7.2 第 1 条实测：PATCH 是 merge，累积会让 deny 被后续 allow 覆盖）。
+- pattern 的 glob 语义**仍未验证**（assert 端点不可用于验证，见 2.7.2 第 2 条）。
+  因此规则同时覆盖多种写法（`.state`、`**/.state`、`**/workspace/**`），
+  宁可冗余。**不得声称已确认匹配语义。**
+
+**D0-7　Toolbox 加固（服务 gemini 与未来自研 agent）**
+
+虽然当前不在主路径上，仍须修 —— 否则切回 gemini 时缺口全在。
+
+| 项 | 改动 |
+|---|---|
+| 2.4 第 4 条 | **移除 `restricted` 参数**。保护策略由 harness 决定，不作为 agent 可传的入参，description 里同步删除 |
+| 2.4 第 1 条 | `_PROTECTED_FILES` 从「匹配文件名」改为「匹配解析后的绝对路径前缀」，纳入 `workspace/`（含 `facts/`、`evidence/`、`.state`、`STATUS.json`） |
+| 2.4 第 2 条 | 删除命令字符串匹配。改为：`run_command` 的 `cwd` 与 argv 中出现的路径参数逐个做前缀校验 |
+| 2.4 第 6 条 | `cwd` 复用 `_safe_path` 的 ROOT 前缀校验；越界直接拒绝 |
+| 2.4 第 3、5 条 | 白名单移除 `sh` / `bash` / `zsh`。`python` 保留（跑测试需要）但**不视为安全边界** —— 这一点写进注释，避免后人误以为白名单是防线 |
+
+> 白名单从来不是安全边界，它是**误操作护栏**。文档里必须这样定性，
+> 否则下一个人会基于「有白名单」这个错觉做设计。
+
+---
+
+## 4. mock 模式
+
+`MockAgent` 是 CI 主力。签名机制若硬失败会挂掉全部 mock 测试。
+
+处置：mock 模式（`is_mock_agent()`，`config.py:250`）下照常签名 ——
+HMAC 是纯本地计算，无外部依赖，没有跳过的理由。
+**但密钥固定为测试常量**，避免 CI 每次生成新密钥导致夹具失效。
+
+> 这里刻意不给 mock 开后门。A6 的 3.3 要求「找不到不等于跳过」，
+> 同一条纪律适用于我们自己。
+
+---
+
+## 5. 与其他任务的接口
+
+| 任务 | 接口 |
+|---|---|
+| **A2** | `red_witness` 经 `update_state` 写入并纳入签名。A2 准出前先 `verify_evidence`，`tampered` → 拒绝 |
+| **A3** | 事实包生成器只用 `update_state`；`facts/` 目录纳入 Toolbox 保护与 opencode deny |
+| **A5** | 并行 reviewer 子节点不直接写 `.state`（A5 已定），汇聚后由仲裁器单次 `update_state` 落盘。锁提供第二层保险 |
+| **A6** | 客观轨入口先校验签名；`unsigned` / `tampered` 计入 `unavailable`，按最严标准处理 |
+| **A9** | Route 决策写入纳入签名 |
+| **A10** | 归档报告读签名状态；签名无效时报告中该项标 ❓ 而非 ✅ |
+| **A11** | 变异探针可复用 `verify_evidence` 作为「篡改能否被检出」的元测试入口 |
+
+---
+
+## 6. 实施顺序（内部）
+
+1. ~~实测 opencode pattern 语义~~ —— **已完成，结论见 2.7**。
+   产出：PATCH 是 merge 语义（改用 `POST /session`）；
+   assert 端点不可用作判据；deny 有效性未验证 → D0-6 降级。
+2. D0-1 + D0-2：两者耦合，同批改，一起测。
+3. D0-3：`update_state` 入口 + 锁文件独立性测试。
+4. **D0-5：`evidence.py` + 校验点接入** ←（因 2.7.3 升为唯一可靠防线，
+   优先级高于 D0-6）。
+5. D0-7：Toolbox 加固 + 回归。
+6. D0-6：opencode 规则下发（尽力而为，不阻塞交付）。
+
+> **顺序相对初稿有调整**：原计划 D0-6 在 D0-7 之前，
+> 现因 D0-6 的有效性无法证明而后置。
+> 先把能兑现的（第一、二层）做实，再做尽力而为的部分。
+
+---
+
+## 7. 验收标准
+
+**机制接通类**（只验证接线，不足以宣布完成）：
+
+1. 截断的 `.state` 被读取后，磁盘内容**未被改写**，返回 `_corrupted` 标记。
+2. 截断的 `.state` 不再被伪装成 `stage=01-brainstorming`。
+3. `write_state` 过程中崩溃（模拟：写临时文件后抛异常），
+   原 `.state` 保持完整可读。
+4. 两个并发 `update_state` 各自的修改**都保留**（2.3 的场景不再丢失）。
+5. `.state` 原子替换后，持锁方仍持有有效锁（锁文件未被换 inode）。
+6. 走 `update_state` 写入证据字段后，`verify_evidence` 返回 `valid`。
+7. 未签名的 `.state`（存量任务）返回 `unsigned`，**不返回 `valid`**。
+8. `restricted` 参数已从 `RunCommandTool` 的签名与 description 中消失。
+9. `WriteFileTool` 拒绝写 `facts/` 与 `evidence/` 下的路径。
+10. `run_command` 的 `cwd` 越出 ROOT 时被拒绝。
+11. mock 模式下全部既有测试通过（**单调性**）。
+12. `_load_env()` 的返回值中不含 `HARNESS_EVIDENCE_KEY`。
+    **补充（2.9.2）**：`pty.py` 的 `_build_env()` 是第二条环境出口，
+    同样必须剥离；且需**按值扫描**，因为密钥可能被复制到别名变量下。
+17. `ReadFileTool` 与 `run_command` 均拒绝读取 `config/.evidence_key`
+    （2.9.2 第 3 条：密钥可读则 HMAC 形同虚设）。
+18. 跑完全量测试后，真实 `config/.evidence_key` **未被创建**
+    （2.9.3 第 2 条：测试不得污染生产密钥）。
+
+**有效性类**（唯一能证明「真的防住了」的判据）：
+
+13. **篡改检出**：绕过 `update_state` 直接修改 `.state` 的 `red_witness`
+    后，`verify_evidence` 返回 `tampered`，且下游校验点**拒绝通过**。
+14. ~~**拼接绕过失效**：`python -c` 用字符串拼接构造 `.state` 路径写入，
+    被路径前缀校验拦截。~~ **❌ 未达成，本条判据设计有误。**
+
+    实测两种写法均未被拦下：
+
+    ```text
+    python3 -c "open(chr(46)+'state','w').write('{}')"      → 未拦
+    python3 -c "open('workspace/tasks/T1/.state','w')"      → 未拦
+    ```
+
+    原因是路径在解释器的字符串字面量里，不在 argv 里 —— argv 前缀校验
+    在**原理上**看不到它，而 `python` 必须留在白名单（跑测试要用）。
+    这不是实现偷懒，是本条验收与 1.1 的边界声明自相矛盾：
+    既然白名单只是误操作护栏，就不该要求它拦住解释器。
+
+    **处置**：缺口固化为测试
+    `test_python_dash_c_write_is_not_blocked_by_guard` ——
+    它转红意味着有人误以为堵住了。兜底由第 16 条承担。
+15. **opencode deny 生效**：**✅ 已验证**（2.9.5，真实 LLM 会话）。
+    规则下发端到端一致（2.9.1），且 A/B 对照证明 deny 真的让 `write`
+    返回 `status=error`、目标文件原样；`**/.state` 覆盖嵌套路径。
+
+    **附带修正一条实现前提**：`write` 工具查的是 `edit` 权限而非 `write` ——
+    只 deny `write` 时写入 3/3 成功。**两者同时 deny 是必要条件，不是冗余。**
+    测试 `test_write_and_edit_both_denied_because_write_tool_checks_edit` 守住。
+16. **越界写仍可检出**：✅ 已验证
+    （`test_bypass_write_is_still_detected_by_signature`）。
+    绕过护栏改写 `red_witness` 后 `verify_evidence` 报 `tampered`。
+    这是第 14 条失守之后**唯一**还站得住的防线。
+
+    **2.9.5 第 4 条把这条从「补充」抬成「主防线」**：真实会话中 `write`
+    被拒后，模型**自发改用 `bash`** 并 3/3 写入成功。
+    即路径级 deny 对有 shell 的 agent 不构成边界，HMAC 才是兜底。
+19. **`stage_status` 翻转不抹判据**：✅ 已验证（2.9.6）。
+    并发「翻状态」与「签 Gate」后 `gate.signed_by` 仍在
+    （`test_status_flip_does_not_erase_gate_signature`）。
+20. **判据类写入点全部走受控入口**：✅ 已验证。
+    `stage_state.py` 7 处写入函数体内不得出现 `write_state(`
+    （源码断言测试 `test_stage_state_writers_go_through_controlled_entry`）。
+
+> 第 16 条是刻意设计的。它验证的是 1.1 那条边界诚实成立 ——
+> 阻止失败时检出仍然工作。如果这条测不出 `tampered`，
+> 说明整个第二层是装饰。
+
+---
+
+## 8. 风险与遗留
+
+| # | 风险 | 处置 |
+|---|---|---|
+| R1 | 39 处 `write_state` 调用点迁移面大 | **判据类已迁完**：`stage_state.py` 7 处（`seed_gate`/`sign_gate`/`reset_gate`/`write_route`/`reset_route`/`record_decision`/`issue_output_nonce`）全走 `update_state`，源码断言测试守住。剩 `service.py` 6 处、`runtime.py` 3 处未迁 —— 均为整体覆盖或已就地重读，不含判据字段，风险低于判据类。见「明确遗留」U0-4 |
+| R2 | `fcntl.flock` 在部分网络文件系统上不可靠 | 记录为已知限制。本地开发与 CI 均为本地盘，不引入分布式锁 |
+| R3 | 存量任务无签名，一律 `unsigned` | 提供 `scripts/sign_existing_state.py` 一次性补签，并在报告中标注「签名为补建」。不静默视为 `valid` |
+| R4 | opencode 版本升级导致 permission 规则形态变化 | 规则构造集中在 `_tool_switches()` 一处；补一个针对该函数输出形状的测试，升级时先红 |
+| R5 | 密钥文件在 ROOT 内，agent 的 `bash` 可读 | **不解决**，见 3.2 末尾。真正的隔离需要容器（`docker.enabled`），属独立任务 |
+| R6 | `_corrupted` 三态需要 12 处调用方逐个处理 | **已收口**：`state.py` 提供 `StateCorruptedError`（继承 `ValueError` 以兼容既有 `except ValueError`）、`is_corrupted()`、`raise_if_corrupted()`，错误信息含任务名/文件路径/原因/`migrate_state_format.py` 修复指引；接在 `runtime.advance()` 入口。测试 `test_advance_rejects_corrupted_state_at_entry` 从真实调用方视角验证 |
+
+**明确遗留、不假装解决的问题**：
+
+- **U0-1**：`bash` 工具无法按路径约束。这是 opencode 权限模型的固有边界，
+  不是本任务能修的。
+- **U0-2**：拥有 shell 的 agent 可读密钥并伪造签名。A0 只防误改。
+- **U0-3**：`STATUS.json` 也是无锁写（`state.py:129`），
+  但它是缓存而非判据，本批不纳入签名。若将来有判定依赖它，须重新评估。
+- **U0-4**：`service.py` 6 处、`runtime.py` 3 处 `write_state` 未迁到
+  `update_state`。**为什么不做**：这些点或是「整体覆盖」语义（如任务初始化，
+  本就不该做字段级归并），或已在 2.8 之后就地重读过。
+  它们不写 `gate` / `output_nonce` / `red_witness` 等判据字段，
+  丢写的后果是缓存类字段回退而不是判据丢失。
+  一并迁移会把 A0 的 diff 面再扩大一倍，且需要逐点确认语义
+  ——留给 A2 起的后续任务按需推进，不在此假装完成。
+- **U0-5**：验收 14（`python -c` 字符串拼接写 `.state`）**原理上**无法用
+  argv 前缀校验堵住，且 `python` 必须留在白名单。已固化为
+  `test_python_dash_c_write_is_not_blocked_by_guard`，
+  该测试转红即意味着有人误以为堵上了。兜底由验收 16 承担。
+- **U0-6**：`Toolbox` 白名单**对当前实际运行的 agent 无效** ——
+  `config.yaml` 五角色全是 `opencode`，而 `Toolbox` 只被
+  `agents/gemini.py:18` 引用。D0-7 的加固服务于 gemini 与未来自研 agent，
+  当前生效的保护是 opencode permission 规则（验收 15）+ HMAC（验收 16）。
+
+---
+
+## 9. 本任务的红绿要点
+
+### 9.1 自指风险与处置
+
+A0 实现「证据不可伪造」，而它的测试必须**绕过受控入口写 `.state`**
+才能构造出被篡改的样本 —— 那正是本任务要禁止的行为。
+
+**处置：按用途区分，而不是按手法区分。**
+
+| 测试用途 | 允许绕过？ | 理由 |
+|---|---|---|
+| 构造攻击样本，断言校验器**检出** | ✅ 必须绕过 | 不绕过就无法制造篡改，验收 13/14/16 写不出来 |
+| 构造正常状态，断言流程**通过** | ❌ 禁止绕过 | 必须走 `update_state`，否则测的不是真实写入路径 |
+
+一句话：**绕过用于制造失败是必要的，用于制造通过是自欺。**
+
+> 具体识别方式：如果一个测试里出现了 `open(state_path, "w")`
+> 而断言是 `assert result.ok`，那它就越界了。
+
+### 9.2 红的正确形态
+
+| 验收项 | 红的正确形态（实现前必须看到） | 假绿风险 |
+|---|---|---|
+| 1 截断不回写 | 构造真实截断文件，断言读后磁盘内容不变；实现前会因为**发生了回写**而红 | 只断言返回值有 `_corrupted`，不检查磁盘 —— 回写照样发生 |
+| 2 不伪装 stage | 断言返回的 `stage` **不是** `01-brainstorming`；实现前因默认填充而红 | 断言 `stage is None`，但实现改成填别的默认值也能过 |
+| 3 崩溃后完整 | 注入异常于 `fsync` 之后 `replace` 之前，断言旧内容可读；实现前因 `open("w")` 已截断而红 | 用 mock 替掉整个写流程，测不到真实截断行为 |
+| 4 并发不丢失 | 两个线程各自 `update_state`，断言两份修改都在；实现前因后写覆盖而红 | 串行调用两次 —— 那永远不会丢失，测不出竞争 |
+| 5 锁不被换 inode | 持锁期间执行一次原子替换，断言锁仍互斥；实现前若锁在 `.state` 上则红 | 只测「能加锁」，不测替换之后 |
+| 6/7 签名三态 | `unsigned` 场景断言**不等于** `valid`；实现前因无该函数而红（应是 AttributeError → **不算有效红**，须先建空壳再断言语义） | 只测 `valid` 分支；`unsigned` 被 `if not sig: return valid` 放过 |
+| 13 篡改检出 | 直接改文件后断言 `tampered`；实现前因无校验而红 | 篡改的是不签名的字段（如 `stage`），当然检不出，却以为机制失效 |
+| 15 deny 生效 | 真实 opencode 会话请求越界 `write`，断言被拒；实现前因只有 `pattern:"*"` 而红 | 用假的 payload 断言自己构造的规则表 —— 测的是自己的字典，不是 opencode 的行为 |
+| 16 越界仍检出 | 用 `bash` 绕过 write deny 后断言 `tampered`；实现前因无签名而红 | **把这条写成「断言 bash 被阻止」** —— 那是错的预期，会导致为了让它绿而做出虚假的阻止 |
+
+### 9.3 最容易出的两个假绿
+
+**第一个：用 mock 替掉文件系统。**
+
+验收 1-5 全部关于真实文件系统行为（截断语义、`os.replace` 原子性、
+`flock` 互斥、inode 身份）。这些**不能 mock** ——
+mock 掉之后验证的是自己对 POSIX 的理解，而不是 POSIX 的实际行为。
+
+**要求**：1-5 必须在 `tmp_path` 下操作真实文件。
+这与 A2 的 10.3、A6 的 9.1 是同一条纪律。
+
+**第二个：验收 15 自说自话。**
+
+最省事的写法是构造规则表然后断言它长得对。那不验证任何东西 ——
+opencode 是否真的按 `findLast` 语义应用这些规则，是**外部行为**。
+
+**要求**：至少一条测试起真实 `opencode serve`，
+发一次越界 `write` 请求，断言被拒。
+若环境不具备（CI 无 opencode），该项标 ❓ 并说明原因，
+**不得标 ✅**（DEV-PROTOCOL 第 2 节）。
+
+> 撰写本文档时曾尝试在本机起 `opencode serve` 验证 pattern 语义，
+> 因日志目录权限（`FileSystem.open .../opencode/log`）与
+> `ServeError` 未成功。**因此 2.6 中标注为「二进制符号分析」的几条
+> 是静态证据，不是运行时实测。** 实施时第 6 节第 1 步必须补上。
+
+### 9.4 摩擦点记录
+
+- 若 `update_state` 的 mutator 形态在改造 39 处调用点时反复别扭，
+  记录下来 —— 说明接口设计需要调整，而不是硬迁。
+- 若 opencode 的 pattern 语义与 3.3 的假设不符，
+  **先更新本文档再改代码**，不要让代码与文档悄悄分叉。
+
+---
+
+## 10. 回滚
+
+三层可独立回滚：
+
+| 层 | 回滚方式 | 回滚后行为 |
+|---|---|---|
+| 第一层（D0-1/2/3） | 无开关，属纯修复 | 不回滚。若 `_corrupted` 三态引发问题，可临时让调用方把它当 `{}` 处理 |
+| 第二层（D0-4/5） | 配置 `harness.evidence.sign: false` | 不签名、不校验，行为与现在一致 |
+| 第三层（D0-6/7） | 配置 `harness.evidence.strict_tools: false` | opencode 只下发原有 `pattern:"*"` 规则；Toolbox 恢复旧保护逻辑 |
+
+> 第一层刻意不做开关。「读到损坏文件时静默回退到第一阶段」
+> 没有任何值得保留的价值，给它留开关等于给假绿留后路。
