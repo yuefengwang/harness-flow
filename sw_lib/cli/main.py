@@ -10,7 +10,7 @@ import os
 import sys
 
 from .commands import (
-    cmd_init, cmd_status, cmd_advance, cmd_resume,
+    cmd_init, cmd_status, cmd_advance,
     cmd_list, cmd_remove, cmd_remove_all, cmd_restore, cmd_answer, cmd_monitor,
     cmd_dashboard, cmd_usage, cmd_deploy, cmd_health, cmd_purge_trash,
     cmd_state_get,
@@ -85,10 +85,6 @@ def main():
     p_advance.add_argument("--name", help="任务名称")
     p_advance.add_argument("--no-next", action="store_true", help="不自动开始下一阶段")
 
-    # resume
-    p_resume = subparsers.add_parser("resume", help="恢复任务")
-    p_resume.add_argument("--name", help="任务名称")
-
     # list
     p_list = subparsers.add_parser("list", help="列出任务")
     p_list.add_argument("--trash", action="store_true", help="查看回收站")
@@ -103,9 +99,10 @@ def main():
         _p.add_argument("--purge", action="store_true",
                         help="连回收站一起物理删除（不可恢复）")
 
-    # restore
-    p_restore = subparsers.add_parser("restore", help="从回收站恢复任务")
-    p_restore.add_argument("--name", help="任务名称")
+    # restore（resume 是别名 —— 「恢复」在本项目里只有回收站这一个含义）
+    for _alias in ("restore", "resume"):
+        _p = subparsers.add_parser(_alias, help="从回收站恢复任务")
+        _p.add_argument("--name", help="任务名称")
 
     # purge-trash（别名兼容驼峰写法）
     for _alias in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):
@@ -201,9 +198,6 @@ def main():
     elif cmd == "advance":
         cmd_advance(args)
 
-    elif cmd == "resume":
-        cmd_resume(args)
-
     elif cmd == "list":
         cmd_list(args)
 
@@ -213,7 +207,7 @@ def main():
     elif cmd in ("remove-all", "removeall", "removeAll"):
         cmd_remove_all(args)
 
-    elif cmd == "restore":
+    elif cmd in ("restore", "resume"):
         cmd_restore(args)
 
     elif cmd in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):

@@ -9,17 +9,17 @@
 任务生命周期:
   ./sw init    --type=feature --name=<id> [--context=<text>] [--agent=<agent>] [--target=<dir>] [--self]
   ./sw init                              # 交互模式
-  ./sw monitor --name=<id>               # Rich TUI 监控面板 + Agent 对话
+  ./sw monitor --name=<id>               # 进入实时面板，观看/介入后台任务
   ./sw status  [--name=<id>]
   ./sw advance [--name=<id>] [--no-next]         # 校验+推进阶段
-  ./sw resume  --name=<id>
   ./sw answer  --name=<id> --text=<reply>   # 回复 Agent 提问
 
 任务管理:
   ./sw list    [--trash]
   ./sw remove  --name=<id>
   ./sw remove-all [--purge]              # 全部移入回收站；--purge 物理删除
-  ./sw restore --name=<id>
+  ./sw restore --name=<id>               # 从回收站恢复（别名: resume）
+  ./sw resume  --name=<id>               # 同 restore
   ./sw purge-trash                        # 清空回收站（物理删除，不可恢复）
 
 状态查询:
@@ -139,22 +139,6 @@ def cmd_init(args):
             ok("Stage: 01-头脑风暴 (Pending)")
             print(f"  请稍后运行 ./sw monitor 启动 Agent")
 
-    except TaskError as e:
-        die(str(e))
-
-
-def cmd_resume(args):
-    """恢复交互上下文显示"""
-    name = getattr(args, "name", "") or ""
-    if not name:
-        die("请指定任务名: ./sw resume --name=<id>")
-    
-    try:
-        st = _service.get_task_state(name)
-        hdr(f"恢复任务: {name}")
-        print(f"  当前阶段: {st.get('stage')}")
-        print(f"  当前状态: {st.get('stage_status')}")
-        print(f"  操作: ./sw monitor (运行) 或 ./sw advance (推进)")
     except TaskError as e:
         die(str(e))
 
@@ -370,6 +354,17 @@ def cmd_restore(args):
         ok(f"任务已从回收站恢复: {args.name}")
     except TaskError as e:
         die(str(e))
+
+
+# `resume` 是 `restore` 的别名，共用同一实现。
+#
+# 历史上 `resume` 是个独立命令，但它什么都不 resume —— 只打印三行状态然后
+# 提示你去跑 monitor。那份「查看状态」的功能 `cmd_status` 已经提供，
+# 而「恢复」这个词在本项目里唯一的真实含义就是把任务从回收站捞回来。
+#
+# 用别名而非复制实现：回收站恢复要移目录、清 removed_at、重建 STATUS.json
+# 条目，两份逻辑一旦漂移就是数据不一致。同 remove-all / purge-trash 的做法。
+cmd_resume = cmd_restore
 
 
 def cmd_answer(args):
