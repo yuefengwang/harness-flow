@@ -145,5 +145,13 @@ class PromptBuilder:
         if path.exists():
             content = path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
-                return f"=== 强制规则 (hooks/{stage}.md) ===\n{content}"
+                # 段标题**不带文件路径**：agent 的 workdir 是 repo/<task>，
+                # 一个指向 harness 根的路径会诱导它 glob 越界 —— 任务
+                # `newtask` 就是这样卡死 26 分钟的（触发 opencode 的
+                # external_directory 判定 → ask → 无人应答）。
+                # 讽刺的是规则全文就在下面，那次 glob 完全没必要。
+                # 所以这里明说「已完整内联」，堵掉它去找文件的动机。
+                return (f"=== 强制规则 ({stage}) ===\n"
+                        f"（以下为本阶段全部强制规则，已完整内联，"
+                        f"无需读取或查找任何规则文件）\n{content}")
         return None

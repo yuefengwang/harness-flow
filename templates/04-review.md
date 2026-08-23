@@ -1,6 +1,6 @@
 # 04-Review
 
-> Hooks: `hooks/04-review.md`
+> 本阶段强制规则已随 prompt 内联提供，无需另行查找规则文件。
 
 ## Zero-Memory Review
 Is the diff self-explanatory? ___

@@ -1,6 +1,6 @@
 # 05-Archive
 
-> Hooks: `hooks/05-archive.md`
+> 本阶段强制规则已随 prompt 内联提供，无需另行查找规则文件。
 
 ## Summary
 - **Delivered**: ___

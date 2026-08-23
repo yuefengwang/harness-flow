@@ -1,6 +1,6 @@
 # 02-Planning
 
-> Hooks: `hooks/02-planning.md`
+> 本阶段强制规则已随 prompt 内联提供，无需另行查找规则文件。
 
 ## Task DAG
 - [ ] **Task 1**: `___` | Deps: None
