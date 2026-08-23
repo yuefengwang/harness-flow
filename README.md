@@ -149,15 +149,14 @@ harness:
 | 命令 | 说明 |
 |:---|:---|
 | `./sw init` | 创建新任务（零参数自动进入交互模式） |
-| `./sw monitor --name=<id>` | 启动 TUI 监控面板 |
+| `./sw monitor --name=<id>` | 进入实时面板，观看/介入后台运行的任务 |
 | `./sw dashboard` | 启动 Web Dashboard（FastAPI + HTMX） |
 | `./sw status [--name=<id>]` | 查看任务状态 |
 | `./sw advance [--name=<id>]` | 校验并推进到下一阶段 |
-| `./sw resume --name=<id>` | 恢复并查看任务上下文 |
 | `./sw list` | 列出所有活跃任务 |
 | `./sw list --trash` | 查看回收站中的任务 |
 | `./sw remove --name=<id>` | 将任务移入回收站（软删除） |
-| `./sw restore --name=<id>` | 从回收站恢复任务 |
+| `./sw restore --name=<id>` | 从回收站恢复任务（别名：`./sw resume`） |
 | `./sw answer --name=<id> --text=<reply>` | 以编程方式回复 Agent 问题 |
 | `./sw reap` | 清理测试残留任务（`e2e-*` / `web-*` / `pytest-*` / `test-*`） |
 
