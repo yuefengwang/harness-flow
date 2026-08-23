@@ -26,6 +26,12 @@ workflow/tasks/*
 
 workspace/*
 
+# 例外：B0 的改造前基线。它**无法重新生成**（采集依赖「A6-A9 尚未实施」
+# 这个已经关闭的时间窗口），且是 A11 对照实验唯一的对照组来源。
+# 被忽略等于一次 git clean 就永久丢失，因此必须入库。见 B0 第 10 节。
+!workspace/probe/
+!workspace/probe/**
+
 # Python bytecode / caches
 __pycache__/
 *.pyc

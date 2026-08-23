@@ -1,0 +1,68 @@
+{
+  "captured_at": "2026-08-23T23:35:50",
+  "baseline_purity": "review_side_clean",
+  "purity_detail": {
+    "implemented_before_capture": [
+      "A0",
+      "A1",
+      "A2"
+    ],
+    "review_side_untouched": [
+      "A6",
+      "A7",
+      "A8",
+      "A9"
+    ],
+    "note": "严格的改造前基线应在 A0 之前，该时点已错过。本基线仅对『审查能力』这一观测量有效：采集时 04-review 仍是单 reviewer 角色，客观轨 / 攻击者 / 设计审视者 / 仲裁器均未实施。A11 引用本数据时只能表述为「审查侧改造带来的提升」，不得表述为「全套设计带来的提升」。"
+  },
+  "review_side_check": {
+    "clean": true,
+    "contaminated_dimensions": []
+  },
+  "env": {
+    "git_sha": "a99e7acb84c033f35730ba51c65be482d18c91c3",
+    "git_dirty": true,
+    "git_status_summary": "?? sw_lib/probe/; ?? tests/unit/probe/",
+    "mode": "real",
+    "config_snapshot": {
+      "roles": {
+        "analyst": {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free"
+        },
+        "architect": {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free"
+        },
+        "archivist": {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free"
+        },
+        "developer": {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free"
+        },
+        "reviewer": {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free"
+        }
+      },
+      "stage_roles": {
+        "01-brainstorming": "analyst",
+        "02-planning": "architect",
+        "03-coding": "developer",
+        "04-review": "reviewer",
+        "05-archive": "archivist"
+      }
+    },
+    "review_stage_roles": {
+      "04-review": "reviewer"
+    }
+  },
+  "samples": [],
+  "detection_rate": null,
+  "sample_count": 0,
+  "expected_result_note": "detection_rate 为 0.0 是本基线的**预期结果**：改造前的 04-review 只有单个 reviewer，注入存活变异后应当毫无反应。非 0 时应先怀疑采集脚本，不得通过调整注入方式或 prompt 让基线『变好看』（B0 的 9.4）。",
+  "partial": true,
+  "read_only": true
+}
