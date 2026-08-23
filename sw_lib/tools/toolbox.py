@@ -15,12 +15,19 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Callable, Set
 
-from ..core.config import ROOT, get_tools_for_stage
+from ..core.config import ROOT, WORKSPACE, get_tools_for_stage
 
 
 # ── 命令白名单 ──
 # run_command 仅允许执行白名单内的可执行文件（首 token 匹配）。
-# 这是 best-effort 沙箱；未来拓展容器隔离时，本集合映射为容器内可用命令。
+#
+# **白名单不是安全边界，它是误操作护栏。** 这个定性很重要，否则后人会基于
+# 「有白名单」的错觉做设计。理由：`python`/`node` 等解释器必须保留（跑测试
+# 需要），而 `python -c "open('.state','w')"` 无法用命令名堵住。真正的兜底是
+# `core/evidence.py` 的 HMAC 校验 —— 篡改可检出，而非篡改不可为。
+#
+# `sh`/`bash`/`zsh` 已移除：实测 `sh -c '<任意命令>'` 可执行白名单外程序
+# （/bin/rm 可达），因为白名单只看首 token，一层 -c 就完全绕过。
 DEFAULT_ALLOWED_COMMANDS: Set[str] = {
     # 版本控制
     "git", "git-lfs",
@@ -40,10 +47,69 @@ DEFAULT_ALLOWED_COMMANDS: Set[str] = {
     "cat", "ls", "pwd", "echo", "mkdir", "cp", "mv", "head", "tail",
     "grep", "sed", "awk", "find", "tar", "unzip", "jq", "wc", "sort", "uniq",
     "curl", "wget", "lsof", "ps", "kill", "which", "touch", "chmod", "date",
-    "sh", "bash", "zsh",
     # 测试
     "pytest", "unittest",
 }
+
+
+# ── 受保护路径（D0-7，修 2.4 第 1 条）──
+#
+# 改动要点：从「匹配 target.name」改为「匹配解析后的绝对路径前缀」。
+# 旧写法只看文件名，实测 `facts/tests.json` 与 `evidence/x.log` 均可写入 ——
+# 而这两处正是 A3 事实包与证据的落点，能写就等于能伪造判据。
+#
+# 分工：**代码写 `repo/`，判据存 `workspace/`**。因此整片保护 workspace 不会
+# 堵死 coding 阶段（阶段文档 `03-coding.md` 由 harness 自己写，见
+# workflow/base.py:484，不经 agent 的 write_file）。
+
+def _protected_dirs() -> tuple:
+    """返回受保护的目录/文件绝对路径。
+
+    延迟到调用时求值：ROOT/WORKSPACE 在测试里可能被 monkeypatch。
+    """
+    from ..core.config import CONFIG_DIR
+    return (
+        WORKSPACE.resolve(),                       # .state / STATUS.json / facts / evidence
+        (CONFIG_DIR / ".evidence_key").resolve(),  # 签名密钥：可读即 HMAC 形同虚设
+    )
+
+
+def _secret_paths() -> tuple:
+    """只读也不许的路径。
+
+    与 `_protected_dirs` 刻意分开：`.state` / `facts/` **允许读**（agent 需要
+    了解自己所处阶段，禁读会让工作流不可用），但签名密钥**读到就等于能伪造**，
+    因此读写皆禁。禁读的范围必须尽可能小，否则会被当噪音关掉。
+    """
+    from ..core.config import CONFIG_DIR
+    return ((CONFIG_DIR / ".evidence_key").resolve(),)
+
+
+def _is_secret(target: Path) -> bool:
+    try:
+        resolved = target.resolve()
+    except OSError:
+        return True
+    return any(resolved == p for p in _secret_paths())
+
+
+# harness 自己的状态文件名。除了前缀匹配，再按名字禁一层：
+# 任务目录可能被搬迁到 workspace 之外，且 agent 没有任何正当理由创建同名文件。
+_PROTECTED_NAMES = (".state", ".state.lock", "STATUS.json")
+
+
+def _is_protected(target: Path) -> bool:
+    """target 是否落在受保护范围内（含其自身与任意层级子路径）。"""
+    try:
+        resolved = target.resolve()
+    except OSError:
+        return True  # 解析不了就按最严处理，不放行
+    if resolved.name in _PROTECTED_NAMES:
+        return True
+    for guarded in _protected_dirs():
+        if resolved == guarded or guarded in resolved.parents:
+            return True
+    return False
 
 
 class BaseTool(ABC):
@@ -109,6 +175,10 @@ class ReadFileTool(BaseTool):
     def __call__(self, file_path: str) -> str:
         try:
             target = self._safe_path(file_path)
+            # 签名密钥可读 = HMAC 形同虚设。D0-5 已阻止它随环境下传，
+            # 这里补上文件读取这条路。
+            if _is_secret(target):
+                return f"错误: 禁止读取受保护的密钥文件 {file_path}。"
             return target.read_text(encoding="utf-8")
         except Exception as e:
             return f"错误: {e}"
@@ -124,10 +194,11 @@ class WriteFileTool(BaseTool):
     def __call__(self, file_path: str, content: str) -> str:
         try:
             target = self._safe_path(file_path)
-            # 禁止 Agent 直接写入系统状态文件
-            _PROTECTED_FILES = (".state", "STATUS.json")
-            if target.name in _PROTECTED_FILES:
-                return f"错误: 禁止直接修改系统文件 {target.name}。请使用 /advance 命令推进阶段。"
+            # 判据区一律禁写（前缀匹配，覆盖 .state / STATUS.json /
+            # facts/ / evidence/ 以及任意层级子路径）。
+            if _is_protected(target):
+                return (f"错误: 禁止写入受保护路径 {file_path}（判据区只能由 "
+                        f"harness 写入）。代码请写到 repo/ 下，阶段推进用 /advance。")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"成功写入 {file_path}"
@@ -147,9 +218,8 @@ class RunCommandTool(BaseTool):
     
     @property
     def description(self) -> str: return (
-        "执行 Shell 命令（仅限白名单命令）。参数: command (str), cwd (str, 可选, 工作目录), "
-        "timeout (int, 可选, 超时秒数, 默认 300), "
-        "restricted (bool, 可选, 是否限制修改系统状态文件, 默认 True)。"
+        "执行 Shell 命令（仅限白名单命令）。参数: command (str), cwd (str, 可选, "
+        "工作目录, 须在项目根内), timeout (int, 可选, 超时秒数, 默认 300)。"
     )
 
     def _check_whitelist(self, command: str) -> Optional[str]:
@@ -168,28 +238,70 @@ class RunCommandTool(BaseTool):
             )
         return None
 
-    def __call__(self, command: str, cwd: Optional[str] = None,
-                 timeout: Optional[int] = None,
-                 restricted: Optional[bool] = None) -> str:
+    def _check_argv_paths(self, command: str,
+                          cwd: Path) -> Optional[str]:
+        """检查 argv 中形似路径的参数是否指向判据区。
+
+        判定「形似路径」的规则：含 `/`、或以 `.` 开头、或是已存在的文件名。
+        相对路径按 `cwd` 解析 —— 按 ROOT 解析会漏掉 `cd` 到任务目录后的
+        `sed -i s/a/b/ .state`。
+
+        **这是护栏而非边界**：`python -c "..."` 里的路径不在 argv 里，堵不住。
+        兜底仍是 evidence.py 的 HMAC 校验。
+        """
         try:
-            # 白名单校验（best-effort 沙箱，不受 restricted 降级影响）
+            parts = shlex.split(command)
+        except ValueError:
+            return None  # 解析失败已由 _check_whitelist 拦下
+        for arg in parts[1:]:
+            if not arg or arg.startswith("-"):
+                continue
+            looks_like_path = ("/" in arg or arg.startswith(".")
+                               or (cwd / arg).exists())
+            if not looks_like_path:
+                continue
+            candidate = Path(arg)
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            if _is_protected(candidate) or _is_secret(candidate):
+                return (f"错误: 禁止通过命令行访问受保护路径 {arg}"
+                        f"（判据区只能由 harness 写入）。阶段推进用 /advance。")
+        return None
+
+    def __call__(self, command: str, cwd: Optional[str] = None,
+                 timeout: Optional[int] = None, **_ignored: Any) -> str:
+        """执行白名单内的命令。
+
+        **`restricted` 参数已移除**（D0-7，修 2.4 第 4 条）：它曾出现在
+        description 里，是 LLM 可见入参，传 `False` 即关闭状态文件保护 ——
+        判据不能由被判者开关。`**_ignored` 只为兼容旧调用方仍传该参数的情形，
+        传进来也不再有任何效果。
+        """
+        try:
             deny = self._check_whitelist(command)
             if deny:
                 return deny
 
-            # 禁止 Agent 在 ROOT 层面修改系统状态文件（仅 restricted=True 时）
-            if restricted is None or restricted:
-                if ".state" in command or "STATUS.json" in command or "sw advance" in command:
-                    return "错误: 禁止通过命令行修改系统状态。请使用 /advance 命令。"
-
             exec_timeout = timeout or 300
+
+            # cwd 必须落在 ROOT 内（修 2.4 第 6 条：实测 cwd="/Users/yfwang"
+            # 可成功列出家目录）。
             if cwd:
-                cwd_path = Path(cwd)
-                if not cwd_path.is_absolute():
-                    cwd_path = ROOT / cwd_path
-                cwd_str = str(cwd_path.resolve())
+                try:
+                    cwd_resolved = self._safe_path(cwd)
+                except PermissionError as e:
+                    return f"错误: {e}"
+                cwd_str = str(cwd_resolved)
             else:
+                cwd_resolved = ROOT.resolve()
                 cwd_str = str(ROOT)
+
+            # 判据区保护：逐个检查 argv 中的路径参数（修 2.4 第 2 条）。
+            # 旧实现做 `".state" in command` 字符串匹配，既漏（chr(46)+'state'
+            # 可绕）又误拦（`git commit -m "fix .state parsing"` 被拒）。
+            deny = self._check_argv_paths(command, cwd_resolved)
+            if deny:
+                return deny
 
             # 以参数列表方式执行，避免 shell 注入
             argv = shlex.split(command)

@@ -161,13 +161,12 @@ class LangGraphAdapter:
         if self.active_stage and self.active_stage.active_agent:
             # Resume state if it was waiting
             task_name = self.active_stage.active_agent.name
-            from ..core.state import read_state, write_state
-            from ..core.utils import now
+            from ..core.state import read_state
             st = read_state(task_name)
             if st and st.get("stage_status") == "pending":
-                st["stage_status"] = "running"
-                st["updated_at"] = now()
-                write_state(task_name, st)
+                # 受控入口，避免覆盖并发写入的 Gate/Route（A0/R1）
+                from .runtime import WorkflowRuntime
+                WorkflowRuntime.set_stage_status(task_name, "running")
             
             if hasattr(self.active_stage.active_agent, 'send'):
                 self.active_stage.active_agent.send(text)

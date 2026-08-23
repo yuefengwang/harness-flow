@@ -17,6 +17,10 @@ workflow/harness/credentials.yaml
 harness/credentials.yaml
 **/credentials.yaml
 
+# A0 证据签名密钥 —— 一旦提交，任何人都能伪造 red_witness 等证据签名
+config/.evidence_key
+**/.evidence_key
+
 # Tasks (temporary)
 workflow/tasks/*
 

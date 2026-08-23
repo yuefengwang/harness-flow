@@ -104,6 +104,9 @@ class OpenCodeAgent(BaseAgent):
         self._transport.set_model(model, provider)
         if use_native_tools:
             self._transport.set_tools(self._tool_switches())
+            # D0-6：路径粒度 deny 随 POST /session 带入（有效性 ❓ 未验证，
+            # 兑现「篡改可检出」的是 evidence.py 的 HMAC 校验）。
+            self._transport.set_permission_rules(self._permission_rules())
 
         self._seen_tools: set = set()
         self._seen_calls: set = set()
@@ -146,7 +149,10 @@ class OpenCodeAgent(BaseAgent):
                 except Exception:
                     continue
         env.pop("NODE_EXTRA_CA_CERTS", None)
-        return env
+        # A0/D0-5：整份环境会交给 `opencode serve` 子进程，而 agent 的 bash
+        # 工具一条 `env` 就能读到签名密钥并伪造任意证据签名。
+        from ..core.evidence import strip_secrets
+        return strip_secrets(env)
 
     # ── Model parsing ──
 
@@ -179,6 +185,50 @@ class OpenCodeAgent(BaseAgent):
         for harness_tool in allowed:
             enabled.update(TOOL_MAP.get(harness_tool, ()))
         return {t: (t in enabled) for t in _MANAGED_TOOLS}
+
+    def _permission_rules(self) -> List[Dict[str, str]]:
+        """生成 session 级权限规则表（D0-6）。
+
+        **有效性状态：❓ 未验证。** 依据 A0 的 2.7.2 实测 ——
+        `POST /api/session/{id}/permission` 不是纯规则求值器（即使只有一条
+        `write:* deny` 也返回 allow，服务端日志无 `evaluated` 行），
+        真实判定发生在工具执行路径，需真实 LLM 会话触发 write 才走到。
+        因此**不得**以本方法为由声称证据已受保护 —— 那个承诺由
+        `core/evidence.py` 的 HMAC 校验兑现。
+
+        四条纪律：
+
+        1. 只产出 `allow` / `deny`，**绝不产出 `ask`** —— harness 不订阅
+           `permission.asked`，一旦产生 ask 会死等到 CHAT_TIMEOUT（1800 秒）。
+           注意 opencode 无匹配时默认就是 ask，所以每种权限都要显式给底规则。
+        2. deny **只覆盖 `write` / `edit`**。`bash` 无法按路径约束，
+           给它写路径 deny 是自欺。
+        3. 规则随 `POST /session` 一次性带入，禁用 PATCH（merge 语义会累积，
+           叠加 `findLast` 后者优先会让 deny 被后来的 allow 覆盖）。
+        4. deny 排在 allow **之后** —— `findLast` 语义下后者优先。
+        """
+        switches = self._tool_switches()
+
+        rules: List[Dict[str, str]] = [
+            {"permission": tool, "pattern": "*",
+             "action": "allow" if on else "deny"}
+            for tool, on in switches.items()
+        ]
+
+        # 判据区禁写。pattern 的 glob 语义仍未验证（2.7.2 第 2 条：assert 端点
+        # 不可用作判据），因此同一目标冗余覆盖多种写法，宁可重复也不漏。
+        guarded = (
+            ".state", "**/.state", "**/.state.lock",
+            "STATUS.json", "**/STATUS.json",
+            "workspace/**", "**/workspace/**",
+            "**/facts/**", "**/evidence/**",
+            "config/.evidence_key", "**/.evidence_key",
+        )
+        for perm in ("write", "edit"):
+            for pattern in guarded:
+                rules.append({"permission": perm, "pattern": pattern,
+                              "action": "deny"})
+        return rules
 
     # ── 结构化消息分发（不再解析裸 parts）──
 

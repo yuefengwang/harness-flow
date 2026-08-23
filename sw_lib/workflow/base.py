@@ -155,11 +155,9 @@ class StageRunnable(HarnessRunnable):
         )
 
         # 1. Update state to 'running'
-        st = read_state(input.task_name)
-        if st:
-            st["stage_status"] = "running"
-            st["updated_at"] = now()
-            write_state(input.task_name, st)
+        # 走受控入口：裸 read→改→write 会抹掉并发签署的 Gate（A0/R1 实测）。
+        from .runtime import WorkflowRuntime
+        WorkflowRuntime.set_stage_status(input.task_name, "running")
 
         # 1.5 播种门禁定义。必须在 agent 启动之前完成：用户可能在 agent
         #     说完之前就按 [A] 签署。
@@ -179,11 +177,8 @@ class StageRunnable(HarnessRunnable):
         # 3. Mark stage idle (agent done). Must happen before parse/gate/save
         #    so the TUI stops showing "Agent working..." even if later steps fail.
         try:
-            st = read_state(input.task_name)
-            if st:
-                st["stage_status"] = "idle"
-                st["updated_at"] = now()
-                write_state(input.task_name, st)
+            from .runtime import WorkflowRuntime
+            WorkflowRuntime.set_stage_status(input.task_name, "idle")
         except Exception:
             pass
         
@@ -239,7 +234,6 @@ class StageRunnable(HarnessRunnable):
         import shutil
         from pathlib import Path
         from ..core.config import ROOT
-        from ..core.state import read_state
 
         st = read_state(task_name)
         target_dir = st.get("target_dir", "")

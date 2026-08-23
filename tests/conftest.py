@@ -67,6 +67,31 @@ def _reap_workspace_residue():
         remove_task_summary(name)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_evidence_key(tmp_path_factory):
+    """把 A0 签名密钥重定向到 tmp，防止测试碰生产密钥。
+
+    实测：`config.yaml` 的 `mock_agent.enabled` 为 false，因此本地跑测试走
+    真实分支 —— `write_state` 会签名，`get_key()` 于是在真实
+    `config/.evidence_key` 下**创建密钥**。删掉再跑全量会重新生成。
+
+    两个后果都不能接受：测试污染生产配置；万一某用例写入了不同密钥，
+    用户既有 `.state` 的签名会集体变成 tampered。
+
+    session 作用域：密钥要在整个会话内保持一致，逐用例换密钥会让跨用例
+    写入/校验的签名对不上。
+    """
+    from sw_lib.core import evidence as ev
+
+    key_dir = tmp_path_factory.mktemp("evidence-key")
+    original = ev.KEY_PATH
+    ev.KEY_PATH = key_dir / ".evidence_key"
+    ev.get_key.cache_clear()
+    yield
+    ev.KEY_PATH = original
+    ev.get_key.cache_clear()
+
+
 @pytest.fixture(autouse=True)
 def _reset_web_engine_manager():
     """WebEngineManager is a process-wide singleton; clear its session registry

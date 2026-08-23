@@ -470,7 +470,11 @@ class MonitorTUI:
                 elif st_status == "idle" and not self._stage_has_output():
                     # idle 但无 AI Output → 之前异常退出未产出，重新启动
                     self._add_log("sw", f"阶段无产出，重启 agent...")
-                    write_state(self.state.name, {**st, "stage_status": "pending"})
+                    # 受控入口：并发下不覆盖他人对 .state 的修改（A0/R1）。
+                    # 不在此处 import：模块级已导入，函数内再 import 会让
+                    # WorkflowRuntime 变成整个 run() 的局部变量，导致上方
+                    # pending 分支的引用抛 UnboundLocalError。
+                    WorkflowRuntime.set_stage_status(self.state.name, "pending")
                     executor = WorkflowRuntime.get_executor()
                     stage_input = StageInput(
                         task_name=self.state.name,

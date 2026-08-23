@@ -148,6 +148,23 @@ class PtyAgent(BaseAgent):
                     self._add_log("error", f"加载凭证失败 ({p.name}): {e}")
         return creds
 
+    def _build_env(self):
+        """构造交给 agent 子进程的环境变量。"""
+        env = os.environ.copy()
+        # 强制禁用某些 Agent 可能产生的交互式全屏特性
+        env["TERM"] = "dumb"
+        env["COLUMNS"] = "80"
+        env["LINES"] = "24"
+
+        creds = self._load_credentials()
+        if creds:
+            env.update({str(k): str(v) for k, v in creds.items()})
+            self._add_log("sw", f"已注入 {len(creds)} 个凭证环境变量")
+        # A0/D0-5：与 opencode 同理 —— gemini 也有 shell 工具，
+        # 签名密钥不得随环境下传。凭证是 agent 要用的，密钥不是。
+        from ..core.evidence import strip_secrets
+        return strip_secrets(env)
+
     def send(self, text):
         if self._master_fd is None:
             self._add_log("sw", "Agent 未运行，输入已写入 .input (sw next 后生效)")
@@ -202,17 +219,7 @@ class PtyAgent(BaseAgent):
             self.status = self.STATUS_CONNECTING
             self._add_log("sw", f"⏳ 正在启动 Agent: {actual_cmd} ...")
 
-            # 加载凭证并准备环境
-            env = os.environ.copy()
-            # 强制禁用某些 Agent 可能产生的交互式全屏特性
-            env["TERM"] = "dumb"  
-            env["COLUMNS"] = "80"
-            env["LINES"] = "24"
-            
-            creds = self._load_credentials()
-            if creds:
-                env.update({str(k): str(v) for k, v in creds.items()})
-                self._add_log("sw", f"已注入 {len(creds)} 个凭证环境变量")
+            env = self._build_env()
 
             master_fd, slave_fd = pty.openpty()
             

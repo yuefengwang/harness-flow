@@ -77,6 +77,7 @@ class OpenCodeTransport:
         self._event_thread: Optional[threading.Thread] = None
         self._event_stop = threading.Event()
         self._tools: Optional[Dict[str, bool]] = None
+        self._permission_rules: Optional[List[Dict[str, str]]] = None
 
     # ── 公开属性 ──
     @property
@@ -102,6 +103,17 @@ class OpenCodeTransport:
     def set_tools(self, tools: Optional[Dict[str, bool]]) -> None:
         """设置本 session 的原生工具开关（None 表示交给 opencode 默认）。"""
         self._tools = tools
+
+    def set_permission_rules(
+            self, rules: Optional[List[Dict[str, str]]]) -> None:
+        """设置 session 级权限规则，随 `POST /session` 一次性带入。
+
+        **不提供 PATCH 更新入口**（A0 的 2.7.2 第 1 条实测）：
+        `PATCH /session/{id}` 是 merge 而非 replace，连续下发会让规则累积；
+        叠加 `findLast` 后者优先的判定语义，累积的结果是**先前的 deny 被
+        后来的 allow 覆盖** —— 恰好是最危险的方向。需要换规则就换 session。
+        """
+        self._permission_rules = rules
 
     # ── 生命周期 ──
 
@@ -246,10 +258,14 @@ class OpenCodeTransport:
             return self._session_id
         if not self._server_url:
             raise OpenCodeTransportError("transport 未启动，无法创建会话")
+        body: Dict[str, Any] = {}
+        if self._permission_rules:
+            body["permission"] = self._permission_rules
         try:
             resp = requests.post(
                 f"{self._server_url}/session",
                 params=self._params(),
+                json=body,
                 timeout=self.HEALTH_TIMEOUT,
             )
             resp.raise_for_status()
@@ -272,7 +288,13 @@ class OpenCodeTransport:
         }
         if system:
             payload["system"] = system
-        if self._tools:
+        # **不发 tools。** 实测（真实 serve 1.18.20）：服务端 SessionPrompt.prompt
+        # 会把 tools 翻译成 `pattern:"*"` 规则后**整体赋值** `O.permission = R`，
+        # 把 POST /session 带入的路径级 deny 全部抹掉 —— 31 条降到 9 条，
+        # 路径 deny 剩 0 条。tools 在 opencode 侧只用于生成权限规则，
+        # 规则已在建 session 时带入，因此这里不发不丢任何功能。
+        if self._tools and not self._permission_rules:
+            # 没有规则表时退回旧行为（粗粒度总比无规则默认 ask 好）。
             payload["tools"] = self._tools
         try:
             resp = requests.post(

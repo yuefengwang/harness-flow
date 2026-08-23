@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.config import STAGES, TASKS, TPLS
-from ..core.state import read_state, write_state
+from ..core.state import read_state, update_state, NO_CHANGE
 
 
 # ── 数据模型 ──
@@ -135,20 +135,27 @@ def seed_gate(task: str, stage: str) -> bool:
 
     返回是否发生了写入。
     """
-    state = read_state(task)
-    if not state:
-        return False
-    bucket = _stage_bucket(state, stage)
-    if isinstance(bucket.get("gate"), dict) and bucket["gate"].get("items"):
-        return False
-    items = parse_template_gate(stage)
-    bucket["gate"] = {
-        "items": [{"key": i.key, "label": i.label, "checked": i.checked} for i in items],
-        "signed_by": None,
-        "signed_at": None,
-    }
-    write_state(task, state)
-    return True
+    wrote = False
+
+    def mutate(state):
+        nonlocal wrote
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        if isinstance(bucket.get("gate"), dict) and bucket["gate"].get("items"):
+            return NO_CHANGE                     # 幂等：已播种，不刷新时间戳
+        items = parse_template_gate(stage)
+        bucket["gate"] = {
+            "items": [{"key": i.key, "label": i.label, "checked": i.checked}
+                      for i in items],
+            "signed_by": None,
+            "signed_at": None,
+        }
+        wrote = True
+        return state
+
+    update_state(task, mutate)
+    return wrote
 
 
 # ── Gate 读写 ──
@@ -185,41 +192,50 @@ def sign_gate(task: str, stage: str, by: str = "user") -> bool:
     没有任何门禁项时返回 False —— 调用方需要区分「签署成功」与「无事可签」，
     否则空 Gate 会被静默当成通过。
     """
-    state = read_state(task)
-    if not state:
-        return False
-    bucket = _stage_bucket(state, stage)
-    raw = bucket.get("gate")
-    if not isinstance(raw, dict) or not raw.get("items"):
-        items = parse_template_gate(stage)
-        if not items:
-            return False
-        raw = {"items": [{"key": i.key, "label": i.label, "checked": False}
-                         for i in items]}
-        bucket["gate"] = raw
-    for d in raw["items"]:
-        if isinstance(d, dict):
-            d["checked"] = True
-    raw["signed_by"] = by
-    raw["signed_at"] = _now()
-    write_state(task, state)
-    return True
+    signed = False
+
+    def mutate(state):
+        nonlocal signed
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        raw = bucket.get("gate")
+        if not isinstance(raw, dict) or not raw.get("items"):
+            items = parse_template_gate(stage)
+            if not items:
+                return NO_CHANGE                 # 空 Gate 不得被静默当成通过
+            raw = {"items": [{"key": i.key, "label": i.label, "checked": False}
+                             for i in items]}
+            bucket["gate"] = raw
+        for d in raw["items"]:
+            if isinstance(d, dict):
+                d["checked"] = True
+        raw["signed_by"] = by
+        raw["signed_at"] = _now()
+        signed = True
+        return state
+
+    update_state(task, mutate)
+    return signed
 
 
 def reset_gate(task: str, stage: str) -> None:
     """撤销签署（返工时用）。保留 items 定义，只清勾选与签署人。"""
-    state = read_state(task)
-    if not state:
-        return
-    bucket = _stage_bucket(state, stage)
-    raw = bucket.get("gate")
-    if isinstance(raw, dict) and raw.get("items"):
+    def mutate(state):
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        raw = bucket.get("gate")
+        if not (isinstance(raw, dict) and raw.get("items")):
+            return NO_CHANGE
         for d in raw["items"]:
             if isinstance(d, dict):
                 d["checked"] = False
         raw["signed_by"] = None
         raw["signed_at"] = None
-        write_state(task, state)
+        return state
+
+    update_state(task, mutate)
 
 
 # ── Route 读写（仅 04-review）──
@@ -248,13 +264,20 @@ def write_route(task: str, target: str, by: str = "user",
     norm = _normalize_route(target)
     if norm is None:
         return False
-    state = read_state(task)
-    if not state:
-        return False
-    bucket = _stage_bucket(state, stage)
-    bucket["route"] = {"target": norm, "decided_by": by, "decided_at": _now()}
-    write_state(task, state)
-    return True
+    ok = False
+
+    def mutate(state):
+        nonlocal ok
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        bucket["route"] = {"target": norm, "decided_by": by,
+                           "decided_at": _now()}
+        ok = True
+        return state
+
+    update_state(task, mutate)
+    return ok
 
 
 def reset_route(task: str, stage: str = "04-review") -> None:
@@ -265,19 +288,21 @@ def reset_route(task: str, stage: str = "04-review") -> None:
     路由面板重新出现、推进重新等待新决策 —— 这正是修 03↔04 死循环所需的
     效果（任务 T3）；而历史留在状态里，审计不受影响。
     """
-    state = read_state(task)
-    if not state:
-        return
-    bucket = _stage_bucket(state, stage)
-    current = bucket.pop("route", None)
-    if current is None:
-        return
-    history = bucket.get("route_history")
-    if not isinstance(history, list):
-        history = []
-    history.append(current)
-    bucket["route_history"] = history
-    write_state(task, state)
+    def mutate(state):
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        current = bucket.pop("route", None)
+        if current is None:
+            return NO_CHANGE
+        history = bucket.get("route_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(current)
+        bucket["route_history"] = history
+        return state
+
+    update_state(task, mutate)
 
 
 def read_route_history(task: str, stage: str = "04-review") -> List[Dict[str, Any]]:
@@ -320,17 +345,23 @@ def record_decision(task: str, stage: str, question: str, answer: str,
     a = (answer or "").strip()
     if not q or not a:
         return False
-    state = read_state(task)
-    if not state:
-        return False
-    bucket = _stage_bucket(state, stage)
-    decisions = bucket.get("decisions")
-    if not isinstance(decisions, dict):
-        decisions = {}
-    decisions[q] = {"answer": a, "decided_by": by, "decided_at": _now()}
-    bucket["decisions"] = decisions
-    write_state(task, state)
-    return True
+    ok = False
+
+    def mutate(state):
+        nonlocal ok
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        decisions = bucket.get("decisions")
+        if not isinstance(decisions, dict):
+            decisions = {}
+        decisions[q] = {"answer": a, "decided_by": by, "decided_at": _now()}
+        bucket["decisions"] = decisions
+        ok = True
+        return state
+
+    update_state(task, mutate)
+    return ok
 
 
 # ── AI Output 边界 nonce ──
@@ -342,16 +373,22 @@ def issue_output_nonce(task: str, stage: str) -> str:
     不再依赖「找下一个 ## Gate」的前提。同一阶段复用同一个 nonce，
     使得多轮 flush 能精确替换上一次的产出而不是层层追加。
     """
-    state = read_state(task)
-    if not state:
-        return secrets.token_hex(4)
-    bucket = _stage_bucket(state, stage)
-    nonce = bucket.get("output_nonce")
-    if not isinstance(nonce, str) or not nonce:
-        nonce = secrets.token_hex(4)
-        bucket["output_nonce"] = nonce
-        write_state(task, state)
-    return nonce
+    issued = secrets.token_hex(4)
+
+    def mutate(state):
+        nonlocal issued
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        nonce = bucket.get("output_nonce")
+        if isinstance(nonce, str) and nonce:
+            issued = nonce                       # 复用：多轮 flush 精确替换
+            return NO_CHANGE
+        bucket["output_nonce"] = issued
+        return state
+
+    update_state(task, mutate)
+    return issued
 
 
 def read_output_nonce(task: str, stage: str) -> Optional[str]:

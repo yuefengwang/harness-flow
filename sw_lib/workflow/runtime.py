@@ -11,7 +11,8 @@ from .utils import (
 )
 from . import stage_state as ss
 from ..core.config import MAX_REROUTE, STAGES
-from ..core.state import read_state, write_state, upsert_task_summary
+from ..core.state import (read_state, write_state, upsert_task_summary,
+                          raise_if_corrupted, update_state, NO_CHANGE)
 from ..core.utils import now, sw_log
 
 class WorkflowRuntime:
@@ -32,6 +33,27 @@ class WorkflowRuntime:
             raise RuntimeError("WorkflowRuntime not initialized. Call bootstrap() first.")
         return cls._executor
 
+    @staticmethod
+    def set_stage_status(name: str, status: str) -> Dict[str, Any]:
+        """只改 `stage_status` / `updated_at`，走受控入口。
+
+        为什么需要它：`base.py` / `graph.py` / `tui.py` 原本各自
+        `read_state` → 改这两个字段 → `write_state`。实测（15 次交错）
+        这会**抹掉用户刚签的 Gate** —— 它们读到签署前的旧快照，
+        改完整体写回，签署凭空消失。判据丢失比状态显示错误严重得多。
+
+        `runtime.py` 里那句"直接拿旧快照写回去会把重置结果整体覆盖掉"的
+        注释说明这个坑早被踩过，但当时只在那一处就地重读绕过去了。
+        """
+        def mutate(state):
+            if not state:
+                return NO_CHANGE
+            state["stage_status"] = status
+            state["updated_at"] = now()
+            return state
+
+        return update_state(name, mutate)
+
     @classmethod
     def advance(cls, name: str) -> Dict[str, Any]:
         """Single source of truth for stage routing.
@@ -47,6 +69,10 @@ class WorkflowRuntime:
         st = read_state(name)
         if st is None:
             raise RuntimeError(f"Task not found: {name}")
+        # A0/D0-1：损坏的 .state 在**入口**就拒绝。
+        # 否则一路走到 write_state 才抛裸 ValueError —— 数据虽保住了，
+        # 但用户看到的是深处崩栈，而非"哪个文件坏了、怎么修"。
+        raise_if_corrupted(st, name)
         idx = int(st.get("stage_idx", 0))
         cur_stage = STAGES[idx]
 
