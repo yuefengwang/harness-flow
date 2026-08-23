@@ -6,6 +6,8 @@
 `[Task ID]`: ___ 
 
 ## Red-Green
+<!-- 红绿状态由 harness 亲自观测并记录在 .state 的 red_witness 里；
+     这里的勾选是给人看的叙述，不参与任何判定。 -->
 - [ ] **Red**: repro/test fails
 - [ ] **Green**: fix passes
 - **Verify cmd**: `___`

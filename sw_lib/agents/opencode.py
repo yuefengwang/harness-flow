@@ -228,6 +228,82 @@ class OpenCodeAgent(BaseAgent):
             for pattern in guarded:
                 rules.append({"permission": perm, "pattern": pattern,
                               "action": "deny"})
+
+        rules.extend(self._substage_write_rules())
+        return rules
+
+    # ── A2 的 3.3：03a / 03b 的写入约束（硬层）──
+
+    # 测试路径的判定与 `red_witness.hash_test_files` 保持同一套形状，
+    # 否则会出现「硬层允许写、准出时却算进冻结哈希」的错位。
+    _TEST_PATTERNS: Tuple[str, ...] = (
+        "test_*.py", "*_test.py",
+        "**/test_*.py", "**/*_test.py",
+        "tests/**", "**/tests/**",
+    )
+
+    def _witness_substage(self) -> Optional[str]:
+        """当前的 red_witness 子阶段；不在见证流程内时返回 None。
+
+        读失败一律当作「不在流程内」：这一层是提前反馈，不是主防线
+        （主防线是准出时的哈希校验）。为读状态失败而挡住 agent 写文件，
+        代价明显大于收益。
+        """
+        # 阶段检查在最前面：子阶段是 03-coding **内部**的概念，
+        # 其他阶段绝不该套上它的写入约束（哪怕测试注入了覆写值）。
+        if self.stage != "03-coding":
+            return None
+        override = getattr(self, "_witness_phase", "__unset__")
+        if override != "__unset__":
+            return override
+        try:
+            from ..workflow import red_witness as rw
+
+            phase = rw.read_phase(self.name)
+            return phase if phase in (rw.PHASE_TEST, rw.PHASE_IMPL) else None
+        except Exception:
+            return None
+
+    def _substage_write_rules(self) -> List[Dict[str, str]]:
+        """把 03a / 03b 的写入约束翻译成 write / edit 规则。
+
+        **有效性 ❓ 未验证**，与 D0-6 同一条定性（A0 的 2.7.2：assert 端点
+        一律返回 allow，真实判定在工具执行路径）。兑现「改测试可检出」的是
+        A2 的哈希冻结 —— 3.3 末尾写明它是**长期主防线**，因为 `bash`
+        无法按路径约束（A0 的 U0-1），agent 始终可以绕过工具写文件。
+
+        这一层的价值是**时机**：让「不该写」在写的那一刻就被拒，
+        而不是等到准出才报错，省掉一整轮返工。
+
+        `phase == none` 时返回空列表 —— 存量任务与返工轮次落在这一态，
+        多下发一条规则就会把「见证机制只是不观测」变成
+        「见证机制悄悄改了 agent 的写权限」。
+        """
+        phase = self._witness_substage()
+        if phase is None:
+            return []
+
+        from ..workflow import red_witness as rw
+
+        rules: List[Dict[str, str]] = []
+        if phase == rw.PHASE_IMPL:
+            # 03b：实现文件照常写，测试文件禁改。
+            # deny 追加在最后 —— findLast 后者优先。
+            for perm in ("write", "edit"):
+                for pattern in self._TEST_PATTERNS:
+                    rules.append({"permission": perm, "pattern": pattern,
+                                  "action": "deny"})
+            return rules
+
+        # 03a：只写测试。顺序是刻意的 —— 先 deny 所有 .py，再 allow 测试路径，
+        # 因为 findLast 是后者优先；反过来写会把测试文件一起挡掉，03a 死锁。
+        for perm in ("write", "edit"):
+            for pattern in ("*.py", "**/*.py"):
+                rules.append({"permission": perm, "pattern": pattern,
+                              "action": "deny"})
+            for pattern in self._TEST_PATTERNS:
+                rules.append({"permission": perm, "pattern": pattern,
+                              "action": "allow"})
         return rules
 
     # ── 结构化消息分发（不再解析裸 parts）──

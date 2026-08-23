@@ -15,6 +15,32 @@ from ..core.state import (read_state, write_state, upsert_task_summary,
                           raise_if_corrupted, update_state, NO_CHANGE)
 from ..core.utils import now, sw_log
 
+
+def _stay_for_impl(name: str) -> bool:
+    """03-coding 是否应停在本阶段做实现（即刚见证完红，phase 仍是 03a）。
+
+    读的是 `red_witness.phase`，而钩子在准出时已把它推到 03b ——
+    因此「phase 还是 03a」意味着见证尚未完成（开关关闭、mock、
+    或存量任务首次进入），这时不该额外拦一道：真正的拦截在钩子里。
+
+    换言之本函数只回答一个问题：**已经见证到红、但实现还没做**。
+    """
+    try:
+        from . import red_witness as rw
+    except Exception:
+        return False
+    try:
+        record = rw.read_witness(name)
+        if not record or record.get("mock"):
+            return False
+        # 见证过红（有 witnessed_at 与判据节点）但还没转绿 → 停下做实现
+        if not record.get("witnessed_at") or not record.get("failed_nodes"):
+            return False
+        return not record.get("green_at")
+    except Exception:
+        return False
+
+
 class WorkflowRuntime:
     """Manages the lifecycle of the workflow graph."""
     
@@ -88,6 +114,21 @@ class WorkflowRuntime:
         next_stage = cur_stage
         next_idx = idx
         is_reroute = False
+
+        # 0. 03-coding 的子阶段（A2 的 3.2）。03a 见证完红之后要留在本阶段
+        #    做实现，不能沿 STAGES 链走掉 —— 否则实现阶段被整个跳过，
+        #    red_witness 沦为装饰。03a / 03b 是 `.state` 里的子状态，
+        #    **不进 STAGES**：那个常量被 TUI / Web / entry_router 多处依赖。
+        if cur_stage == "03-coding" and _stay_for_impl(name):
+            ss.reset_gate(name, cur_stage)
+            ss.render_gate_section(name, cur_stage)
+            st = read_state(name) or st
+            st["stage_status"] = "pending"
+            st["updated_at"] = now()
+            write_state(name, st)
+            upsert_task_summary(name, stage_status="pending")
+            sw_log(name, "03a 已见证红 → 留在 03-coding 进入实现（03b）", "sw")
+            return st
 
         # 1. Review 阶段的显式路由优先。读 `.state` 而不是 04-review.md：
         #    推进是不可逆动作（改 stage_idx、注入返工上下文、重置门禁），

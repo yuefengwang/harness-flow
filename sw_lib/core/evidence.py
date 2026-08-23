@@ -144,8 +144,26 @@ def has_evidence(state: Dict[str, Any]) -> bool:
 
 
 def sign_evidence(state: Dict[str, Any]) -> str:
-    """对状态中的证据字段计算 HMAC-SHA256。"""
+    """对状态中的证据字段计算 HMAC-SHA256（用当前进程的密钥）。"""
     return hmac.new(get_key(), _canonical(state), hashlib.sha256).hexdigest()
+
+
+def _is_mock_record(state: Dict[str, Any]) -> bool:
+    """这份状态是否由 mock 模式写出 —— 判据取自 `.state` **自身**。
+
+    存在的理由（由 e2e 实测抓出）：签名用哪把密钥是**那份数据的属性**，
+    不是读它的进程的属性。此前 mock 签名域只靠 `SW_MOCK_AGENT` 环境变量
+    维系，于是 `tests/e2e-flow/verify.py` 另起进程复查钩子时，
+    同一份合法的 `.state` 被判成 `tampered` —— 而它是正常写入的。
+
+    只认 `red_witness.mock is True` 这一处显式标记。不做「猜」：
+    字段缺失、类型不对、写着别的值，一律当作真实模式，
+    因为放宽的方向必须是「更严」而不是「更松」。
+    """
+    record = state.get("red_witness")
+    if not isinstance(record, dict):
+        return False
+    return record.get("mock") is True
 
 
 def attach_signature(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,7 +191,18 @@ def verify_evidence(state: Dict[str, Any]) -> VerifyResult:
             "unsigned",
             "存在证据但无签名 —— 可能是绕过受控入口写入的")
 
-    expected = sign_evidence(state)
+    # 签名域由 `.state` 自描述：mock 产出的记录用固定的 _MOCK_KEY 校验，
+    # 与当前进程是否处在 mock 模式无关（见 `_is_mock_record` 的 docstring）。
+    #
+    # 安全性方向：这**不会**削弱真实签名。mock 密钥是源码里的公开常量，
+    # 因此只有**明确标了 `mock: true`** 的记录才允许用它校验；
+    # 抹掉标记想蒙过去，签名立刻对不上（`_canonical` 覆盖整棵 red_witness 子树）。
+    if _is_mock_record(state):
+        expected = hmac.new(_MOCK_KEY, _canonical(state),
+                            hashlib.sha256).hexdigest()
+    else:
+        expected = sign_evidence(state)
+
     # compare_digest：避免以字符串比较泄露时序信息
     if hmac.compare_digest(str(sig), expected):
         return VerifyResult("valid")

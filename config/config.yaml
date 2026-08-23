@@ -9,6 +9,10 @@ harness:
   base_branch: dev
   branch_prefix: harness
   repo_path: repo
+  coding:
+    # Red 见证（A2）。false = 03 阶段不拆子状态，走原有的 run_project_tests，
+    # 行为与引入见证之前完全一致；.state 里的 red_witness 字段被忽略但不删除。
+    red_witness: true
   docker:
     enabled: false
     image_prefix: sw-agent

@@ -78,6 +78,24 @@ def _apply_auto_advance_flags(args) -> None:
 
 # ── commands ──
 
+def apply_mock_flags(args) -> None:
+    """把 `--mock` / `--no-mock` 落到进程内存**和环境变量**两处。
+
+    优先级：CLI 标志 > `config.yaml`。
+
+    必须同时写环境变量，否则钩子等**子进程**重新加载配置后看不到这个开关 ——
+    主进程用 mock 的固定密钥签名、子进程用真实密钥校验，`.state` 会被判成
+    `tampered`，03 阶段永久无法准出（`tests/e2e-flow/driver.py` 实测卡死）。
+    详见 `core/config.is_mock_agent()` 的 docstring。
+    """
+    from ..core.config import set_mock_agent
+
+    if getattr(args, "no_mock", False):
+        set_mock_agent(False)
+    elif getattr(args, "mock", False):
+        set_mock_agent(True)
+
+
 def cmd_init(args):
     """创建新任务"""
     name = args.name or ""
@@ -111,14 +129,7 @@ def cmd_init(args):
         target_dir = result.get("target_dir", target_dir)
 
     # 处理 mock/no-mock 参数（优先级: CLI 输入 > config.yaml）
-    no_mock_flag = getattr(args, "no_mock", False)
-    mock_flag = getattr(args, "mock", False)
-    if no_mock_flag:
-        from ..core.config import _manager
-        _manager.config.mock_agent.enabled = False
-    elif mock_flag:
-        from ..core.config import _manager
-        _manager.config.mock_agent.enabled = True
+    apply_mock_flags(args)
 
     try:
         # 如果未指定 agent，则传 N/A 让 Service/Engine 自动解析

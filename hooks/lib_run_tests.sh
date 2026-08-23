@@ -13,6 +13,25 @@ resolve_target_dir() {
         "$state" 2>/dev/null || true
 }
 
+# Red 见证开关（A2 第 11 节）。打印 1 = 开启，0 = 关闭。
+#
+# 默认开启：机制默认可关的意思是「出问题能一键退回」，不是「默认不生效」。
+# 关闭后 03 阶段不拆子状态，走原来的 run_project_tests。
+red_witness_enabled() {
+    python3 -c "
+import sys
+try:
+    import yaml
+    with open('config/config.yaml', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f) or {}
+    coding = ((cfg.get('harness') or {}).get('coding') or {})
+    val = coding.get('red_witness', True)
+except Exception:
+    val = True
+print('1' if val else '0')
+" 2>/dev/null || echo 1
+}
+
 # target_dir 里除了 harness 自己的记账文件之外，有没有真实产出。
 # 返回 0 = 有产出，1 = 空。
 #

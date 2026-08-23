@@ -26,6 +26,24 @@ if ! has_code_output "$TARGET_DIR"; then
     exit 1
 fi
 
-run_project_tests "$TARGET_DIR" "pytest 失败" || exit 1
+# ── Red 见证（A2）──
+#
+# 开关关闭时走原有逻辑，行为与加这段之前完全一致（A2 第 11 节的回滚要求）。
+#
+# 开启时**取代** run_project_tests 而不是叠加：03a 阶段的测试本来就该是
+# 失败的，旧逻辑会把那个红判成「pytest 失败」直接拒绝，红绿流程根本走不起来。
+if [ "$(red_witness_enabled)" = "1" ]; then
+    echo "[Red Witness] 见证 03 阶段红绿流程..."
+    if ! python3 -m sw_lib.workflow.red_witness "$TASK_NAME"; then
+        exit 1
+    fi
+    # 未进入见证流程（存量任务 / 返工轮次）时，见证不接管测试执行 ——
+    # 「失败的测试不许过闸」这条既有契约仍由 run_project_tests 兑现。
+    if [ "$(python3 -m sw_lib.workflow.red_witness "$TASK_NAME" --phase)" = "none" ]; then
+        run_project_tests "$TARGET_DIR" "pytest 失败" || exit 1
+    fi
+else
+    run_project_tests "$TARGET_DIR" "pytest 失败" || exit 1
+fi
 
 echo "[Hard Check] ✅ 通过"

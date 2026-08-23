@@ -7,6 +7,8 @@ sw_lib.config — 路径定义、阶段声明及配置模型化管理。
 3. 提供向后兼容的配置查询接口。
 """
 
+import os
+
 import yaml
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -247,9 +249,45 @@ def set_auto_answer(enabled: bool) -> None:
     """运行期覆写自动代答开关（供 CLI 的 --unattended 使用）。"""
     _manager.config.auto_answer = bool(enabled)
 
+# `sw init --mock` 的跨进程载体。见 is_mock_agent() 的 docstring。
+MOCK_ENV_NAME = "SW_MOCK_AGENT"
+
+
 def is_mock_agent() -> bool:
-    """检查是否启用 Mock Agent"""
+    """检查是否启用 Mock Agent。环境变量优先于 config.yaml。
+
+    **为什么需要环境变量这一层**（由 e2e 实测抓出，单元测试全绿时漏掉了）：
+
+    `sw init --mock` 原先只改主进程内存里的 `mock_agent.enabled`，不写
+    `config.yaml`。而钩子是**独立子进程**，重新加载配置文件后看到的是
+    `enabled: false` —— 于是主进程用 mock 的固定密钥给 `.state` 签名，
+    钩子却用真实 `config/.evidence_key` 校验，必然 `tampered`：
+
+        ❌ 证据签名校验未通过（tampered）
+
+    03 阶段因此永久无法准出（`tests/e2e-flow/driver.py` 实测卡死）。
+    签名域分裂只在跨进程时出现，所以进程内的单元测试测不到它。
+
+    用环境变量而不是回写 `config.yaml`：`--mock` 是一次性的命令行开关，
+    固化进用户配置会让下一次**不带标志**的运行也悄悄走 MockAgent。
+
+    显式的 `"0"` 表示关闭并回落到配置文件，不是「未设置」—— 否则一旦某处
+    顺手设了这个变量，用户的真实运行会被静默替换成 MockAgent。
+    """
+    raw = os.environ.get(MOCK_ENV_NAME)
+    if raw is not None and raw != "":
+        return raw.strip().lower() in ("1", "true", "yes", "on")
     return _manager.config.mock_agent.enabled
+
+
+def set_mock_agent(enabled: bool) -> None:
+    """运行期切换 MockAgent，并把开关导出给子进程继承。
+
+    两处一起写：内存配置供当前进程用，环境变量供钩子等子进程用。
+    只改一处就是前述 `tampered` 的成因。
+    """
+    _manager.config.mock_agent.enabled = bool(enabled)
+    os.environ[MOCK_ENV_NAME] = "1" if enabled else "0"
 
 def get_repo_path() -> str:
     """获取生成代码的默认输出目录"""
