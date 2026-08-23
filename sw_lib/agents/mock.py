@@ -11,6 +11,7 @@
         "01-brainstorming": "可选的自定义回复内容"
 """
 
+import os
 import threading
 import time
 import yaml
@@ -18,9 +19,14 @@ import queue
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from ..core.config import CONFIG_DIR, STAGES, STAGE_NAMES, TASKS
-from ..core.utils import now, sw_log
+from ..core.config import CONFIG_DIR, STAGES, STAGE_NAMES
+from ..core.utils import sw_log
 from .base import BaseAgent
+
+# 场景脚本跑完时打进 .log 的标记。e2e driver 靠它判断「这一轮说完了」，
+# 替代原先「日志静默 3 秒」的猜测 —— 那种猜法会在两行输出之间的 sleep 里
+# 误判，是 e2e 三轮挂一轮的根因。标记是确定性的：每个阶段恰好一条。
+SCENARIO_DONE_MARKER = "mock_agent scenario complete"
 
 
 class MockAgent(BaseAgent):
@@ -55,7 +61,27 @@ class MockAgent(BaseAgent):
 
     @property
     def response_delay(self) -> float:
+        """回复节奏。``SW_MOCK_RESPONSE_DELAY`` 优先，便于 e2e 自己决定快慢。"""
+        env = os.environ.get("SW_MOCK_RESPONSE_DELAY")
+        if env:
+            try:
+                return max(0.0, float(env))
+            except ValueError:
+                pass
         return float(self._config.get("response_delay", 1.0))
+
+    def _pause(self, seconds: float):
+        """按 response_delay 缩放的思考停顿。
+
+        场景脚本里原本散着写死的 ``sleep(1)`` / ``sleep(2)``，无视配置，
+        e2e 一轮的下限被这些常数钉在 ~20 秒。改成随 response_delay 缩放后，
+        ``SW_MOCK_RESPONSE_DELAY=0`` 就能让脚本几乎瞬时跑完，做流程回归时
+        不必为"拟真打字速度"付时间。
+        """
+        scale = self.response_delay
+        if scale <= 0:
+            return
+        time.sleep(seconds * min(scale, 1.0))
 
     @property
     def is_active(self) -> bool:
@@ -121,6 +147,8 @@ class MockAgent(BaseAgent):
                 self._scenario_brainstorming()
             elif stage_key == "02-planning":
                 self._scenario_planning()
+            elif stage_key == "03-coding":
+                self._scenario_coding()
             elif stage_key == "04-review":
                 self._scenario_review()
             else:
@@ -138,6 +166,11 @@ class MockAgent(BaseAgent):
                 self.status = self.STATUS_IDLE
                 if "on_complete" in self.callbacks:
                     self.callbacks["on_complete"]()
+                # 标记必须最后写、且只在自然跑完时写：e2e 靠它数「第 N 个阶段
+                # 的脚本说完了」。直接走 sw_log 而不是 _add_log —— 后者会把这
+                # 行灌进 TUI 的 log_lines，被 extract_options 当成 agent 的最新
+                # 消息块，干扰选项探测。
+                sw_log(self.name, SCENARIO_DONE_MARKER, "sw")
 
     def _safe_get(self, lst: List[Any], index: int, default: Any = "默认回复") -> Any:
         """安全获取列表元素"""
@@ -148,10 +181,13 @@ class MockAgent(BaseAgent):
     def _say(self, text: str, source: str = "agent", speed: float = 1.0):
         """流式输出文本"""
         if not self.running: return
-        
+
         lines = text.splitlines()
-        # 模拟打字机速度
+        # 模拟打字机速度。response_delay=0 时不打字，直接吐完 —— 拟真节奏对
+        # 流程回归没有价值，只是让每轮 e2e 多花几秒。
         line_delay = (0.05 / speed) if len(lines) > 1 else 0
+        if self.response_delay <= 0:
+            line_delay = 0
         
         for line in lines:
             if not self.running: break
@@ -190,7 +226,7 @@ class MockAgent(BaseAgent):
 
     def _scenario_brainstorming(self):
         self._say("你好！我是你的需求分析专家。我已阅读了你的任务需求。")
-        time.sleep(1)
+        self._pause(1)
         self._say("在开始设计之前，我需要确认几个关键细节：")
         
         # 模拟交互提问
@@ -207,7 +243,7 @@ class MockAgent(BaseAgent):
         choice = self._safe_get(answers, 0)
         
         self._say(f"收到。由于你选择了 '{choice}'，我将据此制定设计方案。")
-        time.sleep(1)
+        self._pause(1)
 
         # 模拟第二个问题，验证状态切换
         self._say("还有一个细节：你希望使用哪种 API 风格？")
@@ -223,7 +259,7 @@ class MockAgent(BaseAgent):
         self._say(f"好的，将采用 {style} 风格。")
 
         self._say("正在生成 Brainstorming 设计文档...")
-        time.sleep(2)
+        self._pause(2)
         
         output = (
             "## 🤖 AI Output\n\n"
@@ -237,7 +273,7 @@ class MockAgent(BaseAgent):
 
     def _scenario_planning(self):
         self._say("正在基于 Brainstorming 的结论拆解任务清单...")
-        time.sleep(2)
+        self._pause(2)
         
         output = (
             "## 🤖 AI Output\n\n"
@@ -248,21 +284,96 @@ class MockAgent(BaseAgent):
         )
         self._say(output)
 
+    def _scenario_coding(self):
+        """03-coding 场景：在 target_dir 下写出一个能跑通测试的最小项目。
+
+        必须真的落地文件。03-coding 的硬校验会拒绝空产出（任务 T3 的空转事故），
+        而 mock 是 e2e 的驱动 —— 只在对话里"说"写了代码，闸门照样会拦下来，
+        并且这样 e2e 才真正覆盖到「有产出 + 测试通过 + README 齐备」的正路。
+        """
+        self._say("正在按规划实现代码...")
+        target = self._resolve_target_dir()
+        written = self._write_sample_project(target) if target else []
+        if written:
+            for rel in written:
+                self._add_log("agent", f"  ✎ 写入 {rel}")
+        else:
+            self._add_log("error", "未能写入示例代码（target_dir 不可用）")
+
+        time.sleep(min(self.response_delay, 1.0))
+        files_md = "\n".join(f"- `{rel}`" for rel in written) or "- (无)"
+        self._say(
+            "## 🤖 AI Output\n\n"
+            "### 实现摘要\n"
+            "按 02-planning 的任务清单完成实现，并补齐 README 与单元测试。\n\n"
+            "### 产出文件\n"
+            f"{files_md}\n"
+        )
+
+    def _resolve_target_dir(self) -> Optional[Path]:
+        """从任务 .state 读 target_dir —— 与门禁钩子用的是同一个源。"""
+        from ..core.state import read_state
+        st = read_state(self.name) or {}
+        raw = str(st.get("target_dir") or "").strip()
+        if not raw or raw == ".":
+            return None
+        return Path(raw)
+
+    def _write_sample_project(self, target: Path) -> List[str]:
+        """写一个自洽的最小 Python 项目；返回写入的相对路径列表。"""
+        files = {
+            "mocknote.py": (
+                '"""Mock 产出：最小可运行模块。"""\n\n\n'
+                'def add(a, b):\n'
+                '    return a + b\n'
+            ),
+            "test_mocknote.py": (
+                'from mocknote import add\n\n\n'
+                'def test_add():\n'
+                '    assert add(1, 2) == 3\n'
+            ),
+            # README 齐备：04-review 在归档路径上会硬性要求它存在。
+            "README.md": (
+                f"# {self.name}\n\n"
+                "Mock 模式产出的示例项目。\n\n"
+                "## 用法\n\n"
+                "```python\n"
+                "from mocknote import add\n\n"
+                "add(1, 2)\n"
+                "```\n"
+            ),
+        }
+        written: List[str] = []
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for rel, body in files.items():
+                (target / rel).write_text(body, encoding="utf-8")
+                written.append(rel)
+        except OSError as e:
+            sw_log(self.name, f"mock coding write failed: {e}", "error")
+        return written
+
     def _scenario_review(self):
         """04-review 专用场景：模拟代码审查并输出 Route 决策。
 
-        通过 config.yaml 中的 mock_agent.review_route 配置评审结论:
+        路由取值优先级：``SW_MOCK_REVIEW_ROUTE`` 环境变量 > 全局配置 >
+        config.yaml。环境变量排第一是为了让 e2e 自己决定输入 —— driver 用
+        fork 子进程跑 ``sw init``，改不到父进程的 ``_manager``，而从
+        config.yaml 读会让测试结论跟着谁编辑过配置文件而变（仓库里那份现在
+        写的是 02-Planning，直接跑 e2e 会走返工分支）。
+
+        可选值:
         - "05-Archive" (默认) — 评审通过，正常归档
         - "03-Coding" — 代码层问题，返工到编码阶段
         - "02-Planning" — 规划层问题，返工到规划阶段
         """
         route = self._config.get("review_route", "05-Archive")
-        # Also check global config manager in case it was overridden programmatically
         try:
             from ..core.config import _manager
             route = _manager.config.mock_agent.review_route
         except Exception:
             pass
+        route = os.environ.get("SW_MOCK_REVIEW_ROUTE") or route
         valid_routes = {"05-Archive", "03-Coding", "02-Planning"}
         if route not in valid_routes:
             route = "05-Archive"
@@ -275,7 +386,7 @@ class MockAgent(BaseAgent):
         conclusion, reason = route_descriptions[route]
 
         self._say(f"正在执行代码审查...")
-        time.sleep(1)
+        self._pause(1)
         self._say(f"审查结论: {conclusion}")
         self._say(reason)
 
@@ -311,7 +422,7 @@ class MockAgent(BaseAgent):
     def _scenario_generic(self, stage_key: str):
         stage_name = STAGE_NAMES[self.stage_idx] if self.stage_idx < len(STAGE_NAMES) else stage_key
         self._say(f"正在执行 {stage_name} 阶段的自动化工作...")
-        time.sleep(2)
+        self._pause(2)
         
         output = (
             f"## 🤖 AI Output\n\n"

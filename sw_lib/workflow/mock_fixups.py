@@ -1,57 +1,46 @@
-"""sw_lib.workflow.mock_fixups — Mock-mode gate fixups (extracted from StageRunnable).
+"""sw_lib.workflow.mock_fixups — Mock 模式下的模板回填。
 
-These post-processing rules exist ONLY to let the MockAgent drive a full flow
-without a real LLM. The production StageRunnable must not know about mock mode;
-it delegates to apply_mock_gate_fixups() which is a no-op unless mock is on.
+存在的唯一理由：让 MockAgent 能驱动全流程而不需要真实 LLM。生产路径不感知
+mock —— `StageRunnable` 只调用 `apply_mock_template_fixups()`，它在非 mock
+模式下是恒等函数。
 
-Behavior (mirrors the original StageRunnable mock branch):
-  * The AI Output region (between "## 🤖 AI Output" and "## Gate") is left
-    untouched; the template region (before AI Output) and the Gate region
-    (after "## Gate") get their `[ ]` checkboxes auto-filled to `[x]` so the
-    stage gate validates.
-  * For the review stage, the placeholder Route field
-    ``- **Route**: `___` `` is normalized to ``- **Route**: `05-Archive` ``.
+**不做**的事：不碰 Gate 复选框，也不填 Route。那两样是判定依据，存在 `.state`
+里（见 docs/design-json-state-source.md）；改 Markdown 不会影响任何判定，
+写了只会让文件与状态不一致。自动模式下的签署与选路由 TUI 的 `_auto_sign_off`
+走正规入口完成。
+
+**做**的事：填 01 的 `- **Chosen**: ___`。选项组属于内容检查 —— 它验证用户
+拍板的方案有没有被记录进产出。真实 agent 会自己写（提示词有要求），
+MockAgent 不会，所以这里补上。
 """
-from typing import Match
 import re
 
 from ..core.config import is_mock_agent
+from .stage_state import split_output_region
 
-_AI_MARKER = "\n## 🤖 AI Output\n"
-_GATE_MARKER = "\n## Gate"
-_ROUTE_PLACEHOLDER = "- **Route**: `___`"
-_ROUTE_DEFAULT = "- **Route**: `05-Archive`"
-
-
-def _fill_checkboxes(content: str) -> str:
-    """Fill `[ ]` -> `[x]` only outside the AI Output region."""
-    ai_pos = content.find(_AI_MARKER)
-    if ai_pos >= 0:
-        gate_pos = content.find(_GATE_MARKER, ai_pos + len(_AI_MARKER))
-        if gate_pos >= 0:
-            before = content[:ai_pos].replace("[ ]", "[x]")
-            output_area = content[ai_pos:gate_pos]
-            gate_area = content[gate_pos:].replace("[ ]", "[x]")
-            return before + output_area + gate_area
-    return content.replace("[ ]", "[x]")
+_CHOSEN_PLACEHOLDER_RE = re.compile(
+    r'^(\s*[-*]\s*\*\*Chosen\*\*:\s*)_+\s*$', re.M)
 
 
-def _fix_review_route(content: str) -> str:
-    """Normalize the review placeholder Route field to the default Archive route."""
-    if _ROUTE_PLACEHOLDER in content:
-        return content.replace(_ROUTE_PLACEHOLDER, _ROUTE_DEFAULT, 1)
-    return content
+def _fill_chosen_placeholders(content: str) -> str:
+    """把 `- **Chosen**: ___` 填成 `- **Chosen**: A`。"""
+    return _CHOSEN_PLACEHOLDER_RE.sub(r'\1A', content)
 
 
-def apply_mock_gate_fixups(content: str, stage: str) -> str:
-    """Apply mock-mode gate fixups to a stage's saved output.
+def apply_mock_template_fixups(content: str, stage: str) -> str:
+    """Mock 模式下回填模板占位符；非 mock 模式原样返回。
 
-    Returns the content unchanged when mock mode is disabled, so the production
-    path is never mutated by test-only logic.
+    产出区（nonce 围栏之内）一概不动：那是 agent 的原话，改写它就等于污染
+    产出记录。
     """
     if not is_mock_agent():
         return content
-    content = _fill_checkboxes(content)
-    if stage == "04-review":
-        content = _fix_review_route(content)
-    return content
+    if stage != "01-brainstorming":
+        return content
+
+    region = split_output_region(content)
+    if region is None:
+        return _fill_chosen_placeholders(content)
+    before, after = region
+    fenced = content[len(before):len(content) - len(after)]
+    return _fill_chosen_placeholders(before) + fenced + _fill_chosen_placeholders(after)

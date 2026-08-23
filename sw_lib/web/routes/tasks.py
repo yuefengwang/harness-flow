@@ -7,8 +7,8 @@ sw_lib.web.routes.tasks — 任务管理路由
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Request, Form, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Request, Form
+from fastapi.responses import HTMLResponse
 from ..templating import SafeJinja2Templates
 
 from ...core.service import _service, TaskError
@@ -111,9 +111,7 @@ async def task_create(
 @router.post("/tasks/{name}/advance")
 async def task_advance(name: str):
     try:
-        state = _service.get_task_state(name)
-        idx = int(state.get("stage_idx", 0))
-        done, todo = _service.validate_stage(name)
+        _done, todo = _service.validate_stage(name)
         if todo:
             return HTMLResponse(
                 f"<div class='error'>存在 {len(todo)} 个未完成项，无法推进</div>",
@@ -257,7 +255,6 @@ def _task_table_html() -> str:
             actions_html += f'<a href="/tasks/{t["id"]}/console" class="btn">对话</a> '
             if t.get("status") == "Finished":
                 ds = t.get("deploy_status", "idle")
-                hs = t.get("health_status", "")
                 if ds == "idle":
                     actions_html += f'<button class="btn-success" hx-post="/tasks/{t["id"]}/deploy" hx-target="#task-list" hx-swap="outerHTML">部署</button>'
                 elif ds == "deploying":

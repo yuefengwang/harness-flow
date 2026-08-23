@@ -10,8 +10,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..core.config import TASKS, STAGES, STAGE_NAMES, HOOKS_DIR
-from .mock_fixups import apply_mock_gate_fixups
+from ..core.config import TASKS, STAGES, HOOKS_DIR
+from .mock_fixups import apply_mock_template_fixups
+from . import stage_state
 from ..core.state import read_state, write_state
 from ..core.utils import sw_log, now
 
@@ -83,6 +84,10 @@ class StageRunnable(HarnessRunnable):
     behaviour is handled by LangGraph conditional edges reading output.route.
     """
 
+    # 阶段等待上限（类属性，便于测试覆写；生产默认与旧行为一致）
+    FIRST_RESPONSE_TIMEOUT = 300.0   # 等待 agent 首轮回复
+    MULTI_TURN_TIMEOUT = 600.0       # 多轮会话总时长（等 /advance）
+
     def __init__(
         self,
         stage: str,
@@ -113,6 +118,23 @@ class StageRunnable(HarnessRunnable):
 
     # ── Public API ──
 
+    def flush_output(self, task_name: str) -> bool:
+        """把 agent 目前为止的产出落盘，不关闭 agent。返回是否写入。
+
+        多轮模式下 _save_stage_output 只在 _run_agent 返回后执行，而它要等
+        _stage_done —— 那是校验通过后才置位的。所以校验读到的会是还没写入
+        产出的文件：agent 明明已经给出结论，用户却被告知「N 个待填项未完成」，
+        且无从修改。/advance 在校验前调用本方法打破这个闭环。
+        """
+        output = self._collect_agent_output()
+        if not output.strip():
+            return False
+        try:
+            self._save_stage_output(task_name, output)
+            return True
+        except Exception:
+            return False
+
     def invoke(self, input: StageInput) -> StageOutput:
         """Execute the stage: hooks → agent → parse → gate → save.
 
@@ -138,6 +160,10 @@ class StageRunnable(HarnessRunnable):
             st["stage_status"] = "running"
             st["updated_at"] = now()
             write_state(input.task_name, st)
+
+        # 1.5 播种门禁定义。必须在 agent 启动之前完成：用户可能在 agent
+        #     说完之前就按 [A] 签署。
+        self._seed_stage_gate(input.task_name)
 
         # 2. Record injected context to .input (for offline playback/debugging)
         task_dir = TASKS / input.task_name
@@ -165,12 +191,10 @@ class StageRunnable(HarnessRunnable):
         #    MockAgent's auto-[x] and Route fill-in take effect before validation.
         parsed = None
         gate_passed = False
-        parse_error = None
         
         try:
             parsed = self._parse_output(raw_output)
         except Exception as e:
-            parse_error = str(e)
             # Fallback: keep raw text as a plain dict
             parsed = {"raw": raw_output, "_parse_error": str(e)}
         
@@ -182,7 +206,7 @@ class StageRunnable(HarnessRunnable):
         try:
             gate_passed = self.gate_validator.check(input.task_name, self.stage)
         except Exception as e:
-            pass
+            sw_log(input.task_name, f"gate check failed: {e}", "error")
 
         parsed_dict = parsed.model_dump() if hasattr(parsed, 'model_dump') else parsed
         route = parsed_dict.get("route") if isinstance(parsed_dict, dict) else None
@@ -306,6 +330,19 @@ class StageRunnable(HarnessRunnable):
         agent.callbacks = new_callbacks
 
         agent.start()
+
+        # Agent 启动失败时立即收尾：继续往下走只会白等 300s+600s 超时，
+        # 而 UI 在这段时间里完全没有反馈（这正是 opencode 启动失败时的表现）。
+        if getattr(agent, "status", None) == "error":
+            composed_add_log("error", f"{self.stage} agent 启动失败，阶段中止")
+            try:
+                agent.shutdown()
+            finally:
+                agent.callbacks = original_callbacks
+                self.active_agent = None
+                self._agent_finalized.set()
+            return self._collect_agent_output()
+
         if hasattr(agent, 'send'):
             agent.send(context, is_system=True)
 
@@ -316,13 +353,24 @@ class StageRunnable(HarnessRunnable):
 
         # First response
         try:
-            self._agent_complete.wait(timeout=300)
-        except:
+            self._agent_complete.wait(timeout=self.FIRST_RESPONSE_TIMEOUT)
+        except Exception:
             pass
+
+        # 首轮就失败（如发送被拒），同样不必再挂满多轮超时
+        if getattr(agent, "status", None) == "error" and not self._agent_text_buffer:
+            composed_add_log("error", f"{self.stage} agent 未产出内容，阶段中止")
+            try:
+                agent.shutdown()
+            finally:
+                agent.callbacks = original_callbacks
+                self.active_agent = None
+                self._agent_finalized.set()
+            return self._collect_agent_output()
 
         # Multi-turn loop: agent stays alive for conversation
         try:
-            deadline = time.monotonic() + 600  # total 10min timeout
+            deadline = time.monotonic() + self.MULTI_TURN_TIMEOUT
             while not self._stage_done.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -381,8 +429,30 @@ class StageRunnable(HarnessRunnable):
 
     # ── Internal: Output persistence ──
 
+    def _seed_stage_gate(self, task_name: str):
+        """把本阶段的门禁定义落进 `.state`，并渲染出可读的 Gate 区。
+
+        `read_gate` 在没有记录时会回退模板定义，所以判定不依赖这一步；播种是
+        为了让 `.state` 自描述 —— hook、web、`sw state get` 读状态就够，不必
+        反过来猜模板长什么样。旧任务（模板加 Gate 之前建的）也在这里获得
+        可签署的门禁项，不需要再往 Markdown 里补区块。
+        """
+        try:
+            stage_state.seed_gate(task_name, self.stage)
+            stage_state.render_gate_section(task_name, self.stage)
+        except Exception:
+            # 播种失败不该挡住阶段执行：判定仍可回退模板定义
+            pass
+
     def _save_stage_output(self, task_name: str, output: str):
-        """Save agent output to {stage}.md under the task directory."""
+        """把 agent 产出写进 {stage}.md，用 nonce 围栏界定产出区。
+
+        产出区的边界由 sw 写入的 ``<!-- sw:ai-output:start <nonce> -->`` 决定，
+        nonce 存在 ``.state`` 里、agent 看不到也猜不到。这样多轮 flush 能精确
+        替换上一次的产出，而不需要靠「找下一个 ``## Gate``」来猜产出区在哪 ——
+        后者会被 agent 正文里复述的 ``## Gate`` 骗到，导致模板 Gate 区每次
+        flush 追加一份、待办数量越推进越多（见 docs/design-json-state-source.md）。
+        """
         if not output.strip():
             return
 
@@ -393,29 +463,27 @@ class StageRunnable(HarnessRunnable):
         if stage_file.exists():
             existing = stage_file.read_text(encoding="utf-8")
 
-        ai_marker = "\n\n## 🤖 AI Output\n"
-        gate_marker = "\n## Gate"
+        nonce = stage_state.issue_output_nonce(task_name, self.stage)
+        block = stage_state.render_output_block(nonce, output)
 
-        if ai_marker in existing:
-            parts = existing.split(ai_marker, 1)
-            after = parts[1] if len(parts) > 1 else ""
-            gate_pos = after.find(gate_marker)
-            if gate_pos >= 0:
-                preserved = after[gate_pos:]
-            elif after.startswith("## Gate"):
-                preserved = after
-            else:
-                preserved = ""
-            new_content = parts[0] + ai_marker + output + ("\n" + preserved if preserved else "")
-        elif gate_marker in existing:
-            parts = existing.split(gate_marker, 1)
-            new_content = parts[0] + ai_marker + output + gate_marker + parts[1]
+        region = stage_state.split_output_region(existing)
+        if region is not None:
+            before, after = region
+            tail = after.lstrip("\n")
+            new_content = before.rstrip("\n") + "\n\n" + block + (f"\n{tail}" if tail else "")
         else:
-            new_content = existing + ai_marker + output
+            # 首次写入：此时文件里还没有围栏外的 agent 文本，模板 Gate 的位置
+            # 是确定的，可以安全地把产出插在它之前。
+            gate_pos = existing.rfind("\n## Gate")
+            if gate_pos >= 0:
+                head, tail = existing[:gate_pos], existing[gate_pos + 1:]
+                new_content = head.rstrip("\n") + "\n\n" + block + "\n" + tail
+            else:
+                new_content = existing.rstrip("\n") + "\n\n" + block
 
         stage_file.write_text(new_content, encoding="utf-8")
 
-        # Mock 模式的后处理已抽离到 mock_fixups（生产路径不感知 mock）
-        fixed = apply_mock_gate_fixups(new_content, self.stage)
+        # Mock 模式的模板回填已抽离到 mock_fixups（生产路径不感知 mock）
+        fixed = apply_mock_template_fixups(new_content, self.stage)
         if fixed != new_content:
             stage_file.write_text(fixed, encoding="utf-8")

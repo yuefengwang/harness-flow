@@ -7,14 +7,12 @@ from pathlib import Path
 from typing import Optional
 
 from ..workflow import StageRunnable, GateValidator
-from ..workflow.base import StageInput
 from ..prompts import PromptRegistry, PromptBuilder
 from ..output.parser import StageOutputParser
 from ..output.stages import (
     BrainstormingOutput, PlanningOutput, CodingOutput,
     ReviewOutput, ArchiveOutput,
 )
-from ..core.config import STAGES, STAGE_NAMES
 
 # Module-level cache — only bootstrap once
 from ..workflow.graph import LangGraphAdapter

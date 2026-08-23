@@ -31,5 +31,6 @@ Score: [0-10] | Goal: ___
 - **Impact**: ___
 
 ## Gate
+<!-- 由 sw 渲染，编辑无效；签署状态存于 .state -->
 - [ ] Design approved
 - [ ] Ready for Planning

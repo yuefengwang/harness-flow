@@ -9,7 +9,7 @@ import requests
 SERVER = "http://127.0.0.1:4096"
 TIMEOUT = 60
 PROVIDER = "opencode"
-MODEL = "deepseek-v4-flash-free"
+MODEL = "mimo-v2.5-free"
 
 session_resp = requests.post(f"{SERVER}/session", timeout=10)
 session_id = session_resp.json()["id"]
@@ -19,8 +19,8 @@ try:
     chat_resp = requests.post(
         f"{SERVER}/session/{session_id}/message",
         json={
-            "providerID": PROVIDER,
-            "modelID": MODEL,
+            # opencode 要求 model 为对象；传字符串会得到 HTTP 400。
+            "model": {"providerID": PROVIDER, "modelID": MODEL},
             "parts": [{"type": "text", "text": "Hello, say hi in one sentence."}],
         },
         timeout=TIMEOUT,

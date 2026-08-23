@@ -1,11 +1,8 @@
 """GateValidator — wraps existing stage template and hook script validation."""
 
-import re
 import subprocess
-from pathlib import Path
-from typing import List, Tuple
 
-from ..core.config import TASKS, HOOKS_DIR, ROOT
+from ..core.config import HOOKS_DIR, ROOT, HOOK_TIMEOUT_SECONDS
 
 
 class GateValidator:
@@ -54,7 +51,7 @@ class GateValidator:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=HOOK_TIMEOUT_SECONDS,
             )
             return result.returncode == 0
         except Exception:

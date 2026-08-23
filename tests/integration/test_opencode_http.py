@@ -55,15 +55,20 @@ def test_send_without_server_sets_error():
 
 
 def test_restart_cycle():
-    """restart() creates fresh server."""
+    """restart() 后仍得到一个可用的 server。
+
+    注意：不再断言"每次端口都不同"。旧实现自己 bind 探测随机空闲端口，
+    所以端口必变；现在改由 `--port 0` 交给 opencode 选，它会优先复用 4096。
+    端口是否变化属于实现细节，真正要保证的是重启后服务健康可用。
+    """
     if not _HAS_OPENCODE: pytest.skip("opencode not found")
     from sw_lib.agents.opencode import OpenCodeAgent
     a = OpenCodeAgent(_make_callbacks()[0], "test", "01-brainstorming", 0)
     a.start()
-    url1 = a._transport.server_url
+    assert a._transport.server_url is not None
     a.restart()
-    url2 = a._transport.server_url
-    assert url1 != url2  # new port each time
+    assert a._transport.server_url is not None
+    assert a._transport.health()
     assert a.running
     a.shutdown()
 

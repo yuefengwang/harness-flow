@@ -13,9 +13,9 @@ import subprocess
 import queue
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Callable, Type, Set
+from typing import List, Dict, Any, Optional, Callable, Set
 
-from ..core.config import ROOT, TASKS, get_tools_for_stage
+from ..core.config import ROOT, get_tools_for_stage
 
 
 # ── 命令白名单 ──

@@ -1,18 +1,35 @@
 """sw — Simple Workflow CLI (统一入口)
 
 用法: ./sw <command> [options]
+
+全局标志（可放在子命令前或后）:
+  --yes, -y                    自动确认所有提示（破坏性操作必需）
+  --non-interactive            非交互模式
+
+任务生命周期:
   ./sw init    --type=feature --name=<id> [--context=<text>] [--agent=<agent>] [--target=<dir>] [--self]
   ./sw init                              # 交互模式
   ./sw monitor --name=<id>               # Rich TUI 监控面板 + Agent 对话
   ./sw status  [--name=<id>]
-  ./sw next    [--name=<id>] [--agent=<agent>]   # 注入上下文 (monitor 替代交互)
-  ./sw advance [--name=<id>] [--force]           # 校验+推进阶段
+  ./sw advance [--name=<id>] [--no-next]         # 校验+推进阶段
   ./sw resume  --name=<id>
+  ./sw answer  --name=<id> --text=<reply>   # 回复 Agent 提问
+
+任务管理:
   ./sw list    [--trash]
   ./sw remove  --name=<id>
+  ./sw remove-all [--purge]              # 全部移入回收站；--purge 物理删除
   ./sw restore --name=<id>
-  ./sw answer  --name=<id> --text=<reply>   # 回复 Agent 提问
-  ./sw dashboard                             # 启动 Web Dashboard
+  ./sw purge-trash                        # 清空回收站（物理删除，不可恢复）
+
+状态查询:
+  ./sw state get <task> <stage> [gate|route] [--json]   # 门禁/路由状态（供 hook 调用）
+
+运维:
+  ./sw deploy    [--name=<id>] [--port=<n>] [--no-tunnel]
+  ./sw health    [--name=<id>] [--interval=<s>] [--daemon]
+  ./sw dashboard [--host=<h>] [--port=<n>]   # 启动 Web Dashboard
+  ./sw test      [--name=<id>]               # 端到端集成测试（MockAgent）
 """
 
 import signal
@@ -22,18 +39,40 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..core.config import ROOT, TASKS, STAGES, STAGE_NAMES, HOOKS_DIR, load_harness_config, resolve_agent_type
+from ..core.config import (
+    ROOT, STAGES, STAGE_NAMES, HOOKS_DIR,
+    HOOK_TIMEOUT_MINUTES, HOOK_TIMEOUT_SECONDS,
+)
 from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
 from ..core.deploy_orchestrator import DeployOrchestrator
 from ..core.health import HealthMonitor, HealthConfig
 from ..core.utils import (
-    green, yellow, blue,
+    green, yellow,
     ok, warn, hdr, die,
-    prompt, prompt_yn,
     now,
 )
 from ..ui.init_ui import InitializationUI
 from ..core.service import _service, TaskError
+
+# 硬校验钩子上限来自 core.config，以分钟为单位配置。
+HOOK_TIMEOUT = HOOK_TIMEOUT_SECONDS
+
+
+def _apply_auto_advance_flags(args) -> None:
+    """把 --auto / --manual / --unattended 应用到运行期配置。
+
+    --auto / --manual 只影响阶段边界（是否免去 /advance）；
+    --unattended 是独立维度，决定阶段内 agent 的提问是否代答。
+    两者都没给时沿用 config.yaml；--manual 优先于 --auto，
+    这样在配置默认开启自动的项目里也能一次性退回手动。
+    """
+    from ..core.config import set_auto_advance, set_auto_answer
+    if getattr(args, "manual", False):
+        set_auto_advance(False)
+    elif getattr(args, "auto", False):
+        set_auto_advance(True)
+    if getattr(args, "unattended", False):
+        set_auto_answer(True)
 
 
 # ── commands ──
@@ -180,7 +219,14 @@ def cmd_advance(args):
 
         if hook_script.exists():
             hdr(f"系统硬校验: {hook_script.name}")
-            res = subprocess.run([str(hook_script), name], cwd=str(ROOT), check=False)
+            # 钩子脚本内部用 workspace/tasks/<name> 这类相对路径定位产出，
+            # 因此 cwd 必须保持 harness 根目录；但要有超时上限，
+            # 否则钩子里的 pytest/npm test 一挂，CLI 就永久卡住。
+            try:
+                res = subprocess.run([str(hook_script), name], cwd=str(ROOT),
+                                     check=False, timeout=HOOK_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                die(f"硬校验超时（>{HOOK_TIMEOUT_MINUTES:g} 分钟）: {hook_script.name}")
             if res.returncode != 0:
                 die(f"硬校验未通过，必须满足所有条件才能推进。")
 
@@ -237,6 +283,85 @@ def cmd_remove(args):
         die(str(e))
 
 
+def cmd_remove_all(args):
+    """批量移除所有活跃任务（默认进回收站，--purge 物理删除）"""
+    purge = getattr(args, "purge", False)
+    tasks = _service.list_tasks()
+    trashed = _service.list_tasks(from_trash=True) if purge else []
+
+    if not tasks and not trashed:
+        ok("没有需要移除的任务")
+        return
+
+    hdr("将物理删除以下任务（不可恢复）" if purge else "将移入回收站的任务")
+    for t in tasks:
+        print(f"  {t['id']:<30} {t['stage']:<20} [{t['status']}]")
+    if purge:
+        for t in trashed:
+            print(f"  {t['id']:<30} {'(回收站)':<20}")
+
+    total = len(tasks) + len(trashed)
+    if not _confirm_destructive(f"确认移除 {total} 个任务?"):
+        warn("已取消")
+        return
+
+    results = _service.remove_all_tasks(purge=purge)
+    failed = [(n, why) for n, why in results if why]
+    for name, why in failed:
+        warn(f"{name}: {why}")
+
+    moved = len(results) - len(failed)
+    if purge:
+        ok(f"已物理删除 {moved + len(trashed)} 个任务")
+    else:
+        ok(f"已移入回收站 {moved} 个任务，可用 ./sw restore --name=<id> 恢复")
+    if failed:
+        die(f"{len(failed)} 个任务移除失败")
+
+
+def cmd_purge_trash(args):
+    """清空回收站（物理删除，不可恢复）"""
+    trashed = _service.list_tasks(from_trash=True)
+    if not trashed:
+        ok("回收站已是空的")
+        return
+
+    hdr("将从回收站物理删除（不可恢复）")
+    for t in trashed:
+        print(f"  {t['id']:<30} 移除于: {t['removed_at']}")
+
+    if not _confirm_destructive(f"确认清空回收站中的 {len(trashed)} 个任务?"):
+        warn("已取消")
+        return
+
+    purged = _service.purge_trash()
+    ok(f"回收站已清空，物理删除 {len(purged)} 个任务")
+
+    remaining = _service.list_tasks(from_trash=True)
+    if remaining:
+        for t in remaining:
+            warn(f"未能删除: {t['id']}")
+        die(f"{len(remaining)} 个任务清理失败")
+
+
+def _confirm_destructive(prompt: str) -> bool:
+    """破坏性操作的确认闸门。
+
+    --yes 显式放行；非交互模式下没人能回答，一律拒绝而不是默认执行 ——
+    批量删除误触的代价远高于多敲一次命令。
+    """
+    if os.environ.get("SW_YES") == "1":
+        return True
+    if os.environ.get("SW_NON_INTERACTIVE") == "1":
+        warn("非交互模式下不执行破坏性操作，请显式加 --yes")
+        return False
+    try:
+        return input(f"{yellow('[?]')} {prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
 def cmd_restore(args):
     """从回收站恢复"""
     if not args.name: die("缺少 --name")
@@ -262,6 +387,7 @@ def cmd_monitor(args):
     """启动流式终端监控面板，直连 Agent 进程"""
     # 惰性导入 TUI（避免非 monitor 命令也拉起 workflow.runtime/langgraph 链）
     from ..ui.tui import MonitorTUI
+    _apply_auto_advance_flags(args)
     name = getattr(args, "name", "") or get_active_from_status()
     if not name or name == "无":
         die("缺少 --name")
@@ -491,3 +617,57 @@ def cmd_deploy(args):
 def cmd_usage():
     """打印帮助信息"""
     print(__doc__)
+
+
+# ── state 查询（供 hook 与外部工具读 JSON 状态源）──
+
+_STATE_FIELDS = ("gate", "route")
+
+
+def cmd_state_get(args) -> int:
+    """打印某阶段的门禁/路由状态。返回进程退出码。
+
+    shell 侧读状态的唯一正当入口。hook 曾直接 grep 阶段文件里的
+    ``[x] Design approved`` —— 那等于把 agent 能写的文本当门禁凭据，
+    agent 复述一句勾选过的 Gate 就能骗过硬校验。
+
+    输出裸值（``signed`` / ``unsigned`` / 路由名），退出码表示「是否已就绪」，
+    这样 hook 里可以直接写 ``sw state get t 04-review route || exit 1``。
+    """
+    import json as _json
+    from ..workflow import stage_state as ss
+
+    field = getattr(args, "field", None) or "gate"
+    if field not in _STATE_FIELDS:
+        print(f"未知字段: {field}（可用: {', '.join(_STATE_FIELDS)}）")
+        return 2
+
+    from ..core.config import TASKS
+
+    task, stage = args.task, args.stage
+    if not (TASKS / task).is_dir():
+        print(f"任务不存在: {task}")
+        return 2
+
+    as_json = bool(getattr(args, "json", False))
+
+    if field == "gate":
+        gate = ss.read_gate(task, stage)
+        if as_json:
+            print(_json.dumps({
+                "signed": gate.signed,
+                "signed_by": gate.signed_by,
+                "signed_at": gate.signed_at,
+                "items": [{"key": i.key, "label": i.label, "checked": i.checked}
+                          for i in gate.items],
+            }, ensure_ascii=False))
+        else:
+            print("signed" if gate.signed else "unsigned")
+        return 0 if gate.signed else 1
+
+    route = ss.read_route(task, stage)
+    if as_json:
+        print(_json.dumps({"route": route}, ensure_ascii=False))
+    else:
+        print(route or "")
+    return 0 if route else 1

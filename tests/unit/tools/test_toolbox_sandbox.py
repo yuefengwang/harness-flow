@@ -3,11 +3,8 @@
 这些测试只验证「校验逻辑」与「安全边界」，不实际执行破坏性命令；
 run_command 的真实执行用例用 mock subprocess 隔离。
 """
-import subprocess
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from sw_lib.tools.toolbox import (
     RunCommandTool, WriteFileTool, DEFAULT_ALLOWED_COMMANDS, Toolbox,

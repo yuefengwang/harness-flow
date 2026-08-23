@@ -2,7 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
-from sw_lib.output.schema import AgentResult, StageOutputSchema
+from sw_lib.output.schema import AgentResult
 from sw_lib.output.stages import (
     BrainstormingOutput, DecisionPoint,
     PlanningOutput, TaskItem,

@@ -5,14 +5,12 @@ is properly initialized.
 """
 import pytest
 from unittest.mock import MagicMock, patch
-from pathlib import Path
 
 from sw_lib.core.bootstrap import bootstrap
 from sw_lib.workflow.runtime import WorkflowRuntime
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
-from sw_lib.core.state import write_state, read_state
-from sw_lib.workflow import StageRunnable, StageInput, StageOutput
-from sw_lib.prompts import PromptBuilder
+from sw_lib.core.config import TASKS
+from sw_lib.core.state import write_state
+from sw_lib.workflow import StageInput
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +66,21 @@ class TestBootstrapWiring:
 class TestStageRunnableIntegration:
     """Verify StageRunnable works with real task templates."""
 
+    @pytest.fixture(autouse=True)
+    def _fast_stage_timeouts(self):
+        """把阶段等待压到毫秒级。
+
+        StageRunnable 的多轮循环要等 /advance 信号（生产上由用户触发），
+        测试里没人触发，用生产默认值会白等 300s+600s，整个 suite 卡死。
+        """
+        from sw_lib.workflow.base import StageRunnable
+        first, multi = StageRunnable.FIRST_RESPONSE_TIMEOUT, StageRunnable.MULTI_TURN_TIMEOUT
+        StageRunnable.FIRST_RESPONSE_TIMEOUT = 0.3
+        StageRunnable.MULTI_TURN_TIMEOUT = 0.3
+        yield
+        StageRunnable.FIRST_RESPONSE_TIMEOUT = first
+        StageRunnable.MULTI_TURN_TIMEOUT = multi
+
     def test_stage_runnable_with_real_gate(self):
         """StageRunnable with actual GateValidator checks template checkboxes."""
         task_name = "gate-integration-test"
@@ -77,10 +90,12 @@ class TestStageRunnableIntegration:
             "id": task_name, "stage": "01-brainstorming", "stage_idx": 0,
             "stage_status": "pending", "agent": "mock", "target_dir": "repo/t",
         })
-        # Checkbox is ticked -> Gate should pass
         (task_dir / "01-brainstorming.md").write_text(
-            "# 01-Brainstorming\n\n## Gate\n- [x] Approved\n", encoding="utf-8"
+            "# 01-Brainstorming\n\n## Gate\n- [ ] Approved\n", encoding="utf-8"
         )
+        # 签署走 .state（门禁判定不再读 Markdown 复选框）
+        from sw_lib.workflow import stage_state as ss
+        ss.sign_gate(task_name, "01-brainstorming")
 
         try:
             executor = WorkflowRuntime.get_executor()

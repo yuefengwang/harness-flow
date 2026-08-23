@@ -9,7 +9,7 @@ The concrete class is the ONLY place allowed to touch executor internals;
 the Web layer depends solely on the ABC.
 """
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..core.state import read_state
 from ..core.utils import sw_log

@@ -15,3 +15,7 @@ system_prompt: |
      错误示例: '请选择：1. 方案A 2. 方案B'
      正确做法: 调用 ask_user(questions=[{{question: '请选择方案', options: ['A. 方案A', 'B. 方案B']}}])
   3. 通过 `ask_user` 收集完所有必要信息后，再给出方案。
+  4. **必须回填模板**：收集完信息后，用 `write_file` 把结论写回
+     `workspace/tasks/{task_name}/01-brainstorming.md`，替换其中的 `___` 占位符，
+     并把已确定的选项复选框由 `[ ]` 改为 `[x]`（Chosen 的那一项）。
+     只填模板正文，**不要**勾选 `## Gate` 区 —— Gate 由用户在 TUI 中批准。

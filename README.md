@@ -106,7 +106,7 @@ harness:
   roles:
     analyst:
       agent: opencode
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools: [list_files, read_file]
 ```
 
@@ -161,6 +161,30 @@ harness:
 | `./sw answer --name=<id> --text=<reply>` | 以编程方式回复 Agent 问题 |
 
 全局标志：`--yes/-y`（自动确认）、`--non-interactive`（非交互模式）
+
+### 推进模式
+
+两个**正交**的开关，分别管阶段边界和阶段内部：
+
+| 开关 | 作用域 | 默认 | 说明 |
+|:---|:---|:---|:---|
+| `auto_advance` | 阶段边界 | `false` | 阶段结束、下一阶段未开始时，是否免去手敲 `/advance` |
+| `auto_answer` | 阶段内部 | `false` | Agent 的结构化提问是否代答（取推荐项） |
+
+默认两者都关，即每个阶段跑完停下等你审阅，且 Agent 提问始终由你回答。
+
+```bash
+./sw init --auto                    # 自动过阶段，但提问仍问你
+./sw init --auto --unattended       # 全无人值守：提问也代答
+./sw monitor --name=<id> --manual   # 配置默认开自动时临时退回手动
+```
+
+开启 `auto_advance` 后，框架会代你完成阶段边界上的签署动作：勾选 01 阶段的设计
+批准 Gate、按审查结论回填 04 阶段的 Route。**它不会替你回答 Agent 的提问** ——
+那属于阶段内的对话，需要 `--unattended` 才会代答。
+
+任何一次校验未通过都会**停止自动推进并退回手动**，不会对同一道门禁反复重试；
+单次会话的推进次数上限由 `AUTO_ADVANCE_MAX_STAGES` 兜底。
 
 ---
 

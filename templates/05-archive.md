@@ -20,3 +20,8 @@
 - [ ] Temp files removed
 - [ ] Workflow logs archived
 - [ ] Next task template ready
+
+## Gate
+<!-- 由 sw 渲染，编辑无效；签署状态存于 .state -->
+- [ ] Summary & Memory recorded
+- [ ] Ready to archive

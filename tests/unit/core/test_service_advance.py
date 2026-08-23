@@ -1,5 +1,3 @@
-import pytest
-from unittest.mock import patch, MagicMock
 from sw_lib.core.service import TaskService
 from sw_lib.core.state import write_state
 from sw_lib.core.config import TASKS

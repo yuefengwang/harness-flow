@@ -1,5 +1,11 @@
 harness:
+  # 阶段边界：true = 阶段跑完自动推进（含自动勾 Gate / 判定 Route）；
+  # false = 每个阶段等用户输入 /advance。可用 ./sw init --auto / --manual 临时覆写。
   auto_advance: false
+  # 阶段内部：true = 连 Agent 的结构化提问也自动代答（取推荐项）。
+  # 与 auto_advance 正交 —— 默认 false，提问始终交还用户决策。
+  # 无人值守跑批时用 ./sw init --unattended 临时开启。
+  auto_answer: false
   base_branch: dev
   branch_prefix: harness
   repo_path: repo
@@ -28,46 +34,53 @@ harness:
       agent: opencode
       description: "\u9700\u6C42\u5206\u6790\u5E08\uFF1A\u64C5\u957F\u5F15\u5BFC\u3001\
         \u6F84\u6E05\u548C\u957F\u6587\u672C\u7406\u89E3"
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools:
       - list_files
       - read_file
+      - write_file
+      - ask_user
     architect:
       agent: opencode
       description: "\u7CFB\u7EDF\u67B6\u6784\u5E08\uFF1A\u64C5\u957F\u6A21\u5757\u62C6\
         \u89E3\u548C\u63A5\u53E3\u8BBE\u8BA1"
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools:
       - list_files
       - read_file
+      - write_file
+      - ask_user
     archivist:
       agent: opencode
       description: "\u6587\u6863\u4E13\u5458\uFF1A\u8D1F\u8D23\u5F52\u6863\u548C\u6587\
         \u6863\u6574\u7406"
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools:
       - list_files
       - read_file
       - write_file
+      - ask_user
     developer:
       agent: opencode
       description: "\u4EE3\u7801\u6267\u884C\u8005\uFF1A\u5168\u9762\u5F00\u653E\u4EE3\
         \u7801\u8BFB\u5199\u548C\u7EC8\u7AEF\u6267\u884C\u6743\u9650"
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools:
       - list_files
       - read_file
       - write_file
       - run_command
+      - ask_user
     reviewer:
       agent: opencode
       description: "\u4EE3\u7801\u8BC4\u5BA1\u5458\uFF1A\u5FEB\u901F\u3001\u4E25\u82DB\
         \u7684\u903B\u8F91\u68C0\u67E5"
-      model: opencode/deepseek-v4-flash-free
+      model: opencode/mimo-v2.5-free
       tools:
       - list_files
       - read_file
       - run_command
+      - ask_user
   stage_roles:
     01-brainstorming: analyst
     02-planning: architect

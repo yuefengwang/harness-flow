@@ -6,7 +6,6 @@ DeployOrchestrator 测试见 test_deploy_orchestrator.py。
 
 import shutil
 import unittest
-from pathlib import Path
 
 from sw_lib.core.config import TASKS
 from sw_lib.core.service import _service, TaskError

@@ -1,12 +1,11 @@
 """Tests for StageRunnable — the core stage execution unit."""
 import pytest
-from unittest.mock import MagicMock, patch, call
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from sw_lib.workflow.base import (
     StageInput, StageOutput, HarnessRunnable, StageRunnable,
 )
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
+from sw_lib.core.config import TASKS
 
 
 # ── Fixtures ──

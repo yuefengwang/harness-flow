@@ -15,5 +15,6 @@
 - **Decisions**: ___
 
 ## Gate
+<!-- 由 sw 渲染，编辑无效；签署状态存于 .state -->
 - [ ] Code builds & tests pass
 - [ ] Commit msg follows Conventional Commits

@@ -3,7 +3,6 @@ import os
 import re
 import signal
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Callable
 
 from ..agents.base import AgentFactory
@@ -74,11 +73,14 @@ class DeployOrchestrator:
     def _log(self, msg: str):
         timestamp = now()
         formatted = f"[{timestamp}] {msg}"
-        # Write to deploy log file for SSE and CLI tailing
-        deploy_log = TASKS / self.name / ".deploy_log"
-        deploy_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(deploy_log, "a", encoding="utf-8") as f:
-            f.write(formatted + "\n")
+        # 日志文件供 SSE 与 CLI tail 读取。只在任务目录已存在时写：
+        # 否则一个纯粹的日志动作会凭空造出 workspace/tasks/<name>/，
+        # 语义上与 utils.sw_log 保持一致。
+        task_dir = TASKS / self.name
+        if task_dir.is_dir():
+            deploy_log = task_dir / ".deploy_log"
+            with open(deploy_log, "a", encoding="utf-8") as f:
+                f.write(formatted + "\n")
         if self.log_callback:
             self.log_callback(formatted)
 

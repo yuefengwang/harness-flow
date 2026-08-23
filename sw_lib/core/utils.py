@@ -1,6 +1,5 @@
 """sw_lib.utils — helper functions (colors, logging, prompts)"""
 
-import os
 import sys
 from datetime import datetime
 
@@ -68,42 +67,6 @@ def sanitize_name(name: str) -> str:
                 prev_dash = False
     safe = "".join(safe_chars)
     return safe.strip("-_. ") or "task"
-
-
-def prompt(prompt_text: str, default: str = "") -> str:
-    """交互式输入，带默认值提示"""
-    if default:
-        sys.stdout.write(f"  {blue('→')} {prompt_text} [{default}]: ")
-    else:
-        sys.stdout.write(f"  {blue('→')} {prompt_text}: ")
-    sys.stdout.flush()
-    try:
-        response = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        response = ""
-    # macOS Python 3.9 surrogate workaround
-    response = response.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-    return response if response else default
-
-
-def prompt_yn(prompt_text: str, default: str = "y") -> bool:
-    """交互式 Y/n 确认"""
-    if os.environ.get("SW_YES") == "1":
-        return True
-    if os.environ.get("SW_NON_INTERACTIVE") == "1":
-        return default.lower() in ("y", "yes")
-
-    hint = "Y/n" if default == "y" else "y/N"
-    sys.stdout.write(f"  {blue('→')} {prompt_text} [{hint}]: ")
-    sys.stdout.flush()
-    try:
-        resp = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        resp = ""
-    resp = resp if resp else default
-    return resp in ("y", "yes")
 
 
 def sw_log(name: str, message: str, source: str = "sw"):

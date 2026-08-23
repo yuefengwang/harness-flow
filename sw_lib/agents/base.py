@@ -1,7 +1,7 @@
 """sw_lib.base_agent — Abstract base class and factory for Agents"""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Callable, Any, Optional, List, Union
+from typing import Dict, Callable
 
 class BaseAgent(ABC):
     """
@@ -129,11 +129,11 @@ class AgentFactory:
         
         elif agent_type == "opencode":
             from .opencode import OpenCodeAgent
-            # 选项 A：默认启用 MCP 工具桥接，让 opencode 自主调用 harness 原子工具，
+            # 使用 opencode 原生工具（read/write/bash/...），按阶段权限开关，
             # 而非被架空成纯聊天 API。协议升级只动 transport/protocol 层。
             return OpenCodeAgent(
                 callbacks, name, stage, stage_idx, model_name,
-                use_mcp_tools=True,
+                use_native_tools=True,
             )
         
         else:

@@ -1,6 +1,5 @@
 """Integration test: StageRunnable with PromptBuilder + StageOutputParser."""
 import json
-import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 

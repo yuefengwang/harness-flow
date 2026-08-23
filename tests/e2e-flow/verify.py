@@ -58,6 +58,40 @@ class Verifier:
                 return {}
         return {}
 
+    def gate_signed(self, stage: str) -> Tuple[bool, str]:
+        """该阶段的 Gate 是否已签署。判定源是 `.state`，不是 Markdown。
+
+        文件里的 `## Gate` 区只是状态的映像（由 sw 单向渲染），agent 的产出
+        也可能包含同样的字样 —— 拿它做验收等于验收一个可被伪造的东西。
+        """
+        gate = ((self.state().get("stages") or {})
+                .get(stage, {}).get("gate") or {})
+        items = gate.get("items") or []
+        if not items:
+            return False, "no gate items in .state"
+        pending = [i for i in items if not i.get("checked")]
+        if pending:
+            return False, f"{len(pending)} unsigned"
+        return True, f"signed_by={gate.get('signed_by')}"
+
+    def route_value(self) -> str:
+        """04-review 的 Route 决策（归一化的小写阶段名）。
+
+        推进离开 04-review 时当前决策会被作废并归档到 ``route_history``
+        （否则上一轮的 target 会一直生效，造成 03↔04 死循环）。所以事后验收
+        要回看历史里最后一条 —— 那才是"这一轮实际怎么路由的"。
+        """
+        bucket = (self.state().get("stages") or {}).get("04-review", {})
+        route = bucket.get("route") or {}
+        if route.get("target"):
+            return route["target"]
+        history = bucket.get("route_history")
+        if isinstance(history, list):
+            for entry in reversed(history):
+                if isinstance(entry, dict) and entry.get("target"):
+                    return entry["target"]
+        return ""
+
     def log_content(self) -> str:
         lf = self.task_dir / ".log"
         if lf.exists():
@@ -102,21 +136,17 @@ class Verifier:
                 has_ai = "🤖 AI Output" in sf
                 self.check(stage, "AI Output present", has_ai)
 
-                # 检查 Gate checkbox
-                gate_match = re.search(r"## Gate\s*\n(.*?)(?=\n##|\Z)", sf, re.DOTALL)
-                if gate_match:
-                    gate_content = gate_match.group(1)
-                    unchecked = re.findall(r"\[ \]", gate_content)
-                    self.check(stage, "Gate checkboxes all checked",
-                               len(unchecked) == 0,
-                               f"{len(unchecked)} unchecked" if unchecked else "")
+                # 门禁签署：读 .state
+                signed, detail = self.gate_signed(stage)
+                self.check(stage, "Gate signed in .state", signed, detail)
 
-                # 检查模板区（AI Output 之前）的 checkbox
-                before_ai = sf.split("## 🤖 AI Output")[0] if "## 🤖 AI Output" in sf else sf
-                tmpl_unchecked = re.findall(r"\[ \]", before_ai)
-                self.check(stage, "Template checkboxes all checked",
-                           len(tmpl_unchecked) == 0,
-                           f"{len(tmpl_unchecked)} unchecked in template" if tmpl_unchecked else "")
+                # 渲染出来的 Gate 区应与状态一致（人读文件能看出签署结果）
+                pos = sf.rfind("## Gate")
+                if pos >= 0 and signed:
+                    gate_body = sf[pos:]
+                    self.check(stage, "Rendered Gate reflects signature",
+                               "[ ]" not in gate_body,
+                               "已签署但渲染出未勾选项" if "[ ]" in gate_body else "")
 
             # 硬校验
             hook_ec, hook_out = self.run_hook(stage)
@@ -152,19 +182,16 @@ class Verifier:
         # 01-brainstorming
         sf01 = self.stage_file("01-brainstorming")
         if sf01:
-            has_design_approved = bool(re.search(r"\[x\]\s*Design approved", sf01, re.IGNORECASE))
-            self.check("01-brainstorming", "Design approved [x]",
-                       has_design_approved)
-            # 选择组检查：检查 Clarifying Questions 下每组的 A/B 选项至少有一个 [x]
-            if "Clarifying Questions" in sf01:
-                sections = sf01.split("Clarifying Questions")
-                if len(sections) > 1:
-                    cq_section = sections[1].split("##")[0] if "##" in sections[1] else sections[1]
-                    choice_groups = re.findall(r"- \[([ x])\]\s*[A-Z]\d*[:.\)]", cq_section)
-                    groups_unchecked = sum(1 for g in choice_groups if g == " ")
-                    self.check("01-brainstorming", "Choice groups filled",
-                               groups_unchecked <= 2,  # Allow some margin
-                               f"{groups_unchecked} unchecked choices")
+            # 「设计已批准」= Gate 已签署（读 .state），不是文件里有个 [x]
+            approved, detail = self.gate_signed("01-brainstorming")
+            self.check("01-brainstorming", "Design approved (gate signed)",
+                       approved, detail)
+            # 选项组是内容检查：用户拍板的方案必须被记录进产出
+            unresolved = len(re.findall(r"-\s*\*\*Chosen\*\*:\s*_+\s*$",
+                                        sf01, re.MULTILINE))
+            self.check("01-brainstorming", "Choice groups resolved",
+                       unresolved == 0,
+                       f"{unresolved} unresolved **Chosen** placeholders")
 
         # 02-planning
         sf02 = self.stage_file("02-planning")
@@ -184,15 +211,14 @@ class Verifier:
         if sf04:
             has_security = "## Security" in sf04
             self.check("04-review", "Security section exists", has_security)
-            route_match = re.search(r"\*\*Route\*\*:\s*`([^`]+)`", sf04)
-            if route_match:
-                route_val = route_match.group(1)
-                valid_routes = {"05-Archive", "03-Coding", "02-Planning", "01-Brainstorming"}
+            # Route 决策读 .state：写进 Markdown 的不算决定
+            route_val = self.route_value()
+            if route_val:
                 self.check("04-review", "Route value valid",
-                           route_val in valid_routes,
+                           route_val in STAGES,
                            f"Route={route_val}")
-                # 如果 route 不是 Archive，检查 Evidence 表
-                if route_val != "05-Archive":
+                # 返工路由才需要 Evidence 表（那是给人看的证据，仍读 Markdown）
+                if route_val != "05-archive":
                     evidence_section = re.search(
                         r"### Reroute Evidence(.*?)(?=\n##|\Z)", sf04, re.DOTALL
                     )
@@ -208,7 +234,8 @@ class Verifier:
                         self.check("04-review", "Reroute Evidence section exists",
                                    False)
             else:
-                self.check("04-review", "Route field filled", False)
+                self.check("04-review", "Route decision recorded", False,
+                           "no route in .state")
 
         # ── 汇总 ──
         total = len(self.results)
@@ -246,7 +273,7 @@ def main():
 
     verifier = Verifier(task_dir)
     ok = verifier.verify()
-    report = verifier.save_report()
+    verifier.save_report()
 
     if ok:
         print(f"\n✅ All checks passed!")

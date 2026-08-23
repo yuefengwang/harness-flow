@@ -1,19 +1,17 @@
-"""
-Tests for workflow utilities: parse_route_field, extract_evidence_table,
-inject_reroute_context, and auto_check_gate.
+"""workflow utils 的内容解析工具：证据表提取、返工上下文注入、路由意图识别。
+
+注意这些函数**都不是**门禁判定的一部分 —— 判定读 `.state`（见 stage_state）。
+这里解析的是 agent 产出的内容：证据表是给人看的记录，路由意图识别只在自动
+模式下用来推测 agent 的结论，最终仍要写进 `.state` 才算决定。
 """
 
-import pytest
-import re
 from sw_lib.core.config import TASKS
+from sw_lib.workflow import stage_state as ss
 from sw_lib.workflow.utils import (
-    parse_route_field,
     extract_evidence_table,
     inject_reroute_context,
     _remove_old_reroute_blocks,
-    auto_check_gate,
     parse_route_from_ai_output,
-    _reset_gate_checkboxes,
 )
 
 # ── Helpers ──
@@ -54,28 +52,6 @@ def _make_coding_md(task_name: str):
 
 
 # ── Tests ──
-
-class TestParseRouteField:
-    def test_parse_valid_route_archive(self, dummy_task):
-        _make_review_md(dummy_task, "05-archive")
-        assert parse_route_field(dummy_task) == "05-archive"
-
-    def test_parse_valid_route_coding(self, dummy_task):
-        _make_review_md(dummy_task, "03-coding")
-        assert parse_route_field(dummy_task) == "03-coding"
-
-    def test_parse_no_route_field(self, dummy_task):
-        task_dir = TASKS / dummy_task
-        (task_dir / "04-review.md").write_text("# 04-Review\n\nNo route here\n", encoding="utf-8")
-        assert parse_route_field(dummy_task) is None
-
-    def test_parse_empty_route(self, dummy_task):
-        _make_review_md(dummy_task, "___")
-        assert parse_route_field(dummy_task) is None
-
-    def test_parse_invalid_route(self, dummy_task):
-        _make_review_md(dummy_task, "Invalid-Route")
-        assert parse_route_field(dummy_task) is None
 
 class TestExtractEvidenceTable:
     def test_extract_with_data(self, dummy_task):
@@ -129,97 +105,51 @@ class TestRemoveOldRerouteBlocks:
         cleaned = _remove_old_reroute_blocks(content)
         assert cleaned.strip() == "Original content"
 
-class TestResetGateCheckboxes:
-    def test_reset_logic(self, dummy_task):
-        task_dir = TASKS / dummy_task
-        path = task_dir / "test.md"
-        path.write_text("## Gate\n- [x] Done\n", encoding="utf-8")
-        _reset_gate_checkboxes(dummy_task, "test")
-        assert "- [ ] Done" in path.read_text(encoding="utf-8")
-
-class TestAutoCheckGate:
-    def test_auto_check_basic(self, dummy_task):
-        _make_coding_md(dummy_task)
-        auto_check_gate(dummy_task, "03-coding")
-        content = (TASKS / dummy_task / "03-coding.md").read_text(encoding="utf-8")
-        assert "- [x] Code builds" in content
-
-    def test_auto_backfill_route(self, dummy_task):
-        task_dir = TASKS / dummy_task
-        content = (
-            "# 04-Review\n\n"
-            "## Review Decision\n"
-            "- **Route**: `___`\n\n"
-            "## 🤖 AI Output\n"
-            "建议路由：05-Archive\n"
-            "## Gate\n"
-            "- [ ] Check 1\n"
-        )
-        (task_dir / "04-review.md").write_text(content, encoding="utf-8")
-        
-        auto_check_gate(dummy_task, "04-review")
-        
-        new_content = (task_dir / "04-review.md").read_text(encoding="utf-8")
-        assert "- **Route**: `05-archive`" in new_content
-        assert "- [x] Check 1" in new_content
-
-class TestAutoCheckGateEvidenceAutoFill:
-    def test_autofill(self, dummy_task):
-        content = (
-            "### Reroute Evidence\n"
-            "| # | 问题 | 严重程度 | 归属阶段 | 具体位置/描述 |\n"
-            "|---|------|---------|---------|-------------|\n"
-            "| 1 | ___ | high | coding | ___ |\n\n"
-            "## 🤖 AI Output\n"
-            "| Gate | 状态 | 说明 |\n"
-            "|---|---|---|\n"
-            "| Lint | ❌ | Fails\n"
-        )
-        from sw_lib.workflow.utils import _auto_fill_evidence_from_ai_output
-        new_content = _auto_fill_evidence_from_ai_output(content)
-        assert "Lint" in new_content
-        assert "审查发现: ❌" in new_content
-
 class TestStageComplianceReviewRoute:
-    """Detailed validation for 04-review Route field in check_stage_compliance."""
+    """04-review 的 Route 判定 —— 现在读 .state，不解析 Markdown。
 
-    def _make_04_review_md(self, task_name, route_value="___"):
-        task_dir = TASKS / task_name
-        content = (
-            "# 04-Review\n\n"
-            "## Review Decision\n"
-            f"- **Route**: `{route_value}`\n"
-            "- **Reason**: Test\n\n"
-            "## Gate\n"
-            "- [x] All checks passed\n"
-        )
-        (task_dir / "04-review.md").write_text(content, encoding="utf-8")
+    Route 是路由决策（机器要据此选下一个阶段），属于状态而非产出，因此搬进
+    JSON。agent 在 04-review.md 里写 `- **Route**: xxx` 不再有任何效力，
+    这消除了「模板区与 AI Output 正文两个 Route 值冲突」那类歧义。
+    """
 
-    def test_route_empty(self, dummy_task):
-        self._make_04_review_md(dummy_task, "___")
+    def _prepare(self, task_name):
+        """写一个 Gate 已签署的 04-review，只留 Route 待验。"""
+        (TASKS / task_name / "04-review.md").write_text(
+            "# 04-Review\n\n## Review Decision\n- **Reason**: Test\n",
+            encoding="utf-8")
+        ss.sign_gate(task_name, "04-review")
+
+    def test_route_unset_blocks(self, dummy_task):
+        self._prepare(dummy_task)
         from sw_lib.workflow.utils import check_stage_compliance
-        done, todo = check_stage_compliance(dummy_task, "04-review", 3)
-        assert any("未填写" in item for item in todo)
+        _, todo = check_stage_compliance(dummy_task, "04-review", 3)
+        assert any("Route" in item and "尚未填写" in item for item in todo), todo
 
     def test_route_valid(self, dummy_task):
+        from sw_lib.workflow.utils import check_stage_compliance
         for val in ["05-archive", "03-coding", "02-planning", "01-brainstorming"]:
-            self._make_04_review_md(dummy_task, val)
-            from sw_lib.workflow.utils import check_stage_compliance
+            self._prepare(dummy_task)
+            assert ss.write_route(dummy_task, val) is True
             done, todo = check_stage_compliance(dummy_task, "04-review", 3)
-            assert not todo
-            assert any(val in item.lower() for item in done)
+            assert todo == [], f"{val}: {todo}"
+            assert any(val in item.lower() for item in done), done
 
-    def test_route_invalid(self, dummy_task):
-        self._make_04_review_md(dummy_task, "Invalid-Route")
+    def test_invalid_route_is_rejected_at_write_time(self, dummy_task):
+        """非法值在写入时就被拒，不会进入状态 —— 比事后校验更早拦住。"""
+        self._prepare(dummy_task)
+        assert ss.write_route(dummy_task, "Invalid-Route") is False
         from sw_lib.workflow.utils import check_stage_compliance
-        done, todo = check_stage_compliance(dummy_task, "04-review", 3)
-        assert any("无效" in item or "缺少有效的" in item for item in todo)
+        _, todo = check_stage_compliance(dummy_task, "04-review", 3)
+        assert any("Route" in item for item in todo), todo
 
-    def test_no_route_field(self, dummy_task):
-        task_dir = TASKS / dummy_task
-        (task_dir / "04-review.md").write_text(
-            "# 04-Review\n\n## Gate\n- [x] OK\n", encoding="utf-8"
-        )
+    def test_markdown_route_has_no_effect(self, dummy_task):
+        """agent 在 Markdown 里写 Route 不算决策。"""
+        (TASKS / dummy_task / "04-review.md").write_text(
+            "# 04-Review\n\n- **Route**: `05-Archive`\n", encoding="utf-8")
+        ss.sign_gate(dummy_task, "04-review")
         from sw_lib.workflow.utils import check_stage_compliance
-        done, todo = check_stage_compliance(dummy_task, "04-review", 3)
-        assert any("缺少" in item for item in todo)
+        _, todo = check_stage_compliance(dummy_task, "04-review", 3)
+        assert any("Route" in item for item in todo), \
+            "Markdown 里的 Route 被误当成决策"
+

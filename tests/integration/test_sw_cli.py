@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sw CLI 回归测试"""
-import subprocess, sys, os, shutil
+import json, subprocess, sys, os, shutil
 from pathlib import Path
 
 # 项目根目录 (harness-flow/)
@@ -33,6 +33,60 @@ def run(cmd, expected_exit=0, desc=""):
 def cleanup():
     if (TASKS / "test-cli").exists():
         shutil.rmtree(TASKS / "test-cli")
+    # init 还会创建 repo/<name> 与 STATUS.json 条目；不清掉会污染真实工作区，
+    # 并让后续 `sw status` 指向一个读不出 .state 的幽灵任务。
+    repo_dir = ROOT / "repo" / "test-cli"
+    if repo_dir.exists():
+        shutil.rmtree(repo_dir, ignore_errors=True)
+    status = ROOT / "workspace" / "STATUS.json"
+    if status.exists():
+        try:
+            data = json.loads(status.read_text(encoding="utf-8"))
+            if data.get("tasks", {}).pop("test-cli", None) is not None:
+                status.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                                  encoding="utf-8")
+        except (ValueError, OSError):
+            pass
+
+
+def sign(stage, route=None):
+    """签署门禁（写 .state）。
+
+    门禁凭据只存在 .state 里，改 Markdown 里的 `[ ]` 不再有任何效力 ——
+    那正是 agent 能伪造的东西。这里走和 TUI 的 [A] 相同的入口。
+    """
+    sys.path.insert(0, str(ROOT))
+    from sw_lib.workflow import stage_state as ss
+    assert ss.sign_gate("test-cli", stage), f"{stage}: 签署失败"
+    if route:
+        assert ss.write_route("test-cli", route), f"{stage}: 路由写入失败"
+
+
+def write_sample_output():
+    """在 target_dir 下写出最小产出 —— 模拟 agent 完成了编码。
+
+    03-coding 的硬校验拒绝空产出，04-review 走归档路由时要求 README 存在。
+    这两道闸门都是 T3 空转事故的产物：不落地文件就没有可推进的东西。
+    """
+    target = ROOT / "repo" / "test-cli"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "cli_demo.py").write_text("def run():\n    return 0\n", encoding="utf-8")
+    (target / "README.md").write_text("# test-cli\n\n用法说明。\n", encoding="utf-8")
+
+
+def resolve_choices(stage):
+    """填掉 `- **Chosen**: ___` 占位符，模拟 agent 记录已拍板的方案。
+
+    选项组属于**内容检查**而不是门禁：它检查 agent 是否把用户的决定写进了
+    产出，因此仍然读 Markdown，也仍然必须真的填。
+    """
+    tpl = TASKS / "test-cli" / f"{stage}.md"
+    if not tpl.exists():
+        return
+    tpl.write_text(tpl.read_text().replace("- **Chosen**: ___",
+                                           "- **Chosen**: A"),
+                   encoding="utf-8")
+
 
 # ── 开始测试 ──
 cleanup()
@@ -68,16 +122,13 @@ run(f"python3 {SW} advance --name=test-cli", 1, "advance on pending should fail"
 print("\n── 5. monitor simulation (status → running) ──")
 # 模拟 monitor 的效果：将状态改为 running
 sf = TASKS / "test-cli" / ".state"
-import json
 state = json.loads(sf.read_text())
 state["stage_status"] = "running"
 sf.write_text(json.dumps(state, indent=2))
 
-# 勾选模板以满足校验
-tpl = TASKS / "test-cli" / "01-brainstorming.md"
-content = tpl.read_text()
-content = content.replace("[ ] ", "[x] ")
-tpl.write_text(content)
+# 签署门禁 + 拍板备选方案，两者缺一不可
+resolve_choices("01-brainstorming")
+sign("01-brainstorming")
 
 run(f"python3 {SW} advance --name=test-cli", 0, "advance after satisfying requirements")
 
@@ -95,11 +146,7 @@ state = json.loads(sf.read_text())
 state["stage_status"] = "running"
 sf.write_text(json.dumps(state, indent=2))
 
-# Simulate filling in template
-tpl = TASKS / "test-cli" / "02-planning.md"
-content = tpl.read_text()
-content = content.replace("[ ] ", "[x] ")
-tpl.write_text(content)
+sign("02-planning")
 
 run(f"python3 {SW} advance --name=test-cli", 0, "advance to 03")
 
@@ -110,20 +157,17 @@ print("  ✓ advanced to 03-coding")
 
 # ── 8. advance at last stage ──
 print("\n── 8. advance at last stage ──")
+# 03-coding / 04-review 的硬校验要求目标目录里真有产出、且带 README —— 空转
+# 与缺文档都会被拦（任务 T3）。这里模拟 agent 已经写完代码。
+write_sample_output()
 # Simulate quick advance through stages 3→4→5
 for stage_name in ["03-coding", "04-review"]:
     # 模拟运行
     state = json.loads(sf.read_text())
     state["stage_status"] = "running"
     sf.write_text(json.dumps(state, indent=2))
-    # 模拟勾选
-    tpl = TASKS / "test-cli" / f"{stage_name}.md"
-    content = tpl.read_text()
-    content = content.replace("[ ] ", "[x] ")
-    # 04-review 需要填写 Route 字段（check_04-review.sh 会验证）
-    if stage_name == "04-review":
-        content = content.replace("`___`", "`05-Archive`")
-    tpl.write_text(content)
+    # 04-review 还需要 Route 决策（check_04-review.sh 会验证）
+    sign(stage_name, route="05-Archive" if stage_name == "04-review" else None)
     # 推进
     run(f"python3 {SW} advance --name=test-cli", 0, f"advance stage {stage_name}")
 

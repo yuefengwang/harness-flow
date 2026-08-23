@@ -15,13 +15,18 @@ import sys
 import termios
 import threading
 import queue
+import time
 import tty
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List, Tuple, Dict, Any, Optional, Callable
+from typing import List, Tuple, Dict, Any, Optional
 
 # 从 config 引入 Rich 组件 (假设 HAS_RICH 为 True，若环境不支持则 MonitorTUI 无法启动)
-from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, HOOKS_DIR, HAS_RICH, Layout, Live, Panel, Text, Console, box
+from ..core.config import (
+    STAGES, STAGE_NAMES, TASKS, ROOT, HOOKS_DIR, HAS_RICH,
+    HOOK_TIMEOUT_SECONDS, AUTO_ADVANCE_MAX_STAGES,
+    is_auto_advance, is_auto_answer,
+    Layout, Live, Panel, Text, Console, box,
+)
 from ..workflow.base import StageInput
 from ..workflow.runtime import WorkflowRuntime
 from ..core.state import read_state, write_state
@@ -35,6 +40,25 @@ if not HAS_RICH:
     class Live: pass
 
 # ── 模式识别正则 ──
+
+# 面板切到「等用户拍板」时打进 .log 的标记。自动化驱动（tests/e2e-flow）靠它
+# 知道按键此刻不会被 _validate_input 拒绝 —— 比猜「日志静默几秒」可靠。
+PROMPT_READY_MARKER = "⏸ 等待用户拍板:"
+
+# 04-review 的 Route 值：模板与 check_04-review.sh 都要求这种大小写形式，
+# 而 parse_route_from_ai_output 返回的是 STAGES 里的小写形式。
+_ROUTE_LABELS = {
+    "05-archive": "05-Archive",
+    "03-coding": "03-Coding",
+    "02-planning": "02-Planning",
+    "01-brainstorming": "01-Brainstorming",
+}
+
+
+def _normalize_route_label(route: str) -> str:
+    """把 STAGES 小写形式转成 Route 字段要求的大小写。"""
+    return _ROUTE_LABELS.get((route or "").lower(), route)
+
 
 YES_NO_PATTERNS = [
     r'do\s+you\s+approve', r'do\s+you\s+agree', r'do\s+you\s+accept',
@@ -301,7 +325,6 @@ class TUIState:
     pending_questions: List[Dict[str, Any]] = field(default_factory=list)
     current_q_idx: int = 0
     
-    status_hint: str = ""            # 底部状态提示词
     error_msg: str = ""              # 输入校验错误信息
     
     # 滚动管理
@@ -348,6 +371,19 @@ class MonitorTUI:
         # 结构化提问状态机
         self._q_res_queue: Optional[queue.Queue] = None
         self._q_answers: List[str] = []
+
+        # 「等待用户拍板」标记的去重键。渲染轮询每 40ms 跑一次，不去重会把
+        # .log 刷满同一行。入口关闭（用户已拍板）时清空，这样返工回到同一
+        # 阶段、面板再次打开时还会记录 —— 否则第二轮的驱动会一直等不到信号。
+        self._prompt_logged: str = ""
+
+        # 自动推进 / 自动代答：两个正交开关，构造时快照避免运行中热改导致行为跳变。
+        #   _auto_advance —— 阶段边界：stage 结束后是否免去 /advance
+        #   _auto_answer  —— 阶段内部：agent 提问是否代答（无人值守才开）
+        self._auto_advance: bool = is_auto_advance()
+        self._auto_answer: bool = is_auto_answer()
+        self._auto_count: int = 0
+        self._auto_stopped: bool = False
 
         # 编排引擎初始化
         self.callbacks = {
@@ -465,6 +501,7 @@ class MonitorTUI:
                     except queue.Empty:
                         # 轮询检查 Agent 状态变化
                         self._update_agent_status()
+                        self._maybe_auto_advance()
                         self._refresh_display()
 
         finally:
@@ -519,6 +556,9 @@ class MonitorTUI:
         }
         icon = status_icons.get(self.state.agent_status, "[dim]○[/]")
         title = f"{icon} [bold white]{self.state.name}[/] | {self.state.stage} [dim]({self.state.model_name})[/]"
+        if self._auto_advance:
+            mode = "[dim]手动[/]" if self._auto_stopped else "[green]自动[/]"
+            title += f" [dim]|[/] {mode}"
         
         status_text = ""
         if self.state.agent_status == "connecting": status_text = " [yellow]连接中...[/]"
@@ -709,8 +749,18 @@ class MonitorTUI:
         
         self.state.model_name = self.model_name
         
-        # 探测模式
-        self.state.options = extract_options(self.state.log_lines)
+        # 探测模式。先把结果算在局部变量里，最后成对赋值 —— 中途改
+        # self.state.options 会开出一个「input_mode 还是上一轮的 options、
+        # options 已经空了」的窗口，输入线程在这 40ms 里提交的按键会被
+        # _validate_input 判成无效选项、静默丢掉（e2e 里表现为按 A 没反应）。
+        # 下面每个分支都要做磁盘 IO（读 .state），窗口足够大，必然被撞上。
+        options = extract_options(self.state.log_lines)
+        mode: Optional[str] = None
+        # 拍板入口：None = 不是拍板态（提问中，去重键保持不动）
+        prompt_kind: Optional[str] = None
+        # 两个拍板入口都关了才清去重键 —— 提问态不算「关闭」，清了会让
+        # 同一阶段的面板信号重复记录。
+        clear_prompt_log = False
         if self.state.pending_questions:
             # 结构化提问下强制 options 模式
             idx = min(self.state.current_q_idx, len(self.state.pending_questions) - 1)
@@ -722,17 +772,50 @@ class MonitorTUI:
                 if "." in o: label = o.split(".")[0].strip()
                 elif ":" in o: label = o.split(":")[0].strip()
                 opts.append((label, o))
-            self.state.options = opts
-            self.state.input_mode = "options"
+            options = opts
+            mode = "options"
         elif self._is_review_routing_needed():
-            self.state.options = [
+            options = [
                 ("A", "归档 (05-Archive) — 代码通过，正常归档"),
                 ("B", "返工编码 (03-Coding) — 代码需修复"),
                 ("C", "返工规划 (02-Planning) — 设计需修订"),
             ]
-            self.state.input_mode = "options"
+            mode = "options"
+            prompt_kind = "route"
+        elif self._is_gate_signoff_needed():
+            options = [
+                ("A", f"批准 {self._stage_label()} — 签署 Gate 并推进到下一阶段"),
+                ("B", "需要修订 — 继续与 Agent 讨论后再批准"),
+            ]
+            mode = "options"
+            prompt_kind = "gate"
         else:
-            self.state.input_mode = detect_input_mode(self.state.log_lines, self.state.options)
+            mode = detect_input_mode(self.state.log_lines, options)
+            clear_prompt_log = True
+
+        self.state.options = options
+        self.state.input_mode = mode
+        if clear_prompt_log:
+            # 返工回到同一阶段时面板会再次打开，那一轮必须重新记录，
+            # 否则驱动等不到信号。
+            self._prompt_logged = ""
+        elif prompt_kind is not None:
+            self._log_prompt_ready(prompt_kind)
+
+    def _log_prompt_ready(self, kind: str) -> None:
+        """面板切到「等用户拍板」时留一条痕，每个入口每轮只记一次。
+
+        这是给自动化驱动用的信号。此前 e2e 只能靠「日志静默几秒」猜 agent
+        说完没说完，而真正决定按键会不会被 _validate_input 拒绝的是这里的
+        input_mode —— 猜静默偶尔早于状态切换，按 A 被拒，看起来像 TUI 卡住。
+        状态转换本身可观测，就不必猜。
+        """
+        token = f"{kind}:{self.state.stage}"
+        if self._prompt_logged == token:
+            return
+        self._prompt_logged = token
+        label = "路由决策" if kind == "route" else "门禁签署"
+        self._add_log("sw", f"{PROMPT_READY_MARKER} {label}（{self.state.stage}）")
 
     def _is_review_routing_needed(self) -> bool:
         """04-review 完成后，Route 未填写 → 需要用户选择路由"""
@@ -743,11 +826,68 @@ class MonitorTUI:
         if self.state.pending_questions:
             return False
         try:
-            from ..workflow.utils import parse_route_field
-            route = parse_route_field(self.state.name)
-            return route is None
+            from ..workflow import stage_state as ss
+            return ss.read_route(self.state.name) is None
         except Exception:
             return False
+
+    def _stage_label(self) -> str:
+        """当前阶段的中文名，用于选项与日志文案。"""
+        try:
+            return STAGE_NAMES[STAGES.index(self.state.stage)]
+        except (ValueError, IndexError):
+            return self.state.stage
+
+    def _is_gate_signoff_needed(self) -> bool:
+        """agent 收尾但 Gate 未签署 → 需要用户签署后才能推进。
+
+        每个阶段都要有这个入口。Gate 是「用户批准推进」的签名，没有任何 agent
+        角色被要求去做（提示词甚至明确禁止 01 的 analyst 碰 Gate）。
+
+        门禁状态读 .state（docs/design-json-state-source.md），不解析 Markdown：
+        agent 的产出可以包含 ``## Gate`` 字样，靠找标记定位必然歧义。
+        """
+        if self.state.agent_status not in ("idle", "waiting"):
+            return False
+        if self.state.pending_questions:
+            return False
+        # 04 的 Route 未定时先走路由选择，那是比签署更前置的决定
+        if self._is_review_routing_needed():
+            return False
+        try:
+            from ..workflow import stage_state as ss
+            gate = ss.read_gate(self.state.name, self.state.stage)
+        except Exception:
+            return False
+        if not gate.exists or gate.signed:
+            return False
+        return self._agent_has_produced_output()
+
+    def _agent_has_produced_output(self) -> bool:
+        """agent 是否已经给出本阶段的产出。
+
+        用来避免阶段刚启动就弹签署选项。产出有三种形态：
+          1. _save_stage_output 追加的 AI Output 区；
+          2. agent 直接用 write_file 回填模板（占位符消失）；
+          3. 还只存在于对话里 —— 多轮模式下产出要等 /advance 触发 _stage_done
+             之后才落盘，对话期间文件仍是原始模板。只看文件会让签署入口永不
+             出现：用户按 A 被输入校验拒绝，字符还留在缓冲区，把下一条命令
+             污染成 "A/advance"。
+
+        注意这里读 Markdown 是正当的 —— 判断的是「agent 产出了没有」，
+        属于内容检查，不是状态判定。
+        """
+        path = TASKS / self.state.name / f"{self.state.stage}.md"
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            content = ""
+        if content:
+            if "## 🤖 AI Output" in content:
+                return True
+            if "___" not in content:
+                return True
+        return any(src == "agent" for src, _ in self.state.log_lines)
 
     def _add_log(self, source: str, msg: str):
         """引擎回调：添加日志"""
@@ -763,6 +903,21 @@ class MonitorTUI:
 
     def _on_ask_user(self, questions: List[Dict[str, Any]], res_queue: queue.Queue):
         """引擎回调：收到结构化提问"""
+        # 注意：代答与 auto_advance 无关。auto_advance 只管阶段边界（一个 stage
+        # 结束、下一个未开始时是否还要等 /advance）；ask_user 是阶段内的对话轮次，
+        # 默认永远交还用户。只有显式开启 auto_answer（无人值守场景）才代答。
+        if self._auto_answer:
+            answers = [self._default_answer(q) for q in questions]
+            self._add_log("sw", f"[auto] 已自动回答 {len(questions)} 个问题: {answers}")
+            # 代答同样是「决定已经做出」，必须留痕：否则无人值守模式会卡在
+            # 「选项组尚未拍板」上，而现场根本没有人可以去拍板。
+            for idx, (q, a) in enumerate(zip(questions, answers)):
+                label = (q.get("question") or q.get("header") or "").strip() \
+                    or f"question_{idx + 1}"
+                self._record_decision_direct(label, a, by="auto")
+            res_queue.put(answers)
+            return
+
         self.state.pending_questions = questions
         self.state.current_q_idx = 0
         self._q_answers = []
@@ -771,6 +926,14 @@ class MonitorTUI:
         # 立即同步选项和模式，确保后续 _add_log 触发的渲染能显示问题
         self._update_agent_status()
         self._add_log("sw", f"❓ 收到 {len(questions)} 个结构化问题")
+
+    @staticmethod
+    def _default_answer(question: Dict[str, Any]) -> str:
+        """无人值守模式下为单个结构化提问生成回答。"""
+        options = question.get("options") or []
+        if options:
+            return str(options[0])
+        return "请基于任务需求与你的专业判断自行决定，无需再确认。"
 
     # ── 输入分发 ──
 
@@ -813,93 +976,7 @@ class MonitorTUI:
         if cmd.startswith("/"):
             self._add_log("user", cmd)
             if cmd == "/advance":
-                from ..core.service import _service
-                from ..workflow.base import StageInput
-                try:
-                    st = _service.get_task_state(self.state.name)
-                    idx = int(st.get("stage_idx", 0))
-                    cur_status = st.get("stage_status", "pending")
-
-                    # 若 Agent 处于多轮对话模式，先通知其收尾退出
-                    executor = WorkflowRuntime.get_executor()
-                    active = executor.active_stage
-                    if active and active.active_agent:
-                        self._add_log("sw", "Agent 仍在运行中，正在等待完成...")
-                        active._stage_done.set()
-                        active._agent_finalized.wait(timeout=30)
-                        active._invoke_done.wait(timeout=30)
-                        self._add_log("sw", "Agent 已退出，继续推进")
-                    else:
-                        # Agent may have already completed — wait for invoke to finish saving
-                        if active:
-                            active._invoke_done.wait(timeout=30)
-
-                    # 归档阶段特殊处理
-                    if idx >= len(STAGES) - 1:
-                        done_items, todo_items = _service.validate_stage(self.state.name)
-                        for item in done_items:
-                            self._add_log("sw", f"  [✓] {item}")
-                        for item in todo_items:
-                            self._add_log("sw", f"  [!] {item}")
-                        if todo_items:
-                            self._add_log("error", f"检测到 {len(todo_items)} 个未完成项")
-                            return
-                        _service.advance_stage(self.state.name)
-                        self._on_settlement()
-                        return
-
-                    if cur_status == "pending":
-                        self._add_log("error", f"当前阶段尚未开始运行，请等待 Agent 完成后再推进")
-                        return
-
-                    # 软校验: validate_stage
-                    self._add_log("sw", f"--- 阶段校验: {STAGES[idx]} ({STAGE_NAMES[idx]}) ---")
-                    done_items, todo_items = _service.validate_stage(self.state.name)
-                    for item in done_items:
-                        self._add_log("sw", f"  [✓] {item}")
-                    for item in todo_items:
-                        self._add_log("sw", f"  [!] {item}")
-
-                    # 硬校验: hook shell script
-                    hook_script = HOOKS_DIR / f"check_{STAGES[idx]}.sh"
-                    if not hook_script.exists():
-                        hook_script = HOOKS_DIR / f"post_check_{STAGES[idx]}.sh"
-                    if hook_script.exists():
-                        self._add_log("sw", f"--- 系统硬校验: {hook_script.name} ---")
-                        res = subprocess.run(
-                            [str(hook_script), self.state.name],
-                            cwd=str(ROOT), check=False, timeout=60
-                        )
-                        if res.returncode != 0:
-                            self._add_log("error", "硬校验未通过，必须满足所有条件才能推进")
-                            return
-
-                    # 待办项阻断
-                    if todo_items:
-                        self._add_log("error", f"检测到 {len(todo_items)} 个未完成项，请完善后重试")
-                        return
-
-                    # 执行推进
-                    _service.advance_stage(self.state.name)
-                    st = read_state(self.state.name)
-
-                    if st.get("stage_status") == "Finished":
-                        self._on_settlement()
-                        return
-
-                    self.state.stage = st.get("stage")
-                    self.state.stage_idx = int(st.get("stage_idx", 0))
-                    self._add_log("sw", f"阶段推进 → {STAGE_NAMES[self.state.stage_idx]}")
-
-                    stage_input = StageInput(
-                        task_name=self.state.name,
-                        stage=self.state.stage,
-                        stage_idx=self.state.stage_idx,
-                        metadata={"callbacks": self.callbacks}
-                    )
-                    threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
-                except Exception as e:
-                    self._add_log("error", f"推进失败: {e}")
+                self._run_advance(auto=False)
                 return
 
             WorkflowRuntime.get_executor().handle_command(cmd[1:])
@@ -917,6 +994,7 @@ class MonitorTUI:
             
             self._q_answers.append(answer_text)
             self._add_log("user", f"[{self.state.current_q_idx + 1}] {answer_text}")
+            self._record_decision(self.state.current_q_idx, answer_text)
             
             self.state.current_q_idx += 1
             self._refresh_display()
@@ -934,19 +1012,70 @@ class MonitorTUI:
             return
 
         # 1.5 处理 04-review 路由选择（A/B/C — agent 完成、Route 未填时触发）
-        if self.state.stage == "04-review" and self.state.input_mode == "options" and not self.state.is_settled:
+        # 必须与渲染层用同一个判定（_is_review_routing_needed）：只看 stage 和
+        # input_mode 的话，Route 填好之后面板已经切成签署选项，这里却仍把 A 当
+        # 路由，于是把同一个 Route 重复写一遍、Gate 永远签不上（任务 oooo）。
+        if (self.state.input_mode == "options"
+                and not self.state.is_settled
+                and self._is_review_routing_needed()):
             review_routes = {"A": "05-Archive", "B": "03-Coding", "C": "02-Planning"}
             choice = cmd.strip().upper()
             if choice in review_routes:
                 target = review_routes[choice]
                 route_labels = {"05-Archive": "归档", "03-Coding": "编码", "02-Planning": "规划"}
                 self._add_log("user", f"[{choice}] 返工到 {route_labels[target]} ({target})")
-                self._write_review_route(target)
-                self.state.input_mode = "none"
-                self.state.options = []
-                self._add_log("sw", f"✓ Route 已设置为 {target}。输入 /advance 推进。")
+                if self._write_review_route(target):
+                    self.state.input_mode = "none"
+                    self.state.options = []
+                    # 路由与签署是两个决定：Route 落定后面板会切成 Gate 签署
+                    # 选项，由那一步去推进。这里不直接推进 —— 用户还没批准。
+                    self._add_log("sw", f"✓ Route 已设置为 {target}，请批准 Gate 以推进。")
+                else:
+                    self._add_log(
+                        "error",
+                        "写入 Route 失败：04-review.md 缺少 **Route** 字段，"
+                        "请让 Agent 补齐该字段后重试")
                 self._refresh_display()
                 return
+            # 停在选项模式：agent 此时已 idle，穿透去发 agent 回复没人接收
+            self._add_log("error", f"无效选项 {cmd!r}，请输入 A / B / C")
+            self._refresh_display()
+            return
+
+        # 1.6 处理阶段签署（A/B — agent 完成、Gate 未勾选时触发，所有阶段共用）
+        if (self.state.input_mode == "options"
+                and not self.state.is_settled
+                and self._is_gate_signoff_needed()):
+            label = self._stage_label()
+            choice = cmd.strip().upper()
+            if choice == "A":
+                self._add_log("user", f"[A] 批准{label}")
+                if not self._write_gate_signoff():
+                    self._add_log(
+                        "error",
+                        f"勾选 Gate 失败：{self.state.stage}.md 缺少 Gate 章节")
+                    self._refresh_display()
+                    return
+                self.state.input_mode = "none"
+                self.state.options = []
+                self._add_log("sw", f"✓ {label}已批准（Gate 已签署），正在推进...")
+                self._refresh_display()
+                # 签署即推进：批准之后再要用户敲一次 /advance 是多余的一步 ——
+                # 签 Gate 表达的就是「可以走了」。校验没过时 _run_advance 会
+                # 打出待办并返回 blocked，此时 Gate 仍是签好的，用户补完内容
+                # 再敲 /advance 即可，不必重新批准。
+                self._run_advance(auto=False)
+                return
+            if choice == "B":
+                self._add_log("user", "[B] 需要修订")
+                self.state.input_mode = "none"
+                self.state.options = []
+                self._add_log("sw", "请继续说明需要修订的内容。")
+                self._refresh_display()
+                return
+            self._add_log("error", f"无效选项 {cmd!r}，请输入 A（批准）或 B（修订）")
+            self._refresh_display()
+            return
 
         # 2. 处理普通 Agent 回复
         if self.state.is_settled:
@@ -957,35 +1086,365 @@ class MonitorTUI:
         self._add_log("user", response)
         WorkflowRuntime.get_executor().answer(response)
 
-    def _write_review_route(self, target: str):
-        """写入 04-review.md 中的 Route 字段，返工时自动填充 Evidence 表"""
+    def _record_decision(self, q_idx: int, answer_text: str) -> None:
+        """把用户对第 q_idx 个提问的选择记进 .state。
+
+        选项组的拍板是判定依据，必须留在状态里；此前它只被拼成字符串回给
+        agent，于是能否过闸取决于 agent 有没有回写 Markdown 记法（任务 T1）。
+        """
+        questions = self.state.pending_questions or []
+        if not (0 <= q_idx < len(questions)):
+            return
+        q = questions[q_idx]
+        label = (q.get("question") or q.get("header") or "").strip()
+        if not label:
+            # 没有题面就用序号兜底，至少保证「拍过板」这件事被记下来。
+            label = f"question_{q_idx + 1}"
+        self._record_decision_direct(label, answer_text, by="user")
+
+    def _record_decision_direct(self, label: str, answer: str,
+                                by: str = "user") -> None:
+        """按题面直接落盘一条拍板记录。
+
+        失败一律吞掉：这条路径在用户回答（或代答）的主流程上，抛异常会打断
+        对话。最坏结果是闸门保守地继续拦着，比 TUI 崩掉好。
+        """
+        try:
+            from ..workflow import stage_state as ss
+            ss.record_decision(self.state.name, self.state.stage,
+                               question=label, answer=answer, by=by)
+        except Exception as e:
+            self._add_log("sw", f"⚠️ 拍板记录写入失败（不影响本轮回答）: {e}")
+
+    def _write_review_route(self, target: str) -> bool:
+        """记录 04-review 的路由决策。返回是否写入成功。
+
+        决策存 .state（docs/design-json-state-source.md）。返工时把 Evidence
+        表填进 Markdown 供人阅读 —— 那是给人看的证据内容，不是判定依据。
+        """
+        from ..workflow import stage_state as ss
+
+        if not ss.write_route(self.state.name, target, by="user"):
+            return False
+        if ss.read_route(self.state.name) != target.lower():
+            return False
+        if target != "05-Archive":
+            self._fill_reroute_evidence(target)
+        return True
+
+    def _fill_reroute_evidence(self, target: str) -> None:
+        """返工时在 04-review.md 里填好 Evidence 表（纯展示，失败不影响决策）。
+
+        表格内容取自本阶段的拍板记录（`.state` 的 decisions）——那里存着用户在
+        ask_user 里选的选项原文，也就是返工的真实理由。此前这里写死了
+        「需返工修复的问题 / 详见审查结论」这类占位文本，于是
+        inject_reroute_context 注入到 03-coding.md 的返工上下文毫无信息量，
+        agent 根本不知道要补什么，返工回去只是把原来的代码重新确认一遍
+        （任务 T3：用户要求补 README.md，agent 连续三轮都没做）。
+        """
         review_path = TASKS / self.state.name / "04-review.md"
         if not review_path.exists():
             return
-        content = review_path.read_text(encoding="utf-8")
-        content = content.replace(
-            "- **Route**: `___`",
-            f"- **Route**: `{target}`",
-            1
-        )
-        if target != "05-Archive":
-            stage_labels = {
-                "02-Planning": "planning",
-                "03-Coding": "coding",
-                "01-Brainstorming": "brainstorming",
-            }
-            stage = stage_labels.get(target, "planning")
-            content = content.replace(
-                "| 1 | ___ | high/med/low | coding/planning/brainstorming | ___ |",
-                f"| 1 | 需返工修复的问题 | high | {stage} | 详见审查结论 |",
-                1,
+        try:
+            content = review_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        stage_labels = {
+            "02-Planning": "planning",
+            "03-Coding": "coding",
+            "01-Brainstorming": "brainstorming",
+        }
+        stage = stage_labels.get(target, "planning")
+        reasons = self._reroute_reasons()
+        placeholder = "| {n} | ___ | high/med/low | coding/planning/brainstorming | ___ |"
+        updated = content
+        for idx in (1, 2):
+            row = placeholder.format(n=idx)
+            if row not in updated:
+                continue
+            if idx <= len(reasons):
+                reason = reasons[idx - 1]
+                sev = "high" if idx == 1 else "med"
+                updated = updated.replace(
+                    row, f"| {idx} | {reason} | {sev} | {stage} | 见 04-review 决策记录 |", 1)
+            else:
+                # 没有第二条理由时把占位行删掉，而不是编一条假的出来：
+                # extract_evidence_table 会把 `___` 当未填而整表作废。
+                updated = updated.replace(row + "\n", "", 1)
+        if updated != content:
+            try:
+                review_path.write_text(updated, encoding="utf-8")
+            except OSError:
+                pass
+
+    def _reroute_reasons(self) -> List[str]:
+        """从拍板记录里取出用户这一轮给出的返工理由，最新的在前。
+
+        取不到就回退成一句明确的兜底 —— 宁可写「用户选择返工，理由见对话记录」
+        也不要写「详见审查结论」那种既像内容又没内容的话。
+        """
+        fallback = ["用户选择返工，具体理由见 04-review 对话记录"]
+        try:
+            from ..workflow import stage_state as ss
+            decisions = ss.read_decisions(self.state.name, self.state.stage)
+        except Exception:
+            return fallback
+        if not decisions:
+            return fallback
+        ordered = sorted(decisions.items(),
+                         key=lambda kv: str(kv[1].get("decided_at") or ""),
+                         reverse=True)
+        reasons: List[str] = []
+        for question, entry in ordered:
+            answer = str(entry.get("answer") or "").strip()
+            if not answer:
+                continue
+            # 表格是单行单元格，竖线和换行必须转义/压平，否则整张表结构就散了。
+            text = f"{question.strip()} → {answer}"
+            text = text.replace("|", "\\|").replace("\n", " ")
+            if len(text) > 160:
+                text = text[:157] + "..."
+            reasons.append(text)
+            if len(reasons) == 2:
+                break
+        return reasons or fallback
+
+    def _write_gate_signoff(self, by: str = "user") -> bool:
+        """签署当前阶段的 Gate（用户批准推进）。
+
+        写 .state 而不是改 Markdown 的复选框：agent 的产出可以包含 ``## Gate``
+        字样，靠在文件里找标记来定位签署区必然歧义 —— 那是「Gate 区每次 flush
+        追加一份」「签署被写进 agent 正文」这类 bug 的根源。
+        Markdown 里的 Gate 区随后被单向渲染成状态的映像。
+        """
+        from ..workflow import stage_state as ss
+
+        if not ss.sign_gate(self.state.name, self.state.stage, by=by):
+            return False
+        ss.render_gate_section(self.state.name, self.state.stage)
+        return True
+
+    # ── 阶段推进（手动 /advance 与自动推进共用）──
+
+    def _maybe_auto_advance(self) -> None:
+        """自动推进：仅作用于**阶段边界**（当前 stage 已结束、下一个未开始）。
+
+        auto_advance 的职责边界很窄 —— 它只免去用户敲 /advance 这一步，
+        不干预阶段内部的任何对话。因此 agent 有待回答的提问时必须让路：
+        无论提问由用户回答还是由 auto_answer 代答，都是阶段内的事，
+        推进要等到 agent 真正收尾（idle 且 _invoke_done 置位）之后。
+
+        只在主循环的空闲分支调用。任一次推进失败（blocked/error）就永久
+        退回手动，避免对同一门禁反复空转。
+        """
+        if not self._auto_advance or self._auto_stopped:
+            return
+        if self.state.is_settled or not self.running:
+            return
+        # 阶段内仍在对话（等人回答 / agent 未收尾）→ 不是阶段边界，让路
+        if self.state.pending_questions or self.state.agent_status != "idle":
+            return
+
+        # 主循环每 40ms 走一次这里，任何异常都不能冒泡（否则刷屏并打断渲染）。
+        try:
+            active = WorkflowRuntime.get_executor().active_stage
+        except Exception:
+            active = None
+        if active is not None:
+            if active.active_agent is not None:
+                return
+            if not active._invoke_done.is_set():
+                return
+
+        st = read_state(self.state.name)
+        if not st or st.get("stage_status", "pending") == "pending":
+            return
+
+        if self._auto_count >= AUTO_ADVANCE_MAX_STAGES:
+            self._auto_stopped = True
+            self._add_log(
+                "error",
+                f"[auto] 已达自动推进上限 {AUTO_ADVANCE_MAX_STAGES} 次，转为手动（输入 /advance）",
             )
-            content = content.replace(
-                "| 2 | ___ | high/med/low | coding/planning/brainstorming | ___ |",
-                "| 2 | 需跟踪的改进项 | med | coding | 详见审查结论 |",
-                1,
+            return
+
+        self._auto_count += 1
+        self._add_log("sw", f"[auto] 自动推进 ({self._auto_count}/{AUTO_ADVANCE_MAX_STAGES})")
+        result = self._run_advance(auto=True)
+        if result in ("blocked", "error"):
+            self._auto_stopped = True
+            self._add_log("sw", "[auto] 自动推进已暂停，转为手动（输入 /advance 重试）")
+
+    def _run_advance(self, auto: bool = False) -> str:
+        """执行一次阶段推进。
+
+        返回值：
+          "advanced"  已推进到下一阶段并启动了 agent
+          "settled"   任务已完成（进入结算）
+          "blocked"   校验未通过，停在当前阶段
+          "error"     推进过程抛错
+
+        auto=True 时会先代为完成用户签署动作（勾 Gate / 回填 Route），
+        这些动作在手动模式下必须由用户显式做出。
+        """
+        from ..core.service import _service
+
+        try:
+            st = _service.get_task_state(self.state.name)
+            idx = int(st.get("stage_idx", 0))
+            cur_status = st.get("stage_status", "pending")
+
+            executor = WorkflowRuntime.get_executor()
+            active = executor.active_stage
+
+            # 校验前先把 agent 已产出的内容落盘。多轮模式下产出要等 agent 收尾
+            # 才写文件，而收尾发生在校验通过之后 —— 不先 flush，校验永远读的是
+            # 没有产出的旧文件，用户会被要求补齐 agent 其实已经给出的内容。
+            if active is not None:
+                try:
+                    active.flush_output(self.state.name)
+                except Exception:
+                    pass
+
+            if auto:
+                self._auto_sign_off(STAGES[idx])
+
+            # 归档阶段特殊处理
+            if idx >= len(STAGES) - 1:
+                done_items, todo_items = _service.validate_stage(self.state.name)
+                for item in done_items:
+                    self._add_log("sw", f"  [✓] {item}")
+                for item in todo_items:
+                    self._add_log("sw", f"  [!] {item}")
+                if todo_items:
+                    self._add_log("error", f"检测到 {len(todo_items)} 个未完成项")
+                    return "blocked"
+                self._finalize_active_agent(active)
+                _service.advance_stage(self.state.name)
+                self._on_settlement()
+                return "settled"
+
+            if cur_status == "pending":
+                self._add_log("error", "当前阶段尚未开始运行，请等待 Agent 完成后再推进")
+                return "blocked"
+
+            # 软校验
+            self._add_log("sw", f"--- 阶段校验: {STAGES[idx]} ({STAGE_NAMES[idx]}) ---")
+            done_items, todo_items = _service.validate_stage(self.state.name)
+            for item in done_items:
+                self._add_log("sw", f"  [✓] {item}")
+            for item in todo_items:
+                self._add_log("sw", f"  [!] {item}")
+
+            # 硬校验
+            hook_script = HOOKS_DIR / f"check_{STAGES[idx]}.sh"
+            if not hook_script.exists():
+                hook_script = HOOKS_DIR / f"post_check_{STAGES[idx]}.sh"
+            if hook_script.exists():
+                self._add_log("sw", f"--- 系统硬校验: {hook_script.name} ---")
+                try:
+                    res = subprocess.run(
+                        [str(hook_script), self.state.name],
+                        cwd=str(ROOT), check=False, timeout=HOOK_TIMEOUT_SECONDS,
+                        capture_output=True, text=True,
+                    )
+                except subprocess.TimeoutExpired:
+                    self._add_log("error", f"硬校验超时: {hook_script.name}")
+                    return "blocked"
+                # 回显 hook 输出：不显示的话用户只看到「未通过」，无从判断改什么
+                for stream in (res.stdout, res.stderr):
+                    for line in (stream or "").splitlines():
+                        if line.strip():
+                            self._add_log("sw", f"  {line.rstrip()}")
+                if res.returncode != 0:
+                    self._add_log("error", "硬校验未通过，必须满足所有条件才能推进")
+                    return "blocked"
+
+            if todo_items:
+                self._add_log("error", f"检测到 {len(todo_items)} 个未完成项，请完善后重试")
+                return "blocked"
+
+            # 校验全部通过后才收尾 agent。顺序很关键：agent 一旦 shutdown
+            # 就无法再改文件，若在校验前关掉，「请完善后重试」将无人可执行，
+            # 用户只能手工编辑 agent 生成的产出。
+            self._finalize_active_agent(active)
+
+            # 执行推进
+            _service.advance_stage(self.state.name)
+            st = read_state(self.state.name)
+
+            if st.get("stage_status") == "Finished":
+                self._on_settlement()
+                return "settled"
+
+            self.state.stage = st.get("stage")
+            self.state.stage_idx = int(st.get("stage_idx", 0))
+            self._add_log("sw", f"阶段推进 → {STAGE_NAMES[self.state.stage_idx]}")
+
+            stage_input = StageInput(
+                task_name=self.state.name,
+                stage=self.state.stage,
+                stage_idx=self.state.stage_idx,
+                metadata={"callbacks": self.callbacks},
             )
-        review_path.write_text(content, encoding="utf-8")
+            threading.Thread(target=executor.invoke, args=(stage_input,), daemon=True).start()
+            return "advanced"
+        except Exception as e:
+            self._add_log("error", f"推进失败: {e}")
+            return "error"
+
+    def _finalize_active_agent(self, active) -> None:
+        """通知多轮对话中的 agent 收尾退出，并等它落盘完成。
+
+        只应在校验通过、确定要推进时调用：shutdown 不可撤回，提前调用会让
+        校验失败后的「请完善后重试」变成死路。
+        """
+        if not active:
+            return
+        if active.active_agent:
+            self._add_log("sw", "Agent 仍在运行中，正在等待完成...")
+            active._stage_done.set()
+            active._agent_finalized.wait(timeout=30)
+            active._invoke_done.wait(timeout=30)
+            self._add_log("sw", "Agent 已退出，继续推进")
+        else:
+            # Agent 可能已自行完成 —— 等 invoke 落盘结束
+            active._invoke_done.wait(timeout=30)
+
+    def _auto_sign_off(self, stage: str) -> None:
+        """自动模式下代替用户完成签署动作。
+
+        手动模式里这两件事由用户在 TUI 里点选：勾 Gate（每个阶段都有）、
+        04 阶段选 Route。自动模式必须代为完成，否则门禁不可达、自动推进会
+        立刻卡住。
+        """
+        if stage == "04-review":
+            from ..workflow import stage_state as ss
+            from ..workflow.utils import parse_route_from_ai_output
+            # 决策状态读 .state；只有在尚未决策时才去读 agent 的结论正文推断
+            # 意图 —— 那是对产出内容的解读，不是状态判定。
+            if ss.read_route(self.state.name) is None:
+                path = TASKS / self.state.name / "04-review.md"
+                if not path.exists():
+                    return
+                route = parse_route_from_ai_output(
+                    path.read_text(encoding="utf-8", errors="replace"))
+                if not route:
+                    self._add_log(
+                        "error",
+                        "[auto] 无法从审查结论判定 Route，请手动选择路由后再推进",
+                    )
+                    return
+                target = _normalize_route_label(route)
+                if not self._write_review_route(target):
+                    self._add_log(
+                        "error", f"[auto] Route 写入失败（目标 {target}）")
+                    return
+                self._add_log("sw", f"[auto] Route 已自动判定为 {target}")
+
+        # Gate 签署对所有阶段一视同仁（04 必须在 Route 落定之后再签）
+        if self._is_gate_signoff_needed() and self._write_gate_signoff(by="auto"):
+            self._add_log("sw", f"[auto] {self._stage_label()}已自动批准（Gate 已签署）")
 
     def _handle_settlement_choice(self, choice: str):
         """执行最终结算动作"""
@@ -1023,6 +1482,10 @@ class MonitorTUI:
             time.sleep(2)
             self.running = False
 
+        else:
+            # 静默忽略会让用户以为界面卡死
+            self._add_log("error", f"无效选项 {choice!r}，请输入 A / B / C")
+
     def _build_agent_response(self, raw_text: str) -> str:
         """根据模式构造发送给 Agent 的文本"""
         if self.state.input_mode == "yesno":
@@ -1043,6 +1506,27 @@ class MonitorTUI:
 
     # ── 键盘输入线程 ──
 
+    def _submit_input(self, text: str) -> bool:
+        """校验并提交一行输入。返回是否被接受。
+
+        两个输入循环（TTY 逐字符 / 非 TTY 读行）共用这一份逻辑，免得"被拒时
+        清不清缓冲区"这类细节在两处各写一遍、修一处漏一处。
+        """
+        if not text.strip():
+            return False
+        ok, msg = self._validate_input(text)
+        if ok:
+            self.cmd_queue.put(text)
+            self.state.input_buffer = ""
+            self.state.error_msg = ""
+            return True
+        # 被拒的输入也要清出缓冲区。留着它，用户接着敲的下一条命令会被拼在
+        # 后面 —— 按 A 太早被拒，再输入 /advance 就变成 "A/advance"，一条谁都
+        # 不认的命令，看起来像 TUI 没反应。
+        self.state.error_msg = msg
+        self.state.input_buffer = ""
+        return False
+
     def _input_loop_sync(self):
         """非 TTY 环境下的同步读行模式"""
         while self.running:
@@ -1051,11 +1535,7 @@ class MonitorTUI:
                 if not line: break
                 line = line.strip()
                 if line:
-                    ok, msg = self._validate_input(line)
-                    if ok:
-                        self.cmd_queue.put(line)
-                    else:
-                        self.state.error_msg = msg
+                    if not self._submit_input(line):
                         self._refresh_display()
             except (EOFError, KeyboardInterrupt, OSError):
                 break
@@ -1099,14 +1579,7 @@ class MonitorTUI:
 
                     # 3. 处理常规按键
                     if ch in ('\n', '\r'):
-                        if self.state.input_buffer.strip():
-                            ok, msg = self._validate_input(self.state.input_buffer)
-                            if ok:
-                                self.cmd_queue.put(self.state.input_buffer)
-                                self.state.input_buffer = ""
-                                self.state.error_msg = ""
-                            else:
-                                self.state.error_msg = msg
+                        self._submit_input(self.state.input_buffer)
                         self._refresh_display()
                     elif ch == '\x7f' or ch == '\b':
                         self.state.input_buffer = self.state.input_buffer[:-1]

@@ -12,8 +12,7 @@ import socket
 import time
 import threading
 import urllib.request
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional, Callable
 
 from .config import TASKS

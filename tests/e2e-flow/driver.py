@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""PTY 驱动脚本 — 启动 sw init 完成完整 5 阶段 E2E 测试。
+"""PTY 驱动脚本 — 启动 `sw init --mock` 完成完整 5 阶段 E2E 测试。
 
-支持两种模式：
-  - (默认) mock 模式:  sw init --mock              — 快速验证 (约 60s)
-  - --no-mock 模式:    sw init --no-mock            — 真实 Agent (约 15-30min)
+**只跑 MockAgent。** 驱动真实 agent 的模式已删除：那条路径依赖模型输出，
+同一份代码两次运行结果不同，失败无法区分是回归还是模型这次心情不好 ——
+不满足可执行、可复现、可验证。真实 agent 属于手工验证，不是测试。
+
+MockAgent 的每个阶段输出都是写死的脚本（sw_lib/agents/mock.py），因此本
+驱动的每一步都能断言确切文本，而不是"等等看"。
 
 用法:
-    python3 tests/e2e-flow/driver.py                # mock 模式
-    python3 tests/e2e-flow/driver.py --no-mock      # 真实 Agent 模式
+    python3 tests/e2e-flow/driver.py
 
 流程:
     1. 用 pty.fork() 创建子进程
-    2. 子进程运行 sw init，通过 PTY 实时交互
+    2. 子进程运行 sw init --mock，通过 PTY 实时交互
     3. 父进程监控 .log 文件和 PTY 输出
     4. 依次经过 01→02→03→04→05 全部阶段
     5. 退出码 0 = 全部通过，非 0 = 有失败
@@ -20,10 +22,12 @@
 import argparse
 import os
 import pty
-import re
 import json
+import re
 import select
 import signal
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,6 +37,12 @@ from typing import Optional, List
 ROOT = Path(__file__).resolve().parent.parent.parent
 TASK_NAME = f"e2e-{os.getpid()}"
 CONTEXT = "Build a CLI note manager with add/list/delete/search commands in Python"
+
+# 从被测代码里取标记，不在这里抄一份字符串：抄了就会在改 TUI/MockAgent 时
+# 悄悄失配，而失配的表现是「等待超时」，看起来像流程 bug。
+sys.path.insert(0, str(ROOT))
+from sw_lib.agents.mock import SCENARIO_DONE_MARKER  # noqa: E402
+from sw_lib.ui.tui import PROMPT_READY_MARKER  # noqa: E402
 
 # ── Logger ──
 def log(msg: str):
@@ -77,6 +87,112 @@ def _read_pty(fd: int, timeout: float = 0.5) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _gate_signed(task_dir: Path, stage: str) -> bool:
+    """该阶段的 Gate 是否已签署。判定源是 `.state`，不是 Markdown。"""
+    sf = task_dir / ".state"
+    if not sf.exists():
+        return False
+    try:
+        state = json.loads(sf.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    gate = (state.get("stages") or {}).get(stage, {}).get("gate") or {}
+    items = gate.get("items") or []
+    return bool(items) and all(i.get("checked") for i in items)
+
+
+def _wait_prompt_ready(fd: int, task_dir: Path, scenarios: int, prompts: int,
+                       timeout: float = 30) -> bool:
+    """等到按键确实会被接受为止。
+
+    要求两个条件同时成立：
+
+    * MockAgent 的场景脚本已收尾第 ``scenarios`` 次（``SCENARIO_DONE_MARKER``），
+      说明 agent 不会再转回 active；
+    * TUI 的拍板面板已打开第 ``prompts`` 次（``PROMPT_READY_MARKER``），说明
+      ``input_mode`` 已切成 options，``_validate_input`` 会放行。
+
+    缺一不可，前三版分别栽在这两条上：
+
+    1. 猜「日志静默 3 秒」—— 脚本自带 sleep(2)，静默窗口可能落在两行输出之间。
+    2. 只等脚本收尾 —— TUI 还没在 40ms 轮询里把 input_mode 切过来，按 A 被拒。
+    3. 只等面板打开 —— 01 阶段答完提问后有个瞬时 idle 窗口，面板会在 agent
+       继续输出前先开一次；此时按 A，agent 已转回 active，照样被拒。
+
+    不匹配 TUI 屏幕文本：Rich 全屏模式会插 ANSI 序列并按宽度折行，中文提示
+    可能被拆散在多次写入里。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _read_pty(fd, timeout=0.2)  # 持续排空，避免子进程写阻塞
+        if _count_log(task_dir, SCENARIO_DONE_MARKER) < scenarios:
+            time.sleep(0.1)
+            continue
+        # 脚本收尾之后面板才算数。收尾前那次打开是 01 阶段答完提问的瞬时
+        # idle 窗口造成的，按它去按键会被拒。
+        if _count_log_after(task_dir, PROMPT_READY_MARKER,
+                            SCENARIO_DONE_MARKER, scenarios) >= prompts:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _count_log_after(task_dir: Path, pattern: str,
+                     anchor: str, anchor_nth: int) -> int:
+    """统计第 ``anchor_nth`` 次出现 ``anchor`` 之后，``pattern`` 出现了几次。
+
+    用来忽略「脚本还没收尾时面板短暂打开」那类计数噪声。
+    """
+    log_file = task_dir / ".log"
+    if not log_file.exists():
+        return 0
+    content = log_file.read_text(encoding="utf-8", errors="replace")
+    pos = -1
+    for _ in range(anchor_nth):
+        pos = content.find(anchor, pos + 1)
+        if pos < 0:
+            return 0
+    return content.count(pattern, pos)
+
+
+def _wait_gate_signed(fd: int, task_dir: Path, stage: str,
+                      timeout: float = 15) -> bool:
+    """等本阶段的 Gate 真正签上（判定源是 .state）。
+
+    持续排空 PTY，否则 TUI 写满管道会阻塞，看起来像"没反应"。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _read_pty(fd, timeout=0.3)
+        if _gate_signed(task_dir, stage):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _count_log(task_dir: Path, pattern: str) -> int:
+    """统计 .log 中 pattern 出现的次数。"""
+    log_file = task_dir / ".log"
+    if not log_file.exists():
+        return 0
+    return log_file.read_text(encoding="utf-8", errors="replace").count(pattern)
+
+
+def _wait_log_count(task_dir: Path, pattern: str, at_least: int,
+                    timeout: float = 30) -> bool:
+    """等 pattern 出现次数达到 at_least。
+
+    _wait_log 是全文匹配，用它等「第 N 次出现」会被前面的旧记录立刻命中
+    而假性通过 —— 例如等第 2 次回答时匹配 "[1]"，其实匹配的是第 1 次。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _count_log(task_dir, pattern) >= at_least:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def _wait_log(task_dir: Path, pattern: str, timeout: float = 120) -> Optional[str]:
     """等待 .log 文件中出现指定字符串。返回匹配时的完整日志内容。"""
     log_file = task_dir / ".log"
@@ -86,20 +202,6 @@ def _wait_log(task_dir: Path, pattern: str, timeout: float = 120) -> Optional[st
             content = log_file.read_text(encoding="utf-8", errors="replace")
             if pattern in content:
                 return content
-        time.sleep(0.5)
-    return None
-
-
-def _wait_log_re(task_dir: Path, regex: str, timeout: float = 120) -> Optional[re.Match]:
-    """等待 .log 文件中出现正则匹配。"""
-    log_file = task_dir / ".log"
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if log_file.exists():
-            content = log_file.read_text(encoding="utf-8", errors="replace")
-            m = re.search(regex, content)
-            if m:
-                return m
         time.sleep(0.5)
     return None
 
@@ -128,6 +230,45 @@ def _last_log_lines(task_dir: Path, n: int = 10) -> List[str]:
         lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
         return lines[-n:]
     return []
+
+
+def _dump_failure(task_dir: Path, stage: str, reason: str,
+                  fd: Optional[int] = None) -> None:
+    """失败时把现场打印出来。
+
+    _cleanup 会杀掉子进程，之后再去翻任务目录常常已经没有 .log/.state；
+    定位问题不该需要另开一轮去 `ls -dt` 找目录再 tail 日志。
+    """
+    log(f"  FAIL: {reason}")
+    log(f"  ── 现场诊断 ({task_dir.name} @ {stage}) ──")
+    st = _read_state(task_dir)
+    log(f"    state: stage={st.get('stage')} status={st.get('stage_status')}")
+
+    content = _stage_file(task_dir, stage)
+    has_ai = "🤖 AI Output" in content
+    pos = content.rfind("\n## Gate")
+    gate = content[pos:].replace("\n", " / ") if pos >= 0 else "(无 Gate 区)"
+    log(f"    {stage}.md: {len(content)}b, AI Output={has_ai}")
+    log(f"    Gate: {gate[:200]}")
+
+    for line in _last_log_lines(task_dir, 15):
+        log(f"    log: {line}")
+
+    # 被 _validate_input 拒绝的输入只写进 state.error_msg（渲染在面板上），
+    # 不进 .log —— 只看日志时表现为「按键像是没发出去」。把屏幕文本捞出来。
+    if fd is not None:
+        screen = _read_pty(fd, timeout=0.5)
+        tail = _strip_ansi(screen)[-600:]
+        if tail.strip():
+            log(f"    screen: {tail!r}")
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Z0-9]|\x1b[=>]")
+
+
+def _strip_ansi(text: str) -> str:
+    """去掉 ANSI 控制序列，只留可读文本。"""
+    return _ANSI_RE.sub("", text)
 
 
 def _advance_error_in_log(log_lines: List[str]) -> bool:
@@ -161,74 +302,51 @@ def _wait_stage_status(task_dir: Path, status: str, timeout: float = 30) -> bool
     return False
 
 
+def _wait_log_quiet(task_dir: Path, quiet_for: float = 1.0,
+                    timeout: float = 30) -> bool:
+    """等 .log 停止增长，表示 TUI 已处理完上一条输入。
+
+    替代固定 sleep：真实等待时间取决于机器负载，写死秒数要么白等、要么
+    在慢机器上偶发失败。
+    """
+    log_file = task_dir / ".log"
+    deadline = time.time() + timeout
+    last = -1
+    stable_since = None
+    while time.time() < deadline:
+        size = log_file.stat().st_size if log_file.exists() else 0
+        if size == last:
+            if stable_since and time.time() - stable_since >= quiet_for:
+                return True
+        else:
+            last = size
+            stable_since = time.time()
+        time.sleep(0.1)
+    return False
+
+
+def _wait_advanced(task_dir: Path, from_stage: str,
+                   timeout: float = 30) -> tuple[str, str]:
+    """等阶段真正推进，返回 (stage, stage_status)。
+
+    原实现是 sleep(3) 后读一次、不对就再 sleep(5) 读一次；这里改为轮询到
+    状态变化为止，快机器上立刻返回，慢机器上也不会误判成「未推进」。
+    """
+    deadline = time.time() + timeout
+    st = {}
+    while time.time() < deadline:
+        st = _read_state(task_dir)
+        stage = st.get("stage", from_stage)
+        status = st.get("stage_status", "")
+        if status == "Finished" or stage != from_stage:
+            return stage, status
+        time.sleep(0.2)
+    return st.get("stage", from_stage), st.get("stage_status", "")
+
+
 # ==============================================================
 # 驱动逻辑
 # ==============================================================
-
-def _handle_questions_loop(
-    fd: int, task_dir: Path, pty_text: str,
-    timeout: float = 120,
-    answer_defaults: Optional[List[str]] = None,
-) -> bool:
-    """检测并回答 Agent 的提问。
-    
-    当 .log 中出现 "❓ 收到" 时，读取 PTY 中的选项，用 answer_defaults 回复。
-    返回 True 表示所有问题已解决，False 表示超时。
-    """
-    if answer_defaults is None:
-        answer_defaults = ["A", "A", "A"]  # 默认选第一个
-
-    deadline = time.time() + timeout
-    q_count = 0
-    last_log_size = 0
-
-    while time.time() < deadline:
-        log_file = task_dir / ".log"
-        if not log_file.exists():
-            time.sleep(0.3)
-            continue
-
-        content = log_file.read_text(encoding="utf-8", errors="replace")
-        # 检测是否有新问题
-        q_matches = list(re.finditer(r"❓ 收到 (\d+) 个结构化问题", content))
-        if not q_matches:
-            time.sleep(0.5)
-            continue
-
-        latest_q = q_matches[-1]
-        current_total = int(latest_q.group(1))
-
-        # 已经回答了所有问题？
-        # 简单策略：检测到问题 → 逐一回答
-        answered = 0
-        # 读取一些 PTY 输出以获取选项
-        pty_out = _read_pty(fd, timeout=1)
-
-        # 尝试回答每个未答的问题
-        for qi in range(current_total):
-            # 检查 agent 是否已经继续（不再等待回答）
-            # 如果 .log 中出现了 "opencode SDK completed" 或阶段推进，说明问题已处理
-            log_now = log_file.read_text(encoding="utf-8", errors="replace")
-            if "opencode SDK completed" in log_now or "[✓]" in log_now:
-                return True
-
-            answer = answer_defaults[qi] if qi < len(answer_defaults) else answer_defaults[-1]
-            log(f"  → Answering Q{qi+1}: {answer}")
-            _write(fd, answer)
-            time.sleep(1.5)
-            answered += 1
-
-        if answered > 0:
-            log(f"  → Answered {answered} question(s)")
-            # 等待 agent 继续处理
-            time.sleep(3)
-            return True  # 问题已响应，继续主循环
-
-        time.sleep(0.5)
-
-    log(f"  WARN: Question handling timeout ({timeout}s)")
-    return False
-
 
 def _drive_mock(pid: int, fd: int) -> int:
     """Mock 模式驱动逻辑 — 快速验证 (约 60s)。"""
@@ -246,8 +364,8 @@ def _drive_mock(pid: int, fd: int) -> int:
         return 1
 
     log(f"Task dir: {task_dir}")
-    time.sleep(2)
-    _read_pty(fd)
+    _wait_log_quiet(task_dir, quiet_for=0.8, timeout=15)
+    _read_pty(fd, timeout=0.3)
 
     # MockAgent 的提问答案（brainstorming 有 2 个问题）
     BRAINSTORM_ANSWERS = ["B", "3"]
@@ -263,67 +381,83 @@ def _drive_mock(pid: int, fd: int) -> int:
         if stage == "01-brainstorming":
             for i, answer in enumerate(BRAINSTORM_ANSWERS):
                 log(f"  Waiting for question {i+1}...")
-                q_content = _wait_log(task_dir, "❓ 收到", timeout=30)
-                if q_content is None:
-                    log(f"  FAIL: Question {i+1} not received within timeout")
+                # 等第 i+1 个提问出现（全文匹配会被上一个提问立刻命中）
+                if not _wait_log_count(task_dir, "❓ 收到", i + 1, timeout=30):
+                    _dump_failure(task_dir, stage, f"Question {i+1} not received")
                     return 1
                 log(f"  Answering Q{i+1}: {answer}")
                 _write(fd, answer)
-                time.sleep(1.5)
+                # 等 TUI 记录下这次回答（user 行计数 +1）再继续
+                if not _wait_log_count(task_dir, "user  | [1]", i + 1, timeout=15):
+                    _dump_failure(task_dir, stage, f"Answer {i+1} not registered")
+                    return 1
 
         # ── 等待 Agent 启动完毕（stage_status = "running"）──
         log("  Waiting for stage to enter running state...")
         if not _wait_stage_status(task_dir, "running", timeout=30):
-            log("  FAIL: Stage did not enter running state within timeout")
+            _dump_failure(task_dir, stage, "Stage did not enter running state")
             return 1
         log("  ✓ Stage is running")
 
-        # ── 发送 /advance ──
-        log("  Sending /advance to finalize and save output...")
-        _write(fd, "/advance")
+        # ── 等签署选项出现，再签署 Gate ──
+        # 签署入口只在 agent 收尾（idle/waiting）后才出现；agent 还在生成时按 A
+        # 会被输入校验拒绝，且字符留在缓冲区，把下一条命令污染成 "A/advance"。
+        # 多轮模式下 .state 全程是 "running"，所以等 TUI 自己报「面板已打开」。
+        log("  Waiting for gate sign-off prompt...")
+        if not _wait_prompt_ready(fd, task_dir, stage_idx + 1, 1, timeout=30):
+            _dump_failure(task_dir, stage, "Gate sign-off prompt did not appear")
+            return 1
 
-        # ── 等待 mock_agent shutdown (由 /advance 触发) ──
-        if not _wait_log(task_dir, "mock_agent shutdown", timeout=30):
-            log("  FAIL: MockAgent did not shutdown within timeout")
+        # 04-review 要按两次 A：第一次是 Route 决策（比签署更前置），Route 落定
+        # 后面板才切换成 Gate 签署选项。Route 只能从这个入口写进 .state ——
+        # 改 04-review.md 里的 **Route** 字段不再有任何效力。
+        if stage == "04-review":
+            log("  Choosing route (A = 05-Archive)...")
+            _write(fd, "A")
+            if not _wait_log(task_dir, "Route 已设置为 05-Archive", timeout=15):
+                _dump_failure(task_dir, stage, "Route choice was not accepted")
+                return 1
+            log("  ✓ Route set to 05-Archive")
+            # Route 落定后面板会重开一次（切成 Gate 签署选项），所以等第 2 次。
+            if not _wait_prompt_ready(fd, task_dir, stage_idx + 1, 2, timeout=30):
+                _dump_failure(task_dir, stage,
+                              "Gate sign-off prompt did not appear after routing")
+                return 1
+
+        log("  Signing off stage gate (choice A)...")
+        _write(fd, "A")
+        # 判定源用 .state 而不是日志文本：_wait_log 是全文匹配，"Gate 已签署"
+        # 在第 2 个阶段之后必然已经出现过，于是每一轮都立刻命中 —— 后续阶段
+        # 签署失败会被掩成绿色，真正的失败推迟到几十秒后的超时才暴露，
+        # 而且报的是无关的现象（"stage file has no AI Output"）。
+        if not _wait_gate_signed(fd, task_dir, stage, timeout=15):
+            _dump_failure(task_dir, stage, "Gate sign-off was not accepted", fd)
+            return 1
+
+        # 签 Gate 就是推进信号，TUI 在签署分支里直接跑 advance —— 这里再发一次
+        # /advance 会打到下一阶段（agent 才刚启动），把校验失败写进日志。
+        #
+        # ── 等待 mock_agent shutdown (由签署触发的 advance 收尾) ──
+        # 同理按出现次数等：每个阶段都会打印一次 shutdown。
+        if not _wait_log_count(task_dir, "mock_agent shutdown",
+                               stage_idx + 1, timeout=30):
+            _dump_failure(task_dir, stage, "MockAgent did not shutdown")
             return 1
         log("  ✓ MockAgent shutdown")
 
         # ── 等待 AI Output ──
         if not _wait_for_ai_output(task_dir, stage):
-            sf = _stage_file(task_dir, stage)
-            log(f"  FAIL: {stage} has no AI Output (size={len(sf)}b)")
+            _dump_failure(task_dir, stage, "stage file has no AI Output")
             return 1
         log("  ✓ AI Output present")
-
-        time.sleep(1)
-
-        # ── Stage 04: 填写 Route ──
-        if stage == "04-review":
-            review_file = task_dir / "04-review.md"
-            if review_file.exists():
-                rcontent = review_file.read_text(encoding="utf-8")
-                rcontent = rcontent.replace("- **Route**: `___`", "- **Route**: `05-Archive`", 1)
-                review_file.write_text(rcontent, encoding="utf-8")
-                log("  ✓ Route set to 05-Archive")
-            time.sleep(1)
-
-        # ── 调试输出 ──
-        pty_out = _read_pty(fd, timeout=1)
-        if pty_out:
-            tail = pty_out[-300:].replace("\r\n", " | ").replace("\n", " | ")
-            log(f"  TUI tail: ...{tail}")
 
         # ── 校验推进 ──
         log_lines = _last_log_lines(task_dir)
         if _advance_error_in_log(log_lines):
-            log("  FAIL: Advance validation failed!")
-            for line in log_lines[-8:]:
-                log(f"    {line}")
+            _dump_failure(task_dir, stage, "Advance validation failed")
             return 1
 
-        st = _read_state(task_dir)
-        next_stage = st.get("stage", stage)
-        stage_status = st.get("stage_status", "")
+        next_stage, stage_status = _wait_advanced(task_dir, stage, timeout=30)
 
         if stage_status == "Finished" and stage_idx >= len(STAGES) - 1:
             log("  ✓ All stages complete (Finished)")
@@ -334,238 +468,9 @@ def _drive_mock(pid: int, fd: int) -> int:
             log(f"  ✓ Advanced to: {next_stage}")
             stage_idx += 1
         else:
-            log("  Stage not yet advanced, waiting...")
-            time.sleep(5)
-            st = _read_state(task_dir)
-            next_stage = st.get("stage", stage)
-            if next_stage != stage:
-                log(f"  ✓ Advanced to: {next_stage}")
-                stage_idx += 1
-            else:
-                log(f"  FAIL: Stage did not advance")
-                for line in _last_log_lines(task_dir, 5):
-                    log(f"    {line}")
-                return 1
-
-        time.sleep(3)
-
-    log(f"\n{'='*50}")
-    log(f"ALL STAGES PASSED: {TASK_NAME}")
-    print(f"\nTASK_DIR={task_dir}", flush=True)
-    return 0
-
-
-def _fill_template_checkboxes(task_dir: Path, stage: str) -> None:
-    """Fill [ ] → [x] in template area and Gate area, preserving AI Output.
-    
-    Mirrors the mock-mode logic in _save_stage_output() — needed in non-mock
-    mode because the real agent cannot directly edit the template file, but the
-    soft check requires [x] in template/Gate area.
-    """
-    stage_file = task_dir / f"{stage}.md"
-    if not stage_file.exists():
-        return
-
-    content = stage_file.read_text(encoding="utf-8", errors="replace")
-    
-    ai_mrkr = "\n## 🤖 AI Output\n"
-    gate_mrkr = "\n## Gate"
-    ai_pos = content.find(ai_mrkr)
-    
-    if ai_pos >= 0:
-        gate_pos = content.find(gate_mrkr, ai_pos + len(ai_mrkr))
-        if gate_pos >= 0:
-            before = content[:ai_pos].replace("[ ]", "[x]")
-            output_area = content[ai_pos:gate_pos]
-            gate_area = content[gate_pos:].replace("[ ]", "[x]")
-            content = before + output_area + gate_area
-        else:
-            content = content.replace("[ ]", "[x]")
-    else:
-        content = content.replace("[ ]", "[x]")
-    
-    stage_file.write_text(content, encoding="utf-8")
-
-
-def _detect_deadlock(task_dir: Path, stage: str, timeout: float = 15) -> bool:
-    """检测 agent 完成后是否进入了死锁状态（状态仍为 running）。
-    
-    当 .log 中有 "opencode SDK completed" 但 .state 中 stage_status 仍为
-    "running" 时，说明 invoke() 的后续步骤（parse/gate/save）可能无声崩溃。
-    此函数会等待一小段时间让状态正常转换，超时则判定为死锁。
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        st = _read_state(task_dir)
-        status = st.get("stage_status", "")
-        if status != "running":
-            return False  # Not deadlocked
-        time.sleep(1)
-
-    # Deadlock confirmed — dump diagnostics
-    st = _read_state(task_dir)
-    log(f"  ⚠ DEADLOCK DETECTED: stage_status still 'running' after completion")
-    log(f"    stage={st.get('stage')}, stage_idx={st.get('stage_idx')}, status={st.get('stage_status')}")
-    sf = _stage_file(task_dir, stage)
-    has_ai = "🤖 AI Output" in sf
-    log(f"    stage_file size={len(sf)}b, has AI Output={has_ai}")
-    for line in _last_log_lines(task_dir, 8):
-        log(f"    log: {line}")
-    return True
-
-
-def _drive_real(pid: int, fd: int) -> int:
-    """真实 Agent 模式驱动逻辑 (约 15-30min)。"""
-    task_dir = ROOT / "workspace" / "tasks" / TASK_NAME
-
-    # ── 等待任务创建 ──
-    log("Waiting for task directory...")
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if task_dir.exists():
-            break
-        time.sleep(0.5)
-    if not task_dir.exists():
-        log("FAIL: Task directory not created")
-        return 1
-
-    log(f"Task dir: {task_dir}")
-    time.sleep(3)  # 等待 TUI 和 opencode server 完全初始化
-    _read_pty(fd)
-
-    # Track log file position so each stage only matches NEW log entries.
-    log_offset = 0
-
-    stage_idx = 0
-    while stage_idx < len(STAGES):
-        stage = STAGES[stage_idx]
-        label = STAGE_LABELS[stage]
-        log(f"\n{'='*50}")
-        log(f"Stage {stage_idx+1}/5: {label} (real agent)")
-
-        # ── 等待 Agent 完成 ──
-        log("  Waiting for agent to complete (this may take several minutes)...")
-
-        completion_signal = "opencode SDK completed"
-        question_signal = "❓ 收到"
-        stage_timeout = 600  # 10 min per stage
-
-        deadline = time.time() + stage_timeout
-        seen_question = False
-
-        while time.time() < deadline:
-            if not task_dir.joinpath(".log").exists():
-                time.sleep(0.5)
-                continue
-
-            log_content = task_dir.joinpath(".log").read_text(
-                encoding="utf-8", errors="replace"
-            )
-
-            # Only check for completion signal in content AFTER log_offset
-            new_content = log_content[log_offset:] if log_offset < len(log_content) else ""
-
-            if completion_signal in new_content:
-                log("  ✓ Agent SDK completed")
-                log_offset = len(log_content)
-                break
-
-            if question_signal in new_content and not seen_question:
-                log("  ⚡ Agent asking questions, responding...")
-                seen_question = True
-                pty_out = _read_pty(fd, timeout=2)
-                if pty_out:
-                    log(f"  PTY context: {pty_out[-200:].replace(chr(10), ' ')[:200]}")
-                # Answer all questions with first option
-                for qi in range(3):
-                    log(f"  Answering Q{qi+1}: A (first option)")
-                    _write(fd, "A")
-                    time.sleep(1)
-                    new_log = task_dir.joinpath(".log").read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                    if completion_signal in new_log[log_offset:]:
-                        break
-                log("  → Questions answered, waiting for agent to resume...")
-                time.sleep(5)
-                continue
-
-            time.sleep(2)
-        else:
-            log_lines = _last_log_lines(task_dir, 10)
-            log(f"  FAIL: Agent did not complete within {stage_timeout}s")
-            for line in log_lines:
-                log(f"    {line}")
+            _dump_failure(task_dir, stage, "Stage did not advance")
             return 1
 
-        # ── 死锁检测: agent 已完成但状态未更新 ──
-        # 在多轮对话模式下，/advance 触发后才执行保存，因此跳过前序死锁检测
-
-        # ── Fill template/Gate checkboxes before /advance ──
-        _fill_template_checkboxes(task_dir, stage)
-        log("  ✓ Template checkboxes filled")
-
-        # ── Stage 04: fill Route if needed ──
-        if stage == "04-review":
-            review_file = task_dir / "04-review.md"
-            if review_file.exists():
-                rcontent = review_file.read_text(encoding="utf-8")
-                if "`___`" in rcontent:
-                    rcontent = rcontent.replace("- **Route**: `___`", "- **Route**: `05-Archive`", 1)
-                    review_file.write_text(rcontent, encoding="utf-8")
-                    log("  ✓ Route filled to 05-Archive")
-
-        # ── 发送 /advance ──
-        log("  Sending /advance to save output and advance...")
-        _write(fd, "/advance")
-        time.sleep(5)
-
-        # ── 等待 AI Output ──
-        if not _wait_for_ai_output(task_dir, stage):
-            sf = _stage_file(task_dir, stage)
-            log(f"  FAIL: {stage} has no AI Output after advance (size={len(sf)}b)")
-            log("  → _save_stage_output() did not run after /advance.")
-            return 1
-        log("  ✓ AI Output present")
-        # ── 校验推进 ──
-        log_lines = _last_log_lines(task_dir)
-        if _advance_error_in_log(log_lines):
-            log("  FAIL: Advance validation failed!")
-            for line in log_lines:
-                log(f"    {line}")
-            return 1
-
-        st = _read_state(task_dir)
-        next_stage = st.get("stage", stage)
-        stage_status = st.get("stage_status", "")
-
-        if stage_status == "Finished" and stage_idx >= len(STAGES) - 1:
-            log("  ✓ All stages complete (Finished)")
-            stage_idx += 1
-            break
-
-        if next_stage != stage:
-            log(f"  ✓ Advanced to: {next_stage}")
-            stage_idx += 1
-        else:
-            log("  Stage not yet advanced, waiting...")
-            time.sleep(10)
-            st = _read_state(task_dir)
-            next_stage = st.get("stage", stage)
-            if next_stage != stage:
-                log(f"  ✓ Advanced to: {next_stage}")
-                stage_idx += 1
-            else:
-                log(f"  FAIL: Stage did not advance")
-                for line in _last_log_lines(task_dir, 10):
-                    log(f"    {line}")
-                return 1
-
-        # ── 等待下一阶段启动 ──
-        log("  Waiting for next stage to initialize...")
-        time.sleep(5)
-
-    # ── 完成 ──
     log(f"\n{'='*50}")
     log(f"ALL STAGES PASSED: {TASK_NAME}")
     print(f"\nTASK_DIR={task_dir}", flush=True)
@@ -596,19 +501,53 @@ def _cleanup(pid: int, fd: int):
         pass
 
 
+def _drop_status_entry(name: str):
+    """从 workspace/STATUS.json 摘掉任务条目。
+
+    driver 是独立脚本（不经 pytest conftest），所以自己负责这步；
+    直接改 JSON 而不 import sw_lib，避免为一次清理牵进整个包。
+    """
+    status = ROOT / "workspace" / "STATUS.json"
+    if not status.exists():
+        return
+    try:
+        data = json.loads(status.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if data.get("tasks", {}).pop(name, None) is None:
+        return
+    try:
+        status.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="E2E Flow PTY Driver")
     parser.add_argument(
-        "--no-mock", action="store_true",
-        help="使用真实 Agent（默认使用 MockAgent 快速验证）"
+        "--no-verify", action="store_true",
+        help="跑完不自动执行 verify.py（默认自动验收）"
+    )
+    parser.add_argument(
+        "--keep", action="store_true",
+        help="通过后保留任务目录（默认清理，失败时一律保留供排查）"
     )
     args = parser.parse_args()
 
-    use_mock = not args.no_mock
-    mode_str = "MockAgent" if use_mock else "Real Agent"
     log(f"=== E2E Flow Test: {TASK_NAME} ===")
-    log(f"Mode: {mode_str}")
+    log("Mode: MockAgent (scripted, deterministic)")
     log(f"Context: {CONTEXT}")
+
+    # 测试自己决定输入：评审路由写死成归档，不看 config.yaml。仓库里那份
+    # review_route 现在是 02-Planning，继承它会让 e2e 走返工分支然后卡在
+    # 「等第 5 阶段」上 —— 编辑配置文件不该改变测试的含义。
+    os.environ["SW_MOCK_REVIEW_ROUTE"] = "05-Archive"
+
+    # 同理固定节奏。默认压到 0.2：脚本仍逐行输出（便于看日志），但不为拟真
+    # 打字速度付整轮几十秒。config.yaml 里的 response_delay 是给人演示用的。
+    os.environ.setdefault("SW_MOCK_RESPONSE_DELAY", "0.2")
 
     # ── Fork PTY ──
     pid, fd = pty.fork()
@@ -618,24 +557,41 @@ def main() -> int:
             "python3", str(ROOT / "sw"), "init",
             "--name", TASK_NAME,
             "--context", CONTEXT,
+            "--mock",
         ]
-        if use_mock:
-            init_args.append("--mock")
-        else:
-            init_args.append("--no-mock")
         os.execvp("python3", init_args)
 
     # ── 父进程：驱动交互 ──
     try:
-        if use_mock:
-            return _drive_mock(pid, fd)
-        else:
-            return _drive_real(pid, fd)
+        rc = _drive_mock(pid, fd)
     except KeyboardInterrupt:
         log("Interrupted by user")
         return 1
     finally:
         _cleanup(pid, fd)
+
+    task_dir = ROOT / "workspace" / "tasks" / TASK_NAME
+
+    # 驱动通过 ≠ 产出合规：verify 才是验收。默认自动接续，省掉人工复制路径。
+    if rc == 0 and not args.no_verify:
+        log("")
+        log("Running acceptance verification...")
+        rc = subprocess.call(
+            [sys.executable, str(Path(__file__).parent / "verify.py"),
+             "--task-dir", str(task_dir)])
+
+    # 失败一律保留现场；通过则清理，避免残留任务污染 workspace
+    if rc == 0 and not args.keep:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        # 任务目录只是三处产物之一：agent 会在 repo/<task> 下建工作目录，
+        # STATUS.json 里也有一条汇总。少清任何一处都会留下孤儿。
+        shutil.rmtree(ROOT / "repo" / TASK_NAME, ignore_errors=True)
+        _drop_status_entry(TASK_NAME)
+        log(f"Cleaned up {TASK_NAME}")
+    else:
+        log(f"Task dir kept for inspection: {task_dir}")
+
+    return rc
 
 
 if __name__ == "__main__":

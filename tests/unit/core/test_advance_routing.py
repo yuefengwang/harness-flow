@@ -5,7 +5,7 @@ _stage_map / _stage_order attributes.
 Run with: pytest tests/unit/core/test_advance_routing.py -v
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from sw_lib.core.service import TaskService
 from sw_lib.core.state import read_state
 from sw_lib.core.config import TASKS
@@ -64,11 +64,9 @@ class TestRuntimeAdvanceLogic:
 
     def test_review_route_to_earlier_stage(self, dummy_task, prep_task):
         prep_task("04-review", 3)
-        review = TASKS / dummy_task / "04-review.md"
-        review.write_text(
-            "## Gate\n- [x] ok\n- **Route**: `03-coding`\n", encoding="utf-8")
-        (TASKS / dummy_task / "03-coding.md").write_text(
-            "## Gate\n- [ ] t\n", encoding="utf-8")
+        # Route 决策存在 .state 里；写进 Markdown 的不算决定
+        from sw_lib.workflow import stage_state as ss
+        assert ss.write_route(dummy_task, "03-coding") is True
         from sw_lib.workflow.runtime import WorkflowRuntime
         res = WorkflowRuntime.advance(dummy_task)
         assert res["stage"] == "03-coding"
@@ -76,12 +74,10 @@ class TestRuntimeAdvanceLogic:
 
     def test_rerouted_stage_gate_reset(self, dummy_task, prep_task):
         prep_task("04-review", 3)
-        review = TASKS / dummy_task / "04-review.md"
-        review.write_text(
-            "## Gate\n- [x] ok\n- **Route**: `03-coding`\n", encoding="utf-8")
-        coding = TASKS / dummy_task / "03-coding.md"
-        coding.write_text("## Gate\n- [x] done\n", encoding="utf-8")
+        from sw_lib.workflow import stage_state as ss
+        ss.write_route(dummy_task, "03-coding")
+        ss.sign_gate(dummy_task, "03-coding")
         from sw_lib.workflow.runtime import WorkflowRuntime
         WorkflowRuntime.advance(dummy_task)
-        # rerouted target gate must be reset to unchecked
-        assert "[ ]" in coding.read_text(encoding="utf-8")
+        # 返工到的阶段必须回到未签署，否则旧签名会让它直接放行
+        assert ss.read_gate(dummy_task, "03-coding").signed is False

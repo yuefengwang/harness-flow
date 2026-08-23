@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from .config import TASKS, STATUS, STAGES, STAGE_NAMES
+from .config import TASKS, STATUS, STAGES
 
 
 def state_path(name: str) -> Path:
@@ -159,13 +159,20 @@ def remove_task_summary(name: str):
 
 
 def get_active_from_status() -> Optional[str]:
-    """从 STATUS.json 的 tasks 中查找当前活跃任务"""
+    """从 STATUS.json 的 tasks 中查找当前活跃任务。
+
+    STATUS.json 是缓存，任务目录被外部删除（测试残留、手工 rm）后条目会留下，
+    此时必须跳过，否则调用方拿到一个读不出 .state 的名字就直接报错退出。
+    """
     data = _load_task_summary()
     tasks = data.get("tasks", {})
     candidates = []
     for name, entry in tasks.items():
-        if entry.get("stage_status") in ("running", "pending", "waiting"):
-            candidates.append((entry.get("updated_at", ""), name))
+        if entry.get("stage_status") not in ("running", "pending", "waiting"):
+            continue
+        if not state_path(name).exists():
+            continue
+        candidates.append((entry.get("updated_at", ""), name))
     if not candidates:
         return None
     candidates.sort(reverse=True)
@@ -187,4 +194,3 @@ def find_context_from_cwd(start_dir: Optional[str] = None) -> Optional[Dict[str,
             except Exception:
                 pass
     return None
-

@@ -2,16 +2,15 @@
 测试任务管理 API：创建、列表、推进与引擎集成。
 覆盖 Web Dashboard 中 "新建任务后在活跃任务中不可见" 和 "engine 不推进" 的回归场景。
 """
-import json
 import shutil
 import pytest
-from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sw_lib.web.app import create_app
 from sw_lib.web.engine_manager import WebEngineManager
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES, get_repo_path
+from sw_lib.core.config import TASKS, STAGES, get_repo_path
 from sw_lib.core.state import read_state, write_state
+from sw_lib.workflow import stage_state as ss
 from sw_lib.core.service import _service
 
 
@@ -24,6 +23,22 @@ def _rm_repo(name: str):
 
 TEST_TASK = "web-test-task"
 TEST_TASK_2 = "web-test-task-advance"
+
+# 本模块用到的全部任务名。这些用例会在 repo/ 下建目录，
+# 过去只清理 workspace/tasks，导致 repo/ 里长期堆积 web-* 残渣。
+_ALL_TEST_TASKS = (
+    TEST_TASK, TEST_TASK_2,
+    "web-advance-test", "web-deploy-pending", "web-deploy-test",
+    "web-deploy-visible-test", "web-engine-test", "web-smoke-test",
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_repo_dirs():
+    """模块结束后清掉 repo/ 下的测试目录（_rm_repo 此前定义了却没人调用）。"""
+    yield
+    for name in _ALL_TEST_TASKS:
+        _rm_repo(name)
 
 
 # ── Fixtures ──
@@ -170,7 +185,7 @@ def test_create_task_shows_in_list_immediately(client):
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
-            (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
         (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
 
@@ -218,7 +233,7 @@ class TestTaskAdvance:
             shutil.rmtree(task_dir, ignore_errors=True)
         if trash_dir.exists():
             shutil.rmtree(trash_dir, ignore_errors=True)
-            (TASKS.parent.parent / get_repo_path() / task_name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / task_name, ignore_errors=True)
+        (TASKS.parent.parent / get_repo_path() / name).exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / name, ignore_errors=True)
         (TASKS.parent.parent / get_repo_path() / "web-created-002").exists() and shutil.rmtree(TASKS.parent.parent / get_repo_path() / "web-created-002", ignore_errors=True)
 
         _service.create_task(name, task_type="feature")
@@ -249,6 +264,8 @@ class TestTaskAdvance:
             "## Gate\n- [x] Design approved\n- [x] Ready for Planning\n",
             encoding="utf-8"
         )
+        # 门禁判定读 .state（docs/design-json-state-source.md）
+        ss.sign_gate(name, "01-brainstorming")
 
         resp = client.post(f"/tasks/{name}/advance")
         assert resp.status_code == 200, f"推进失败: {resp.text}"
@@ -316,6 +333,7 @@ class TestEngineIntegration:
             "## Gate\n- [x] Design approved\n- [x] Ready for Planning\n",
             encoding="utf-8"
         )
+        ss.sign_gate(name, "01-brainstorming")
         client.post(f"/tasks/{name}/advance")
 
         # 再启动 engine
@@ -432,6 +450,11 @@ def test_full_lifecycle_smoke(client, clean_engine_mgr):
                     encoding="utf-8"
                 )
 
+            # 签署走 .state；04 还需要路由决策
+            ss.sign_gate(name, stage)
+            if "review" in stage:
+                ss.write_route(name, "05-Archive")
+
             r = client.post(f"/tasks/{name}/advance")
             assert r.status_code == 200, f"推进阶段 {stage} 失败: {r.text}"
             current_stage_idx += 1
@@ -448,6 +471,7 @@ def test_full_lifecycle_smoke(client, clean_engine_mgr):
             "## Gate\n- [x] Archive complete\n",
             encoding="utf-8"
         )
+        ss.sign_gate(name, "05-archive")
         r = client.post(f"/tasks/{name}/advance")
         state = read_state(name)
         assert state.get("stage_status") == "Finished", (

@@ -3,19 +3,23 @@
 模拟用户在 sw monitor 中的操作流程：
 sw init → engine.run_stage() → auto-answer → /advance → ... → archive → verify
 """
-import shutil, time, queue as qmod
+import shutil, time
 from pathlib import Path
 from typing import List
 
 from ..core.service import _service, TaskError
-from ..core.config import TASKS, STAGE_NAMES, ROOT
-from ..core.state import read_state, write_state, remove_task_summary
-from ..core.utils import green, red, yellow, hdr, die, now
+from ..core.config import TASKS, STAGES, STAGE_NAMES, ROOT
+from ..core.state import read_state, remove_task_summary
+from ..core.utils import green, red, yellow, hdr, die
 
 TEST_CONTEXT = (
     "Build a CLI note manager tool in Python. It should: "
     "accept add/list/delete/search commands, store notes in JSON, support tags."
 )
+
+# 补拍板记录的上限。选项组是有限的，循环不该无界 —— 若真到了上限说明
+# 校验里有 mock 补不掉的阻塞项，交给后面的推进去报错。
+_MAX_MOCK_DECISIONS = 20
 
 
 def _make_auto_answer():
@@ -31,16 +35,29 @@ def _make_auto_answer():
 
 
 def _mock_gate_pass(task_name: str, stage: str):
-    """模拟用户勾选 Gate 下的所有复选框，并填写 Route 字段。"""
-    path = TASKS / task_name / f"{stage}.md"
-    if path.exists():
-        content = path.read_text(encoding="utf-8")
-        if "[ ]" in content:
-            content = content.replace("[ ]", "[x]")
-        # 04-review: fill in Route field (mock always routes to 05-Archive)
-        if stage == "04-review":
-            content = content.replace("- **Route**: `___`", "- **Route**: `05-Archive`", 1)
-        path.write_text(content, encoding="utf-8")
+    """模拟用户签署本阶段门禁、拍板选项组、并填写 Route。
+
+    只写 `.state`：门禁、Route、拍板记录的唯一真源在那里，Markdown 由
+    `render_gate_section` 单向渲染。改 Markdown 的复选框对推进校验毫无作用。
+    """
+    from ..workflow import stage_state as ss
+    from ..workflow.utils import check_stage_compliance
+
+    ss.sign_gate(task_name, stage, by="mock")
+    if stage == "04-review":
+        ss.write_route(task_name, "05-Archive", by="mock")
+
+    # 选项组按「未拍板组数 - 已记录决策数」判定，缺几组补几组。这里不去数
+    # Markdown，而是直接问真实校验还剩什么 —— 复用生产判定，免得 mock 自带
+    # 一份会各自漂移的计数逻辑。
+    stage_idx = STAGES.index(stage) if stage in STAGES else 0
+    for n in range(_MAX_MOCK_DECISIONS):
+        _, todo = check_stage_compliance(task_name, stage, stage_idx)
+        if not any("选项组" in t for t in todo):
+            break
+        ss.record_decision(task_name, stage, f"mock-choice-{n + 1}", "A", by="mock")
+
+    ss.render_gate_section(task_name, stage)
 
 
 def cmd_test(args):
@@ -53,25 +70,15 @@ def cmd_test(args):
     from ..core.config import _manager
     _manager.reload()
 
-    # 处理 mock/no-mock 参数（优先级: CLI 输入 > config.yaml）
-    no_mock_flag = getattr(args, "no_mock", False)
-    mock_flag = getattr(args, "mock", False)
-    if no_mock_flag:
-        use_mock = False
-        _manager.config.mock_agent.enabled = False
-    elif mock_flag:
-        use_mock = True
-        _manager.config.mock_agent.enabled = True
-        # Ensure review routes to archive for clean test flow
-        _manager.config.mock_agent.review_route = "05-Archive"
-    else:
-        # 未指定，使用 config.yaml 的默认值
-        use_mock = _manager.config.mock_agent.enabled
-        if use_mock:
-            _manager.config.mock_agent.review_route = "05-Archive"
+    # 一律用 MockAgent，且就地覆盖 config.yaml 的相关项。真实 agent 的输出
+    # 不可复现，拿它当测试无法区分「代码回归」和「模型这次答得不一样」；
+    # review_route 也必须写死 —— 从 config.yaml 读会让 e2e 的结论跟着谁改过
+    # 配置文件而变。测试的输入必须由测试自己决定。
+    _manager.config.mock_agent.enabled = True
+    _manager.config.mock_agent.review_route = "05-Archive"
 
     hdr(f"🧪 HarnessFlow E2E: {task_name}")
-    print(f"  Agent: {green('MockAgent') if use_mock else yellow('Real')}")
+    print(f"  Agent: {green('MockAgent')} (scripted)")
 
     bootstrap()
 
@@ -210,13 +217,13 @@ def cmd_test(args):
                 issue = "文件不存在" if not sf.exists() else "无 AI Output 标记"
                 print(f"  {red('✗')} {s} — {issue} (文件大小={sf.stat().st_size if sf.exists() else 0}B)")
 
-        # 检查代码文件
+        # 检查代码文件。MockAgent 的 03-coding 场景会真的写出 mocknote.py /
+        # test_mocknote.py / README.md（03 的硬校验拒绝空产出），所以这里是
+        # 硬要求 —— 以前给 mock 开的豁免只会掩盖「产出没落盘」这类真问题。
         py_files = _find_code_files(task_name)
         code_ok = bool(py_files)
         if code_ok:
             print(f"  {green('✓')} 代码: {len(py_files)} 个文件")
-        elif use_mock:
-            print(f"  {yellow('ℹ')} MockAgent 不生成代码文件")
         else:
             print(f"  {red('✗')} 未生成代码文件")
 
@@ -230,14 +237,13 @@ def cmd_test(args):
         # 汇总
         print()
         hdr("结果")
-        passed = stages_ok + (1 if code_ok or use_mock else 0)
-        failed = (max_stages - stages_ok) + (0 if code_ok or use_mock else 1)
+        passed = stages_ok + (1 if code_ok else 0)
+        failed = (max_stages - stages_ok) + (0 if code_ok else 1)
         print(f"  通过: {green(str(passed))} | 失败: {red(str(failed))}")
         if stages_ok < max_stages:
             die(f"❌ 仅完成 {stages_ok}/{max_stages} 阶段")
 
     finally:
-        engine.shutdown() if 'engine' in dir() else None
         _manager.reload()
         _cleanup_repo()
         td = TASKS / task_name

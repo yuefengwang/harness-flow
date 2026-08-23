@@ -1,11 +1,9 @@
 """Tests for sw_lib.core.health — HealthMonitor and HealthConfig"""
-import os
 import socket
 import time
 import threading
 import unittest
-from pathlib import Path
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 from sw_lib.core.config import TASKS
 from sw_lib.core.health import HealthConfig, HealthMonitor
@@ -489,10 +487,6 @@ class TestHealthMonitorCheckUrl(unittest.TestCase):
 
     def setUp(self):
         self.hm = HealthMonitor(name="test", target_dir="/tmp/test", port=8000)
-
-    def test_no_url_returns_true(self):
-        """check_url 为空时直接跳过"""
-        self.assertTrue(self.hm._check_url())
 
     def test_no_url_returns_true(self):
         """state 中无 deploy_url 时跳过检测"""

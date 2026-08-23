@@ -8,13 +8,12 @@ sw_lib.main — 命令行入口与指令分发。
 import argparse
 import os
 import sys
-from types import SimpleNamespace
-from typing import List, Optional
 
 from .commands import (
     cmd_init, cmd_status, cmd_advance, cmd_resume,
-    cmd_list, cmd_remove, cmd_restore, cmd_answer, cmd_monitor,
-    cmd_dashboard, cmd_usage, cmd_deploy, cmd_health,
+    cmd_list, cmd_remove, cmd_remove_all, cmd_restore, cmd_answer, cmd_monitor,
+    cmd_dashboard, cmd_usage, cmd_deploy, cmd_health, cmd_purge_trash,
+    cmd_state_get,
 )
 from .test_cmd import cmd_test
 
@@ -30,18 +29,32 @@ def _ensure_bootstrapped():
 
 def main():
     _ensure_bootstrapped()
+    # 全局标志同时挂到主 parser 和每个子命令上。只挂主 parser 的话，
+    # `sw remove-all --yes` 里的 --yes 会被 argparse 当作未知参数 ——
+    # 而 --yes 决定破坏性操作能否执行，静默丢弃是最坏的失败方式：
+    # 用户以为自己已经确认过了，实际被闸门拦住且没有任何解释。
+    global_flags = argparse.ArgumentParser(add_help=False)
+    global_flags.add_argument("--yes", "-y", action="store_true",
+                              help="自动确认所有提示")
+    global_flags.add_argument("--non-interactive", "--no-input",
+                              action="store_true", help="非交互模式")
+
     parser = argparse.ArgumentParser(
         prog="sw",
         description="Harness-Flow Agent Workflow CLI",
-        add_help=False  # 我们手动处理 help 以保持与旧版输出一致或使用自定义输出
+        add_help=False,  # 我们手动处理 help 以保持与旧版输出一致或使用自定义输出
+        parents=[global_flags],
     )
 
-    # 全局标志
-    parser.add_argument("--yes", "-y", action="store_true", help="自动确认所有提示")
-    parser.add_argument("--non-interactive", "--no-input", action="store_true", help="非交互模式")
     parser.add_argument("-h", "--help", action="store_true", help="显示帮助信息")
 
-    subparsers = parser.add_subparsers(dest="command")
+    # 让每个 add_parser() 自动继承全局标志
+    class _SubParser(argparse.ArgumentParser):
+        def __init__(self, **kwargs):
+            kwargs.setdefault("parents", []).append(global_flags)
+            super().__init__(**kwargs)
+
+    subparsers = parser.add_subparsers(dest="command", parser_class=_SubParser)
 
     # help
     subparsers.add_parser("help", help="显示帮助信息")
@@ -58,6 +71,10 @@ def main():
     p_init.add_argument("--interactive", action="store_true", help="进入交互式创建模式")
     p_init.add_argument("--no-mock", action="store_true", help="使用真实 Agent（默认由 config.yaml 控制）")
     p_init.add_argument("--mock", action="store_true", help="使用 MockAgent（默认由 config.yaml 控制）")
+    p_init.add_argument("--auto", action="store_true", help="自动推进阶段（覆写 config.yaml 的 auto_advance）")
+    p_init.add_argument("--manual", action="store_true", help="每个阶段等待 /advance 手动推进")
+    p_init.add_argument("--unattended", action="store_true",
+                        help="无人值守：连 Agent 的提问也自动代答（默认提问仍交还用户）")
 
     # status
     p_status = subparsers.add_parser("status", help="显示任务状态")
@@ -80,13 +97,27 @@ def main():
     p_remove = subparsers.add_parser("remove", help="移除任务到回收站")
     p_remove.add_argument("--name", help="任务名称")
 
+    # remove-all（别名兼容驼峰写法）
+    for _alias in ("remove-all", "removeall", "removeAll"):
+        _p = subparsers.add_parser(_alias, help="移除所有任务到回收站")
+        _p.add_argument("--purge", action="store_true",
+                        help="连回收站一起物理删除（不可恢复）")
+
     # restore
     p_restore = subparsers.add_parser("restore", help="从回收站恢复任务")
     p_restore.add_argument("--name", help="任务名称")
 
+    # purge-trash（别名兼容驼峰写法）
+    for _alias in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):
+        subparsers.add_parser(_alias, help="清空回收站（物理删除，不可恢复）")
+
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="启动 TUI 监控面板")
     p_monitor.add_argument("--name", help="任务名称")
+    p_monitor.add_argument("--auto", action="store_true", help="自动推进阶段")
+    p_monitor.add_argument("--manual", action="store_true", help="每个阶段等待 /advance 手动推进")
+    p_monitor.add_argument("--unattended", action="store_true",
+                           help="无人值守：连 Agent 的提问也自动代答")
 
     # answer
     p_answer = subparsers.add_parser("answer", help="回复 Agent 提问")
@@ -113,17 +144,30 @@ def main():
 
     p_test = subparsers.add_parser("test", help="运行端到端集成测试")
     p_test.add_argument("--name", help="指定测试任务名 (默认自动生成)")
-    p_test.add_argument("--no-mock", action="store_true", help="使用真实 Agent（默认用 MockAgent 快速验证）")
-    p_test.add_argument("--mock", action="store_true", help="使用 MockAgent（默认）")
+
+    # state —— 供 hook 与外部工具读 JSON 状态源
+    p_state = subparsers.add_parser("state", help="查询任务的门禁/路由状态")
+    _state_sub = p_state.add_subparsers(dest="state_command")
+    p_state_get = _state_sub.add_parser("get", help="打印某阶段的状态字段")
+    p_state_get.add_argument("task", help="任务名称")
+    p_state_get.add_argument("stage", help="阶段名（如 04-review）")
+    p_state_get.add_argument("field", nargs="?", default="gate",
+                             help="字段: gate | route（默认 gate）")
+    p_state_get.add_argument("--json", action="store_true", help="输出 JSON 结构")
 
     # 兼容性处理：如果没有任何参数，打印 usage
     if len(sys.argv) < 2:
         cmd_usage()
         sys.exit(1)
 
-    # 预处理全局标志（允许放在命令前后）
-    # argparse 默认支持命令前后的可选参数，但我们要设置环境变量以供其他模块使用
-    args, unknown = parser.parse_known_args()
+    # 全局标志允许放在子命令前后，两处都要认。
+    # 子命令 parser 也声明了同名标志，它的默认值 False 会**覆盖**主 parser 已经
+    # 解析出的 True（argparse 的既有行为），所以不能只看最终结果 —— 用一个只认
+    # 全局标志的 parser 单独扫一遍前置写法，再与子命令的结果取或。
+    pre_args, _ = global_flags.parse_known_args()
+    args = parser.parse_args()
+    args.yes = args.yes or pre_args.yes
+    args.non_interactive = args.non_interactive or pre_args.non_interactive
 
     if args.help or (args.command in ("help", "-h", "--help")):
         cmd_usage()
@@ -166,8 +210,14 @@ def main():
     elif cmd == "remove":
         cmd_remove(args)
 
+    elif cmd in ("remove-all", "removeall", "removeAll"):
+        cmd_remove_all(args)
+
     elif cmd == "restore":
         cmd_restore(args)
+
+    elif cmd in ("purge-trash", "purgetrash", "purgeTrash", "empty-trash"):
+        cmd_purge_trash(args)
 
     elif cmd == "monitor":
         cmd_monitor(args)
@@ -186,6 +236,13 @@ def main():
 
     elif cmd == "test":
         cmd_test(args)
+
+    elif cmd == "state":
+        if getattr(args, "state_command", None) != "get":
+            cmd_usage()
+            return 1
+        # 退出码是 hook 的判定依据，必须原样交回 shell
+        return cmd_state_get(args)
 
     else:
         cmd_usage()

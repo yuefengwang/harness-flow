@@ -5,9 +5,7 @@ sw_lib.web.routes.console — Agent Console 路由
 """
 
 import json
-import asyncio
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse

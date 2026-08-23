@@ -1,5 +1,5 @@
 import threading
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 from langgraph.graph import StateGraph, END, START
 
 from .base import StageRunnable, StageInput, StageOutput
@@ -110,7 +110,6 @@ class LangGraphAdapter:
         self._current_task_name: Optional[str] = None
         
         self._stage_map = {s.stage: s for s in stages}
-        self._stage_order = [s.stage for s in stages]
         self._task_locks: Dict[str, threading.RLock] = {}
         self._global_lock = threading.Lock()
 

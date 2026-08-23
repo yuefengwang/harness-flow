@@ -1,6 +1,6 @@
 """Stage-specific output schemas for structured agent output validation."""
 
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel, Field
 
 from .schema import StageOutputSchema

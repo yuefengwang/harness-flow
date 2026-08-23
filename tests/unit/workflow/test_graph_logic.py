@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock
 from sw_lib.workflow import StageRunnable, StageInput, StageOutput, LangGraphAdapter
 from sw_lib.workflow.graph import build_harness_graph

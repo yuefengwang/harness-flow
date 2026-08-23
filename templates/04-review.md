@@ -28,6 +28,7 @@ Is the diff self-explanatory? ___
 | 2 | ___ | high/med/low | coding/planning/brainstorming | ___ |
 
 ## Gate
+<!-- 由 sw 渲染，编辑无效；签署状态存于 .state -->
 - [ ] Full build: `___`
 - [ ] Lint/static analysis pass
 - [ ] Doc/config in sync

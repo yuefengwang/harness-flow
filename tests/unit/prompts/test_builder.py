@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 
 from sw_lib.prompts import PromptRegistry, PromptBuilder
-from sw_lib.core.config import TASKS, STAGES, STAGE_NAMES
+from sw_lib.core.config import TASKS
 from sw_lib.core.state import write_state
 
 

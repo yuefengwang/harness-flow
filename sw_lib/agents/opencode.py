@@ -4,19 +4,75 @@
 所有协议耦合集中在 `transport.py`（OpenCodeTransport）与 `protocol.py`
 （AgentMessage/ToolCall）。本类只负责：
   - 把 harness 的回调映射到结构化 AgentMessage；
-  - 把允许的原子工具清单以 MCP server 形式注入 opencode，让其自主调用；
+  - 把阶段允许的工具翻译成 opencode 原生工具开关；
   - 暴露与 BaseAgent 一致的生命周期接口（start/send/shutdown/restart）。
 
-opencode 升级改协议 → 只动 transport.py；加新工具 → 只动 mcp_tools.py + Toolbox。
+opencode 升级改协议 → 只动 transport.py。
 """
 import os
+import queue
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..core.config import ROOT, CONFIG_DIR, get_tools_for_stage
+from ..core.config import ROOT, CONFIG_DIR, get_repo_path, get_tools_for_stage
 from ..core.utils import sw_log
 from .base import BaseAgent
 from .transport import OpenCodeTransport, OpenCodeTransportError
-from .protocol import AgentMessage, ToolCall
+from .protocol import AgentMessage
+
+
+# opencode 免费模型（实测 cost.input/output 均为 0）。
+# 顺序即回退优先级，依据同一个真实调试任务（跑测试→读文件→改代码→复跑）实测：
+#   mimo-v2.5-free              20-26s，多次重复稳定，输出干净  ← 默认
+#   hy3-free                    17-46s，稳定
+#   big-pickle                  ~46s，稳定
+#   nemotron-3.5-lightning-free 24-74s，偶发输出乱码
+#   nemotron-3-ultra-free       ~127s，偏慢
+#   x-preview-f-free            ~26s，偶有非 ASCII 噪声
+FREE_MODELS: Tuple[str, ...] = (
+    "mimo-v2.5-free",
+    "hy3-free",
+    "big-pickle",
+    "nemotron-3.5-lightning-free",
+    "nemotron-3-ultra-free",
+    "x-preview-f-free",
+)
+
+DEFAULT_MODEL = FREE_MODELS[0]
+
+# harness 原子工具 → opencode 原生工具名。
+# opencode 自带 read/write/edit/bash/grep/glob/list 等，比通过 MCP 反向暴露
+# harness 的 5 个工具更可靠（无需额外装 mcp SDK，也无子进程握手）。
+TOOL_MAP: Dict[str, Tuple[str, ...]] = {
+    "list_files": ("list", "glob"),
+    "read_file": ("read", "grep"),
+    "write_file": ("write", "edit", "apply_patch"),
+    "run_command": ("bash",),
+    "ask_user": ("question",),
+}
+
+# 需要显式声明开关的 opencode 工具全集（未列出的按 opencode 默认处理）。
+_MANAGED_TOOLS: Tuple[str, ...] = (
+    "list", "glob", "read", "grep", "write", "edit", "apply_patch", "bash", "question",
+)
+
+
+def _strip_leading_label(label: str, prefix: str) -> str:
+    """剥掉 label 开头由模型自己写的选项编号。
+
+    只认本轮该有的那个编号（第 0 项只剥 "A"），并且只接受 ``A.`` / ``A、``/
+    ``A)`` / ``A:`` 这几种紧跟分隔符的写法。这样 "B. 含美股" 在第 0 项不会被
+    误剥 —— 那种错位说明模型给的编号本身有问题，保留原样更容易发现。
+    """
+    body = label.lstrip()
+    if not body.upper().startswith(prefix.upper()):
+        return label
+    rest = body[len(prefix):].lstrip()
+    if not rest[:1] in (".", "、", ")", ":", "："):
+        return label
+    stripped = rest[1:].strip()
+    # 剥完不能变成空串，否则 label 只有一个编号，剥掉就没内容了。
+    return stripped or label
 
 
 class OpenCodeAgent(BaseAgent):
@@ -25,20 +81,46 @@ class OpenCodeAgent(BaseAgent):
     Responsibilities（与旧版对比，已下沉的部分）：
       - 进程/端口/会话 HTTP 通信  → OpenCodeTransport
       - parts 协议解析             → OpenCodeTransport._to_message
-      - 工具执行 / 提问            → 经 MCP 交由 opencode 自主调度（mcp_tools.py）
+      - 工具执行                   → opencode 原生工具（按阶段权限开关）
     """
 
+    # 等待用户回答 question 的上限；比 transport.CHAT_TIMEOUT(1800s) 短，
+    # 这样超时后还能主动 reject 让 agent 继续，而不是让整轮请求烂在服务端。
+    QUESTION_TIMEOUT = 1500.0
+
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode",
-                 use_mcp_tools: bool = True, verbose: bool = False):
+                 use_native_tools: bool = True, verbose: bool = False,
+                 workdir: Optional[str] = None):
         super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
         self.running = False
         self.agent_proc = None
+        self.use_native_tools = use_native_tools
 
-        self._transport = OpenCodeTransport(verbose=verbose)
-        self._transport.set_model(self._parse_model()[1])
-        self.use_mcp_tools = use_mcp_tools
-
+        self.workdir = workdir or self._default_workdir()
         self._env = self._load_env()
+        provider, model = self._parse_model()
+        self._transport = OpenCodeTransport(verbose=verbose, directory=self.workdir,
+                                           env=self._env)
+        self._transport.set_model(model, provider)
+        if use_native_tools:
+            self._transport.set_tools(self._tool_switches())
+
+        self._seen_tools: set = set()
+        self._seen_calls: set = set()
+
+    # ── 工作目录 ──
+
+    def _default_workdir(self) -> str:
+        """让 opencode 在真实代码目录里工作，否则它读不到项目文件，无法调试代码。"""
+        repo = Path(get_repo_path())
+        if not repo.is_absolute():
+            repo = ROOT / repo
+        target = repo / self.name if self.name else repo
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return str(ROOT)
+        return str(target)
 
     # ── Environment ──
 
@@ -69,48 +151,34 @@ class OpenCodeAgent(BaseAgent):
     # ── Model parsing ──
 
     def _parse_model(self) -> Tuple[str, str]:
-        """Parse model_name into (provider_id, model_id)."""
+        """Parse model_name into (provider_id, model_id)。
+
+        未指定或写了 `opencode` 占位时回退到已验证的免费模型，避免把
+        不存在的 model id 发给 server（会静默换模型或直接 400）。
+        """
         name = (self.model_name or "").strip()
         if not name or name == "opencode":
-            return "opencode", "deepseek-v4-flash-free"
-        parts = name.split("/", 1)
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        return "opencode", name
+            return "opencode", DEFAULT_MODEL
+        provider, _, model = name.partition("/")
+        if not model:
+            provider, model = "opencode", provider
+        return provider, model
 
-    # ── MCP 工具注入 ──
+    # ── 工具权限映射 ──
 
-    def _mcp_launch_env(self) -> Dict[str, str]:
-        """为 opencode 拉起的 MCP server 子进程注入 harness 上下文。"""
-        import json, os
-        env = dict(os.environ)
-        env["HARNESS_TASK"] = str(getattr(self, "task_name", "mcp"))
-        env["HARNESS_STAGE"] = self.stage
-        # ask_user 在 CLI 场景无 UI 时降级，由工具自身处理
-        return env
+    def _tool_switches(self) -> Dict[str, bool]:
+        """把阶段允许的 harness 工具翻译成 opencode 原生工具开关。
 
-    def _write_mcp_config(self) -> Optional[str]:
-        """生成 opencode 的 mcpServers 配置路径（若启用 MCP 工具）。
-
-        返回配置文件路径；opencode serve 启动时通过 --mcp-config 读取，
-        使 agent 能自主调用 harness 的 5 个原子工具。
+        显式关掉未授权工具，这样 04-review 之类只读阶段无法写盘或跑命令。
         """
-        if not self.use_mcp_tools:
-            return None
-        import json
-        from pathlib import Path
-        cfg = {
-            "mcpServers": {
-                "harness-flow-tools": {
-                    "command": "python",
-                    "args": ["-m", "sw_lib.agents.mcp_tools"],
-                    "env": self._mcp_launch_env(),
-                }
-            }
-        }
-        path = ROOT / ".mcp_harness.json"
-        Path(path).write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
-        return str(path)
+        try:
+            allowed = set(get_tools_for_stage(self.stage) or [])
+        except Exception:
+            allowed = set()
+        enabled: set = set()
+        for harness_tool in allowed:
+            enabled.update(TOOL_MAP.get(harness_tool, ()))
+        return {t: (t in enabled) for t in _MANAGED_TOOLS}
 
     # ── 结构化消息分发（不再解析裸 parts）──
 
@@ -136,6 +204,8 @@ class OpenCodeAgent(BaseAgent):
                         cb(t)
 
             for tc in msg.tool_calls:
+                if tc.name in self._seen_tools:
+                    continue  # 事件流已上报过，避免重复
                 cb = self.callbacks.get("on_tool")
                 if cb:
                     cb({"name": tc.name, "input": tc.input})
@@ -164,13 +234,27 @@ class OpenCodeAgent(BaseAgent):
         return self.running
 
     def start(self):
-        if self.running:
+        """拉起 opencode server。失败时明确置为 error 并冒泡日志，不静默挂起。"""
+        if self.running and self._transport.server_url:
             return
+        if self._transport.server_url is None:
+            self.status = self.STATUS_CONNECTING
+            try:
+                self._transport.start()
+            except OpenCodeTransportError as e:
+                self.running = False
+                self.status = self.STATUS_ERROR
+                self._add_log("error", f"opencode 启动失败: {e}")
+                sw_log(self.name, f"opencode start failed: {e}", "error")
+                return
+            provider, model = self._parse_model()
+            self._add_log(
+                "sw",
+                f"opencode 就绪 @ {self._transport.server_url} "
+                f"[model={provider}/{model}, cwd={self.workdir}]",
+            )
         self.running = True
         self.status = self.STATUS_IDLE
-        if self._transport.server_url is None:
-            self._transport.start()
-            self._add_log("sw", f"opencode server ready at {self._transport.server_url}")
 
     def send(self, text: str, is_system: bool = False):
         """Send message to OpenCode. Blocks until response received."""
@@ -180,10 +264,13 @@ class OpenCodeAgent(BaseAgent):
             else:
                 return
         if not self._transport.server_url:
-            self._add_log("error", "No opencode server connected")
+            self._add_log("error", "opencode 未连接，消息未发送")
             self.status = self.STATUS_ERROR
+            self._fire_complete()
             return
 
+        self._seen_tools = set()
+        self._seen_calls = set()
         if is_system:
             text += (
                 "\n\n[SYSTEM] You MAY ask questions to clarify requirements. "
@@ -192,14 +279,158 @@ class OpenCodeAgent(BaseAgent):
             )
 
         self.status = self.STATUS_CONNECTING
+        # 订阅 SSE：最终 HTTP 响应里没有中间 tool part，只有事件流能看到
+        # agent 实际调用了哪些工具，长任务期间界面也才有反馈。
+        self._transport.start_events(
+            on_delta=self._on_delta,
+            on_tool=self._on_stream_tool,
+            on_question=self._on_question_asked,
+        )
+
         try:
             msg = self._transport.send_message(text)
             self._dispatch_message(msg)
-            self.status = self.STATUS_IDLE
+            if self.status != self.STATUS_ERROR:
+                self.status = self.STATUS_IDLE
         except OpenCodeTransportError as e:
             self._add_log("error", str(e))
+            sw_log(self.name, f"opencode send failed: {e}", "error")
             self.status = self.STATUS_ERROR
 
+        self._fire_complete()
+
+    def _on_delta(self, delta: str) -> None:
+        """流式增量：优先走 on_delta，没有就退回 on_text（保持 UI 有反馈）。"""
+        cb = self.callbacks.get("on_delta")
+        if cb:
+            cb(delta)
+            return
+        self.status = self.STATUS_ACTIVE
+
+    def _on_stream_tool(self, name: str, tool_input: Dict[str, Any]) -> None:
+        """把事件流里的工具调用上报，并记入日志（供 code debugging 审计）。
+
+        opencode 对同一次调用会在 running/completed 两个阶段各推一次事件，
+        因此按 (工具名, 入参) 去重，避免 UI 里出现重复条目。
+        """
+        self.status = self.STATUS_ACTIVE
+        key = (name, repr(sorted(tool_input.items())) if tool_input else "")
+        if key in self._seen_calls:
+            return
+        self._seen_calls.add(key)
+        if name:
+            self._seen_tools.add(name)
+            self._add_log("agent", f"🔧 {name} {str(tool_input)[:120]}")
+        cb = self.callbacks.get("on_tool")
+        if cb:
+            cb({"name": name, "input": tool_input})
+
+    # ── 结构化提问（opencode 原生 question 工具）──
+
+    @staticmethod
+    def _normalize_question(q: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """把 opencode 的 question 结构翻译成 harness ask_user 约定。
+
+        opencode 的 options 是 ``{label, description}`` 字典，而 harness 的
+        on_ask_user / TUI 约定 options 是字符串列表，且 TUI 依赖 "A." 前缀切出
+        可输入的选项标号（见 tui._update_agent_status）。所以这里给每个选项加
+        字母编号，并返回「展示文本 -> opencode 原始 label」映射，用于把用户
+        回答还原成服务端认的 label。
+        """
+        mapping: Dict[str, str] = {}
+        options: List[str] = []
+        for i, o in enumerate(q.get("options") or []):
+            if isinstance(o, dict):
+                label = str(o.get("label", "")).strip()
+                desc = str(o.get("description", "")).strip()
+            else:
+                label, desc = str(o).strip(), ""
+            if not label:
+                continue
+            prefix = chr(ord("A") + i) if i < 26 else str(i + 1)
+            # 模型经常自己就把编号写进 label（"A. 仅中国A股交易日"）。无条件再加
+            # 一次前缀会显示成 "A. A. 仅中国A股交易日"（任务 T3）。已经带了本轮
+            # 该有的编号就不再重复加。
+            body = _strip_leading_label(label, prefix)
+            shown = f"{prefix}. {body} - {desc}" if desc else f"{prefix}. {body}"
+            options.append(shown)
+            mapping[shown] = label
+        text = q.get("question") or q.get("header") or "Agent 请求补充信息"
+        return {"question": text, "options": options}, mapping
+
+    def _on_question_asked(self, request_id: str,
+                           questions: List[Dict[str, Any]]) -> None:
+        """agent 调用 question 工具时被事件流唤起。
+
+        opencode 的 question 是服务端阻塞式的：不回复，POST /message 会一直挂到
+        CHAT_TIMEOUT（30 分钟）。所以这里必须把问题交给 harness，并把用户回答
+        POST 回去；拿不到回答时明确 reject，让 agent 自行决定而不是死等。
+        """
+        if not questions:
+            self._transport.reject_question(request_id)
+            return
+
+        cb = self.callbacks.get("on_ask_user")
+        if not cb:
+            self._add_log("sw", "⚠️ 当前环境不支持 ask_user，已让 agent 自行决定")
+            self._transport.reject_question(request_id)
+            return
+
+        normalized = []
+        label_maps: List[Dict[str, str]] = []
+        for q in questions:
+            nq, mapping = self._normalize_question(q)
+            normalized.append(nq)
+            label_maps.append(mapping)
+
+        prev_status = self.status
+        self.status = self.STATUS_WAITING
+        res_queue: "queue.Queue" = queue.Queue()
+        try:
+            cb(normalized, res_queue)
+            answers = res_queue.get(timeout=self.QUESTION_TIMEOUT)
+        except queue.Empty:
+            self._add_log("error", "用户回答超时，已让 agent 自行决定")
+            self._transport.reject_question(request_id)
+            self.status = prev_status
+            return
+        except Exception as e:
+            sw_log(self.name, f"ask_user dispatch failed: {e}", "error")
+            self._transport.reject_question(request_id)
+            self.status = prev_status
+            return
+
+        payload = self._to_answer_payload(answers, label_maps)
+        if not self._transport.answer_question(request_id, payload):
+            self._add_log("error", "回答提交失败，已让 agent 自行决定")
+            self._transport.reject_question(request_id)
+        else:
+            self._add_log("sw", f"✓ 已提交 {len(payload)} 个回答")
+        self.status = prev_status
+
+    @staticmethod
+    def _to_answer_payload(answers: Any,
+                           label_maps: List[Dict[str, str]]) -> List[List[str]]:
+        """把 UI 回答对齐成 opencode 要求的「每问一组已选 label」。
+
+        UI 返回的是展示文本（形如 "A. label - description"），需要还原成
+        opencode 原始 label；匹配不上就原样透传，让 agent 至少能看到用户的
+        自由输入。
+        """
+        if not isinstance(answers, list):
+            answers = [answers]
+        payload: List[List[str]] = []
+        for i, mapping in enumerate(label_maps):
+            raw = answers[i] if i < len(answers) else ""
+            if isinstance(raw, list):
+                payload.append([str(x) for x in raw])
+                continue
+            text = str(raw).strip()
+            payload.append([mapping.get(text) or text])
+        return payload
+
+    def _fire_complete(self) -> None:
+        """无论成功或失败都要通知上层，否则 workflow 会等到超时才醒。"""
         cb = self.callbacks.get("on_complete")
         if cb:
             cb()

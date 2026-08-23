@@ -4,7 +4,7 @@ import pytest
 
 from sw_lib.output.parser import StageOutputParser
 from sw_lib.output.stages import (
-    BrainstormingOutput, ReviewOutput, CodingOutput, DecisionPoint,
+    BrainstormingOutput, ReviewOutput,
 )
 
 

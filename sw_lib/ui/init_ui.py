@@ -7,16 +7,15 @@ sw_lib.ui.init_ui — 专业的任务初始化交互界面。
 
 import sys
 import os
-from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.prompt import Prompt, Confirm
 from rich import box
 
-from ..core.config import STAGES, STAGE_NAMES, ConfigManager, load_harness_config, TASKS, TRASH
-from ..core.utils import now, sanitize_name
+from ..core.config import ConfigManager, TASKS
+from ..core.utils import sanitize_name
 
 
 class InitializationUI:
@@ -166,6 +165,11 @@ class InitializationUI:
         )
         self.console.print(summary_panel)
         self.console.print()
+
+        # --yes / -y 会设置 SW_YES；此处是向导唯一的确认点，必须尊重该标志，
+        # 否则 `sw init --yes` 仍会停在这里等输入。
+        if os.environ.get("SW_YES") == "1":
+            return self.data
 
         if Confirm.ask("[bold green]确认创建任务并立即开始工作?[/]", default=True):
             return self.data

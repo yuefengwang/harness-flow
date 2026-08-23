@@ -29,6 +29,17 @@ STAGES = ["01-brainstorming", "02-planning", "03-coding", "04-review", "05-archi
 STAGE_NAMES = ["头脑风暴", "规划", "编码", "评审", "归档"]
 MAX_REROUTE = 3  # 最大返工循环次数
 
+# ── 钩子超时（分钟）──
+# check_03-coding.sh / check_04-review.sh 会在任务目录里跑 pytest / npm test，
+# 必须有上限，否则钩子挂住会让 CLI 与 gate 校验永久等待。
+HOOK_TIMEOUT_MINUTES = 2.0
+HOOK_TIMEOUT_SECONDS = HOOK_TIMEOUT_MINUTES * 60.0
+
+# ── 自动推进 ──
+# 自动模式下单次会话最多连续推进的阶段数，防止配置错误导致无限循环。
+# 5 个阶段跑完一轮即到 archive，留一点余量给 04-review 的返工。
+AUTO_ADVANCE_MAX_STAGES = 12
+
 # ── 配置模型 ──
 
 @dataclass
@@ -53,6 +64,7 @@ class HarnessConfigModel:
     roles: Dict[str, RoleConfig] = field(default_factory=dict)
     stage_roles: Dict[str, str] = field(default_factory=dict)
     auto_advance: bool = False
+    auto_answer: bool = False
     mock_agent: MockAgentConfig = field(default_factory=MockAgentConfig)
     repo_path: str = "repo"
 
@@ -100,6 +112,7 @@ class ConfigManager:
             roles=roles,
             stage_roles=harness_data.get("stage_roles", {}),
             auto_advance=harness_data.get("auto_advance", False),
+            auto_answer=harness_data.get("auto_answer", False),
             mock_agent=mock_cfg,
             repo_path=harness_data.get("repo_path", "repo"),
         )
@@ -118,15 +131,6 @@ class ConfigManager:
 _manager = ConfigManager()
 
 # ── 兼容性查询接口 ──
-
-def get_repo_path() -> str:
-    """获取默认代码生成目录路径（来自 config.yaml 的 harness.repo_path）"""
-    return _manager.config.repo_path
-
-
-def load_harness_config() -> Dict[str, Any]:
-    """【旧接口兼容】加载原始配置字典"""
-    return _manager._load_raw_yaml()
 
 KNOWN_AGENT_TYPES: Set[str] = {"gemini", "opencode", "claudecode", "codex"}
 
@@ -224,6 +228,25 @@ def is_auto_advance() -> bool:
     """检查是否启用自动推进"""
     return _manager.config.auto_advance
 
+def set_auto_advance(enabled: bool) -> None:
+    """运行期覆写自动推进开关（供 CLI 的 --auto / --manual 使用）。
+
+    只改内存中的配置，不回写 config.yaml —— 命令行开关应当是一次性的。
+    """
+    _manager.config.auto_advance = bool(enabled)
+
+def is_auto_answer() -> bool:
+    """检查是否自动代答 agent 的结构化提问（无人值守模式）。
+
+    与 auto_advance 正交：auto_advance 决定阶段边界是否等 /advance，
+    auto_answer 决定阶段内的提问是否交还用户。
+    """
+    return _manager.config.auto_answer
+
+def set_auto_answer(enabled: bool) -> None:
+    """运行期覆写自动代答开关（供 CLI 的 --unattended 使用）。"""
+    _manager.config.auto_answer = bool(enabled)
+
 def is_mock_agent() -> bool:
     """检查是否启用 Mock Agent"""
     return _manager.config.mock_agent.enabled
@@ -248,14 +271,7 @@ def resolve_deploy_agent_model() -> str:
     cfg = _manager.config
     if DEPLOY_ROLE_ID in cfg.roles:
         return cfg.roles[DEPLOY_ROLE_ID].model
-    return "opencode/deepseek-v4-flash-free"
-
-def resolve_deploy_role_tools() -> list[str]:
-    """解析部署角色允许的工具列表"""
-    cfg = _manager.config
-    if DEPLOY_ROLE_ID in cfg.roles:
-        return cfg.roles[DEPLOY_ROLE_ID].tools
-    return ["list_files", "read_file", "write_file", "run_command"]
+    return "opencode/mimo-v2.5-free"
 
 # ── Rich 组件延迟加载 ──
 

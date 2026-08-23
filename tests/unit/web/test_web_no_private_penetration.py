@@ -4,8 +4,6 @@ WorkflowEngine abstraction.
 
 Run with: pytest tests/unit/web/test_web_no_private_penetration.py -v
 """
-import pytest
-from unittest.mock import MagicMock
 from sw_lib.web.engine_manager import WebEngineManager, WebEngineSession
 from sw_lib.workflow.engine import WorkflowEngine
 

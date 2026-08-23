@@ -8,7 +8,7 @@ import asyncio
 import time
 import threading
 from collections import deque
-from typing import Dict, Optional, Any, Callable
+from typing import Dict, Optional, Any
 
 from ..workflow.engine import WorkflowEngine, LangGraphWorkflowEngine
 from ..core.state import read_state
@@ -96,6 +96,7 @@ class WebEngineSession:
         if self._pending_res_queue:
             # We are waiting for a question
             answers = [text] * max(1, len(self._pending_questions))
+            self._record_decisions(self._pending_questions, text)
             self._pending_res_queue.put(answers)
 
             self._pending_questions = []
@@ -108,6 +109,29 @@ class WebEngineSession:
 
     def submit_command(self, cmd: str):
         self.engine.submit_command(self.task_name, cmd)
+
+    def _record_decisions(self, questions, text: str):
+        """把用户答复记进 .state，与 TUI 走同一套拍板状态源。
+
+        Web 与 TUI 是同一个工作流的两个前端，判定依据必须一致；只在 TUI 侧
+        记录会让同一个 bug 在 Web 上原样复现（任务 T1）。
+        失败一律吞掉：这在提交答复的主流程上，抛异常会让页面拿到 500。
+        """
+        try:
+            from ..workflow import stage_state as ss
+            stage = read_state(self.task_name).get("stage", "")
+            if not stage:
+                return
+            for idx, q in enumerate(questions or []):
+                label = ""
+                if isinstance(q, dict):
+                    label = (q.get("question") or q.get("header") or "").strip()
+                if not label:
+                    label = f"question_{idx + 1}"
+                ss.record_decision(self.task_name, stage,
+                                   question=label, answer=text, by="user")
+        except Exception as e:
+            self._web_add_log("sw", f"⚠️ 拍板记录写入失败: {e}")
 
     def destroy(self):
         self._alive = False

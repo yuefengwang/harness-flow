@@ -3,21 +3,16 @@ sw_lib.service — 任务管理核心业务逻辑 (TaskService).
 
 该模块将原本散落在 commands.py 中的业务逻辑收拢，提供统一的、
 不依赖于 CLI 表现层的任务操作接口。
-
-同时提供异步包装方法，供 Web Dashboard (FastAPI) 等异步调用方使用。
 """
 
-import asyncio
-import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 
-from .config import ROOT,  TASKS, TPLS, STAGES, STAGE_NAMES, TRASH
+from .config import TASKS, TPLS, STAGES, TRASH
 from .state import (
-    read_state, write_state, state_path,
-    get_active_from_status, upsert_task_summary, remove_task_summary,
+    read_state, write_state,
+    upsert_task_summary, remove_task_summary,
 )
 from .utils import now, sanitize_name, sw_log
 from ..workflow.runtime import WorkflowRuntime
@@ -30,7 +25,7 @@ class TaskError(Exception):
 
 def _write_context_marker(target_dir: str, project_name: str, task_type: str):
     """在目标目录创建 .sw-context 标记文件，用于项目自动发现"""
-    import json, os
+    import json
     marker_dir = Path(target_dir)
     if not marker_dir.is_absolute():
         marker_dir = Path.cwd() / target_dir
@@ -186,6 +181,40 @@ class TaskService:
         remove_task_summary(name)
         sw_log(name, "moved to trash", "sw")
 
+    def remove_all_tasks(self, purge: bool = False) -> List[Tuple[str, str]]:
+        """批量移除所有活跃任务。
+
+        默认与 remove_task 语义一致（移入回收站，可 restore）。purge=True 时
+        连回收站一起物理删除，不可恢复。
+
+        返回 [(任务名, "" 或错误原因)]，逐个隔离失败：一个任务删不掉不该
+        让剩下的全都留在原地。
+        """
+        results: List[Tuple[str, str]] = []
+        for entry in self.list_tasks():
+            name = entry["id"]
+            try:
+                self.remove_task(name)
+                results.append((name, ""))
+            except (TaskError, OSError) as e:
+                results.append((name, str(e)))
+        if purge:
+            self.purge_trash()
+        return results
+
+    def purge_trash(self) -> List[str]:
+        """清空回收站，返回被物理删除的任务名。"""
+        purged: List[str] = []
+        if not TRASH.is_dir():
+            return purged
+        for d in sorted(TRASH.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            remove_task_summary(d.name)
+            purged.append(d.name)
+        return purged
+
     def restore_task(self, name: str):
         """从回收站恢复任务"""
         src = TRASH / name
@@ -239,42 +268,6 @@ class TaskService:
         if _service_singleton is None:
             _service_singleton = cls()
         return _service_singleton
-
-    async def async_list_tasks(self, from_trash: bool = False) -> List[Dict[str, Any]]:
-        """异步版 list_tasks，通过线程池包装同步 I/O"""
-        return await asyncio.to_thread(self.list_tasks, from_trash)
-
-    async def async_get_task_state(self, name: str) -> Dict[str, Any]:
-        """异步版 get_task_state"""
-        return await asyncio.to_thread(self.get_task_state, name)
-
-    async def async_create_task(self, name: str, task_type: str = "feature",
-                                 session: str = "N/A", agent: str = "N/A",
-                                 context: str = "", allow_trash_collision: bool = False) -> str:
-        """异步版 create_task"""
-        return await asyncio.to_thread(
-            self.create_task, name, task_type, session, agent, context, allow_trash_collision
-        )
-
-    async def async_advance_stage(self, name: str) -> Dict[str, Any]:
-        """异步版 advance_stage"""
-        return await asyncio.to_thread(self.advance_stage, name)
-
-    async def async_remove_task(self, name: str):
-        """异步版 remove_task"""
-        return await asyncio.to_thread(self.remove_task, name)
-
-    async def async_restore_task(self, name: str):
-        """异步版 restore_task"""
-        return await asyncio.to_thread(self.restore_task, name)
-
-    async def async_validate_stage(self, name: str) -> Tuple[List[str], List[str]]:
-        """异步版 validate_stage"""
-        return await asyncio.to_thread(self.validate_stage, name)
-
-    async def async_add_answer(self, name: str, text: str):
-        """异步版 add_answer"""
-        return await asyncio.to_thread(self.add_answer, name, text)
 
     def get_task_state(self, name: str) -> Dict[str, Any]:
         """获取任务完整状态，若不存在则抛出异常"""
@@ -360,7 +353,7 @@ class TaskService:
 
     def _write_state_safe(self, name: str, data: dict):
         """安全写入状态（供 HealthMonitor 等外部调用），直接写 .state 文件。"""
-        from .state import state_path, write_state as _ws
+        from .state import write_state as _ws
         _ws(name, data)
 
 

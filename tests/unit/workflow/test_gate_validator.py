@@ -1,11 +1,23 @@
 """Tests for GateValidator — wraps existing hook scripts."""
-import pytest
 from unittest.mock import MagicMock, patch
-from pathlib import Path
-import subprocess
 
 from sw_lib.workflow.gate import GateValidator
 from sw_lib.core.config import TASKS
+from sw_lib.core.state import write_state
+from sw_lib.workflow import stage_state as ss
+
+
+def _sign(task_name, stage, stage_idx=0, route=None):
+    """建 .state 并签署 Gate（必要时写 Route）。
+
+    门禁判定读 .state（docs/design-json-state-source.md），阶段文件里的
+    `- [x]` 不再有效力。期望「门禁通过」的用例必须显式签署。
+    """
+    write_state(task_name, {"id": task_name, "stage": stage,
+                            "stage_idx": stage_idx, "stage_status": "running"})
+    ss.sign_gate(task_name, stage)
+    if route:
+        ss.write_route(task_name, route)
 
 
 class TestGateValidatorCheck:
@@ -22,6 +34,7 @@ class TestGateValidatorCheck:
             encoding="utf-8",
         )
 
+        _sign(task_name, "01-brainstorming", 0)
         try:
             validator = GateValidator()
             result = validator.check(task_name, "01-brainstorming")
@@ -134,6 +147,7 @@ class TestGateValidatorCheck:
             encoding="utf-8",
         )
 
+        _sign(task_name, "04-review", 3, route="05-Archive")
         try:
             validator = GateValidator()
             result = validator.check(task_name, "04-review")
@@ -154,6 +168,7 @@ class TestGateValidatorCheck:
             encoding="utf-8",
         )
 
+        _sign(task_name, "03-coding", 2)
         try:
             with patch('subprocess.run') as mock_run:
                 mock_run.return_value = MagicMock(returncode=0)
@@ -238,6 +253,7 @@ class TestGateValidatorCheck:
             encoding="utf-8",
         )
 
+        _sign(task_name, "01-brainstorming", 0)
         try:
             validator = GateValidator()
             result = validator.check(task_name, "01-brainstorming")
@@ -287,6 +303,7 @@ class TestGateValidatorCheck:
             encoding="utf-8",
         )
 
+        _sign(task_name, "01-brainstorming", 0)
         try:
             with patch('subprocess.run') as mock_run:
                 validator = GateValidator()  # default: run_hook_script=False

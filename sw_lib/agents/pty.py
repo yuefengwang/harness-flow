@@ -17,8 +17,7 @@ import subprocess
 import termios
 import time
 import yaml
-from pathlib import Path
-from typing import Optional, List, Dict, Callable, Any
+from typing import Optional, List, Dict, Callable
 
 from ..core.config import STAGES, STAGE_NAMES, TASKS, ROOT, CONFIG_DIR, resolve_agent_model
 from ..core.utils import now, sw_log

@@ -1,6 +1,5 @@
 import threading
 import time
-import pytest
 from unittest.mock import MagicMock
 from sw_lib.workflow import StageRunnable, StageInput, LangGraphAdapter
 from sw_lib.workflow.graph import build_harness_graph

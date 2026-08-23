@@ -1,7 +1,6 @@
 import asyncio
 import pytest
-from sw_lib.web.engine_manager import WebEngineManager, WebEngineSession
-from sw_lib.workflow.runtime import WorkflowRuntime
+from sw_lib.web.engine_manager import WebEngineManager
 
 
 def test_engine_manager_singleton():
@@ -27,7 +26,7 @@ def test_get_session_nonexistent():
 
 def test_destroy_session(dummy_task):
     mgr = WebEngineManager()
-    session = mgr.create_session(dummy_task, "01-brainstorming", 0, "N/A")
+    mgr.create_session(dummy_task, "01-brainstorming", 0, "N/A")
     assert mgr.is_alive(dummy_task)
     mgr.destroy_session(dummy_task)
     assert not mgr.is_alive(dummy_task)

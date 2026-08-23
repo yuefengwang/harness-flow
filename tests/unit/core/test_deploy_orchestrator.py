@@ -1,15 +1,12 @@
 """Tests for sw_lib.core.deploy_orchestrator — Agent-driven deployment orchestrator"""
 
-import json
-import os
 import shutil
 import signal
 import unittest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from sw_lib.core.config import TASKS
-from sw_lib.core.service import _service, TaskError
+from sw_lib.core.service import _service
 from sw_lib.core.deploy_orchestrator import (
     DeployOrchestrator,
     DeployResult,
@@ -127,6 +124,8 @@ class TestDeployOrchestratorLog(unittest.TestCase):
         self.task_dir = TASKS / self.name
         if self.task_dir.exists():
             shutil.rmtree(self.task_dir, ignore_errors=True)
+        # 部署总是针对一个已存在的任务；_log 不会替调用方建目录。
+        self.task_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         if self.task_dir.exists():
@@ -158,6 +157,30 @@ class TestDeployOrchestratorLog(unittest.TestCase):
         orch._log("no callback")
         log_file = TASKS / self.name / ".deploy_log"
         self.assertTrue(log_file.exists())
+
+    def test_does_not_create_task_dir(self):
+        """任务目录不存在时，_log 不得凭空建目录。
+
+        过去 _log 无条件 mkdir(parents=True)，于是任何构造了
+        DeployOrchestrator 并记一行日志的测试都会在 workspace/tasks/ 下
+        留一个只含 .deploy_log 的空任务，STATUS.json 也随之堆积孤儿条目。
+        """
+        shutil.rmtree(self.task_dir, ignore_errors=True)
+        self.assertFalse(self.task_dir.exists())
+
+        log_lines = []
+        orch = DeployOrchestrator(
+            name=self.name, target_dir="/tmp/test",
+            log_callback=lambda m: log_lines.append(m),
+        )
+        orch._log("orphan probe")
+
+        self.assertFalse(
+            self.task_dir.exists(),
+            "_log 不应创建任务目录",
+        )
+        # 目录缺失只跳过落盘，回调仍要照常送达 TUI / Web。
+        self.assertTrue(any("orphan probe" in l for l in log_lines))
 
 
 class TestDeployOrchestratorRun(unittest.TestCase):

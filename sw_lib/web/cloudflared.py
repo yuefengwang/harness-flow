@@ -9,7 +9,6 @@ import re
 import signal
 import subprocess
 import time
-from pathlib import Path
 from typing import Optional
 from sw_lib.core.config import TASKS
 
@@ -100,10 +99,3 @@ def stop_tunnel(task_name: str):
         pass
     finally:
         pid_file.unlink(missing_ok=True)
-
-
-def get_tunnel_url(task_name: str) -> Optional[str]:
-    _, url_file = _tunnel_files(task_name)
-    if url_file.exists():
-        return url_file.read_text().strip()
-    return None

@@ -7,7 +7,7 @@ Python 领域对象。上层 OpenCodeAgent / 未来任意 MCP/CLI 后端都只�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass

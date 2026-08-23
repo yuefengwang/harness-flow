@@ -1,14 +1,11 @@
 """sw_lib.agent_api — Gemini API-driven Agent (Modern SDK)"""
 
 import os
-import json
-import time
 import threading
 from google import genai
 from google.genai import types
-from pathlib import Path
 
-from ..core.config import ROOT, CONFIG_DIR, TASKS, STAGES, STAGE_NAMES
+from ..core.config import CONFIG_DIR, TASKS, STAGE_NAMES
 from ..core.utils import now, sw_log
 from ..tools.toolbox import Toolbox
 
@@ -18,7 +15,6 @@ from .base import BaseAgent
 class GeminiAgent(BaseAgent):
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="gemini-2.0-flash"):
         super().__init__(tui_callbacks, name, stage, stage_idx, model_name)
-        self.history_file = TASKS / name / ".history.json"
         self.toolbox = Toolbox(name, stage, callbacks=tui_callbacks)
         self.running = False
         

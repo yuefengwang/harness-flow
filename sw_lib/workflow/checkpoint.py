@@ -1,8 +1,7 @@
-import json
 import pickle
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Sequence, List, Tuple
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -157,5 +156,7 @@ class FileCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        # Simplified: we don't support pending writes persistence yet
+        # Simplified: pending-writes persistence is not supported yet. The
+        # parameters are unused on purpose — the signature is fixed by
+        # BaseCheckpointSaver and must stay compatible with LangGraph.
         pass
