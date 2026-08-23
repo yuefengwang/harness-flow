@@ -85,8 +85,14 @@ class StageRunnable(HarnessRunnable):
     """
 
     # 阶段等待上限（类属性，便于测试覆写；生产默认与旧行为一致）
-    FIRST_RESPONSE_TIMEOUT = 300.0   # 等待 agent 首轮回复
-    MULTI_TURN_TIMEOUT = 600.0       # 多轮会话总时长（等 /advance）
+    #
+    # 必须**严格大于** OpenCodeTransport.CHAT_TIMEOUT（900s），否则阶段层
+    # 先放弃，transport 那句可读的报错永远到不了用户面前，UI 只会拿到一个
+    # 没有原因的空结果。历史上 300.0 与 CHAT_TIMEOUT 相等过，会形成竞态，
+    # 故随 CHAT_TIMEOUT 一并上抬。关系由
+    # tests/unit/agents/test_timeout_hierarchy.py 锁定。
+    FIRST_RESPONSE_TIMEOUT = 1020.0  # 等待 agent 首轮回复（CHAT_TIMEOUT + 2min 余量）
+    MULTI_TURN_TIMEOUT = 1800.0      # 多轮会话总时长（等 /advance）
 
     def __init__(
         self,
@@ -106,6 +112,8 @@ class StageRunnable(HarnessRunnable):
 
         self._agent_output_lines: List[Tuple[str, str]] = []
         self._agent_text_buffer: List[str] = []
+        # agent 写过的文件路径。判据不能只看聊天文本 —— 见 _collect_agent_output。
+        self._agent_tool_writes: List[str] = []
         self._agent_complete = threading.Event()
         self.active_agent: Optional[Any] = None
         self._current_task_name: Optional[str] = None
@@ -290,6 +298,7 @@ class StageRunnable(HarnessRunnable):
 
         self._agent_output_lines.clear()
         self._agent_text_buffer.clear()
+        self._agent_tool_writes.clear()
         self._agent_complete.clear()
         self._stage_done.clear()
         self._agent_finalized.clear()
@@ -314,9 +323,31 @@ class StageRunnable(HarnessRunnable):
             if "on_text" in original_callbacks:
                 original_callbacks["on_text"](text)
 
+        def composed_on_tool(call):
+            """记录 agent 的写盘工具调用。
+
+            这是判据与真实产出之间的桥。任务 ttt 的事故：agent 已经 write 了
+            2 个文件，但超时发生在它开口总结**之前**，于是文本缓冲区为空，
+            阶段被判为「未产出内容」而整体丢弃 —— 磁盘上的成果不算成果。
+            """
+            try:
+                name = (call or {}).get("name") or ""
+                if name in ("write", "edit", "apply_patch"):
+                    tool_input = (call or {}).get("input") or {}
+                    path = (tool_input.get("filePath")
+                            or tool_input.get("file_path")
+                            or tool_input.get("path") or "?")
+                    if path not in self._agent_tool_writes:
+                        self._agent_tool_writes.append(path)
+            except Exception:
+                pass  # 诊断设施不得影响主流程
+            if "on_tool" in original_callbacks:
+                original_callbacks["on_tool"](call)
+
         new_callbacks = original_callbacks.copy()
         new_callbacks["add_log"] = composed_add_log
         new_callbacks["on_text"] = composed_on_text
+        new_callbacks["on_tool"] = composed_on_tool
         new_callbacks["on_complete"] = composed_on_complete
         if "is_running" not in new_callbacks:
             new_callbacks["is_running"] = lambda: bool(self.active_agent)
@@ -352,8 +383,26 @@ class StageRunnable(HarnessRunnable):
             pass
 
         # 首轮就失败（如发送被拒），同样不必再挂满多轮超时
-        if getattr(agent, "status", None) == "error" and not self._agent_text_buffer:
+        # 判据里必须带上 _agent_tool_writes：只看文本缓冲区会把「已写盘但
+        # 没来得及总结」误判成「什么都没做」（任务 ttt 事故）。
+        if (getattr(agent, "status", None) == "error"
+                and not self._agent_text_buffer
+                and not self._agent_tool_writes):
             composed_add_log("error", f"{self.stage} agent 未产出内容，阶段中止")
+            try:
+                agent.shutdown()
+            finally:
+                agent.callbacks = original_callbacks
+                self.active_agent = None
+                self._agent_finalized.set()
+            return self._collect_agent_output()
+
+        if getattr(agent, "status", None) == "error" and self._agent_tool_writes:
+            composed_add_log(
+                "sw",
+                f"⚠️ {self.stage} agent 中途失败，但已写入 "
+                f"{len(self._agent_tool_writes)} 个文件，产出已保留",
+            )
             try:
                 agent.shutdown()
             finally:
@@ -390,7 +439,29 @@ class StageRunnable(HarnessRunnable):
         if text_output:
             return text_output
         agent_lines = [msg for src, msg in self._agent_output_lines if src == "agent"]
-        return "\n".join(agent_lines) if agent_lines else ""
+        if agent_lines:
+            return "\n".join(agent_lines)
+        # 文本全空但磁盘已被改动 —— 不得当作「什么都没做」。
+        #
+        # 任务 ttt 的事故形态：agent write 了 src/twosum/twosum.py 与
+        # tests/test_twosum.py，随后单轮请求超时，它还没来得及输出总结。
+        # 旧实现在这里返回空串，`invoke()` 的 `if not output.strip()` 于是
+        # 把整个阶段判为失败丢弃，而文件其实**已经在磁盘上了**。
+        #
+        # 返回一段如实的说明，让阶段产出非空：既保住已完成的工作，
+        # 也明确告诉用户「产出在文件里，不在对话里」。
+        # getattr 兜底：这是诊断设施，绝不能因为属性缺失（如构造被绕过）
+        # 就让本方法抛异常 —— 那会把「产出为空」升级成「阶段崩溃」。
+        writes = getattr(self, "_agent_tool_writes", None) or []
+        if writes:
+            files = "\n".join(f"- {p}" for p in writes)
+            return (
+                f"[harness] agent 未输出文本总结，但已写入以下文件"
+                f"（共 {len(writes)} 个）：\n{files}\n"
+                f"（通常意味着单轮请求在它总结之前结束；"
+                f"文件内容已落盘，请直接查看上述路径。）"
+            )
+        return ""
 
     # ── Internal: Parsing ──
 

@@ -56,6 +56,32 @@ _MANAGED_TOOLS: Tuple[str, ...] = (
     "list", "glob", "read", "grep", "write", "edit", "apply_patch", "bash", "question",
 )
 
+# 非工具类权限：opencode 的内置 agent 默认表里就写着 `ask`，因此**必须**由
+# session 规则显式压掉，否则触发即死锁（任务 newtask 实测卡死 26 分钟）。
+#
+# 取值依据 —— 反编译 opencode 1.18.20 二进制读到的默认表：
+#
+#     external_directory: {"*": "ask", <worktree>/*: "allow", ...}
+#     doom_loop:          "ask"
+#     read:               {"*": "allow", "*.env": "ask", "*.env.*": "ask"}
+#
+# 注意三件与直觉相反的事，都是实测/反编译坐实的：
+#
+# 1. `external_directory` 与 `doom_loop` 都**不在** `_MANAGED_TOOLS` 里 ——
+#    它们不是工具，`_tool_switches()` 永远不会为它们产生规则。这正是
+#    「纪律写对了、覆盖面漏了」的位置。
+# 2. `doom_loop` 的 ask 在服务端用的 ruleset 是 `agent.permission` 单独一份，
+#    **不含 session 规则**（`ruleset: le.permission`），所以这里的底规则
+#    大概率压不住它。列进来是为了「有总比没有好」，真正兜住它的是
+#    A1-fix 的第二层：transport 订阅 `permission.asked` 后自动应答。
+#    ——**不要**因为它在这张表里就以为它已被关掉。
+# 3. `read` 的 `*.env` ask 只在读 env 文件时触发。harness 的 strip_secrets
+#    已把密钥摘出环境，但 agent 仍可能顺手 read 一个 .env，故一并兜底。
+_ASK_CAPABLE_PERMISSIONS: Tuple[str, ...] = (
+    "external_directory",
+    "doom_loop",
+)
+
 
 def _strip_leading_label(label: str, prefix: str) -> str:
     """剥掉 label 开头由模型自己写的选项编号。
@@ -84,9 +110,13 @@ class OpenCodeAgent(BaseAgent):
       - 工具执行                   → opencode 原生工具（按阶段权限开关）
     """
 
-    # 等待用户回答 question 的上限；比 transport.CHAT_TIMEOUT(1800s) 短，
+    # 等待用户回答 question 的上限；比 transport.CHAT_TIMEOUT(300s) 短，
     # 这样超时后还能主动 reject 让 agent 继续，而不是让整轮请求烂在服务端。
-    QUESTION_TIMEOUT = 1500.0
+    #
+    # 随 CHAT_TIMEOUT 1800→300 一并下调。这里**不照抄原比例**（1500/1800≈83%，
+    # 换算过来是 250s，只剩 50s 余量）：reject 要发一次 HTTP，agent 还要收到
+    # 拒绝后自行决定并把回答写完。余量按绝对值留 120s，比按比例缩放更安全。
+    QUESTION_TIMEOUT = 180.0
 
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode",
                  use_native_tools: bool = True, verbose: bool = False,
@@ -196,16 +226,25 @@ class OpenCodeAgent(BaseAgent):
         因此**不得**以本方法为由声称证据已受保护 —— 那个承诺由
         `core/evidence.py` 的 HMAC 校验兑现。
 
-        四条纪律：
+        五条纪律：
 
         1. 只产出 `allow` / `deny`，**绝不产出 `ask`** —— harness 不订阅
-           `permission.asked`，一旦产生 ask 会死等到 CHAT_TIMEOUT（1800 秒）。
+           `permission.asked`，一旦产生 ask 会死等到 CHAT_TIMEOUT（300 秒）。
            注意 opencode 无匹配时默认就是 ask，所以每种权限都要显式给底规则。
         2. deny **只覆盖 `write` / `edit`**。`bash` 无法按路径约束，
            给它写路径 deny 是自欺。
         3. 规则随 `POST /session` 一次性带入，禁用 PATCH（merge 语义会累积，
            叠加 `findLast` 后者优先会让 deny 被后来的 allow 覆盖）。
         4. deny 排在 allow **之后** —— `findLast` 语义下后者优先。
+        5. 底规则必须覆盖**非工具类权限**（`_ASK_CAPABLE_PERMISSIONS`）。
+           纪律 1 早就写明「每种权限都要显式给底规则」，但原实现只遍历了
+           `_MANAGED_TOOLS`（9 个工具），路径域的 `external_directory`
+           因此一条规则都没有 —— 任务 `newtask` 卡死 26 分钟即由此而来。
+
+        为什么 session 规则能压住 agent 默认表里的 `ask`：服务端求值是
+        `merge(agent.permission, session.permission)` 后 `findLast`，
+        session 规则排在数组后面，故后者优先。（`doom_loop` 是例外，
+        见 `_ASK_CAPABLE_PERMISSIONS` 第 2 条注释。）
         """
         switches = self._tool_switches()
 
@@ -214,6 +253,23 @@ class OpenCodeAgent(BaseAgent):
              "action": "allow" if on else "deny"}
             for tool, on in switches.items()
         ]
+
+        # 非工具类权限的底规则：取 allow 而非 deny。
+        #
+        # 理由不是「越界读无害」，而是三条具体的权衡：
+        #   - agent 越界读 harness 目录的**需求**（找阶段规范）已由 prompt
+        #     自足消除，剩下的越界读多是探路，deny 只会让它反复试探；
+        #   - opencode 的 external_directory 判定发生在**读之前**，deny 会让
+        #     整个工具调用报错，而报错文本本身又会诱导 agent 换路径重试；
+        #   - 判据保护不依赖这条规则 —— 由下面 write/edit 的路径 deny
+        #     加 evidence.py 的 HMAC 校验兑现，与 bash 同理（纪律 2）。
+        #
+        # 注意 pattern 的 `*` 在服务端被编译成带 `s` 标志的 `.*`（反编译确认：
+        # `replace(/\*/g,".*")` + `new RegExp("^"+l+"$","s")`），**能跨斜杠**，
+        # 所以单条 `*` 足以兜住绝对路径，无需再列 `**/`。
+        for perm in _ASK_CAPABLE_PERMISSIONS:
+            rules.append({"permission": perm, "pattern": "*",
+                          "action": "allow"})
 
         # 判据区禁写。pattern 的 glob 语义仍未验证（2.7.2 第 2 条：assert 端点
         # 不可用作判据），因此同一目标冗余覆盖多种写法，宁可重复也不漏。
@@ -411,6 +467,7 @@ class OpenCodeAgent(BaseAgent):
             on_delta=self._on_delta,
             on_tool=self._on_stream_tool,
             on_question=self._on_question_asked,
+            on_permission=self._on_permission_asked,
         )
 
         try:
@@ -451,6 +508,56 @@ class OpenCodeAgent(BaseAgent):
         if cb:
             cb({"name": name, "input": tool_input})
 
+    # ── 权限审批（服务端 permission.asked）──
+
+    # 等待权限审批的上限。取值远小于 QUESTION_TIMEOUT：question 是 agent
+    # 主动问人、值得等真人；权限 ask 是它无意踩到边界，等下去只是白耗。
+    PERMISSION_TIMEOUT = 30.0
+
+    def _on_permission_asked(self, request_id: str,
+                             props: Dict[str, Any]) -> None:
+        """服务端就某个权限请求等待审批时被事件流唤起。
+
+        这里修的是一个**可观测性缺陷**，不只是死锁：任务 `newtask` 卡了
+        26 分钟，期间 UI 显示「Agent 正在处理中」—— 技术上没说错，但把
+        「等待外部审批」和「正在计算」混成了同一个状态，于是用户只能猜，
+        最后猜成了「免费模型限额」。所以本方法的第一职责是**说清在等什么**，
+        第二职责才是让流程继续。
+
+        应答用 `once` 而非 `always`：见 transport.respond_permission。
+        """
+        permission = str(props.get("permission") or "?")
+        patterns = props.get("patterns") or []
+        shown = ", ".join(str(p) for p in patterns[:3]) or "(无模式)"
+        if len(patterns) > 3:
+            shown += f" 等 {len(patterns)} 项"
+
+        prev_status = self.status
+        self.status = self.STATUS_WAITING
+        self._add_log(
+            "sw",
+            f"⏸ 正在等待权限审批: permission={permission} 模式={shown} "
+            f"—— 自动放行本次（{self.PERMISSION_TIMEOUT:.0f}s 内无响应则拒绝）",
+        )
+        sw_log(self.name,
+               f"permission.asked id={request_id} permission={permission} "
+               f"patterns={patterns}", "sw")
+
+        ok = self._transport.respond_permission(request_id, "once")
+        if ok:
+            self._add_log("sw", f"✓ 已放行权限 {permission}（仅本次）")
+        else:
+            # 应答失败就明说。静默失败会让请求继续挂到 CHAT_TIMEOUT，
+            # 又变回那个「没有任何提示的 26 分钟」。
+            self._add_log(
+                "error",
+                f"权限应答提交失败: permission={permission} "
+                f"id={request_id} —— 该请求可能挂起到超时",
+            )
+            sw_log(self.name,
+                   f"permission respond failed id={request_id}", "error")
+        self.status = prev_status
+
     # ── 结构化提问（opencode 原生 question 工具）──
 
     @staticmethod
@@ -489,7 +596,7 @@ class OpenCodeAgent(BaseAgent):
         """agent 调用 question 工具时被事件流唤起。
 
         opencode 的 question 是服务端阻塞式的：不回复，POST /message 会一直挂到
-        CHAT_TIMEOUT（30 分钟）。所以这里必须把问题交给 harness，并把用户回答
+        CHAT_TIMEOUT（5 分钟）。所以这里必须把问题交给 harness，并把用户回答
         POST 回去；拿不到回答时明确 reject，让 agent 自行决定而不是死等。
         """
         if not questions:

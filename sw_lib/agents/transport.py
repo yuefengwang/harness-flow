@@ -44,7 +44,28 @@ class OpenCodeTransport:
       - 可选订阅 SSE 事件流，把增量 token 交给回调（供 TUI 实时显示）
     """
 
-    CHAT_TIMEOUT = 1800.0          # 单轮对话超时（秒）
+    # 单轮对话超时（秒）。
+    #
+    # 这个数字同时是两件事的上限，而它们要求相反的方向：
+    #   - **故障暴露延迟**：越短越好。1800s 下任务 newtask 的权限死锁静默了
+    #     26 分钟（F11），而 26 分钟的沉默不会让人想到死锁，只会想到「模型慢」。
+    #   - **单轮工作时长**：越长越安全。agent 一轮里会串行跑多步，每步一次
+    #     LLM 往返，还会用 `task` 工具派子 agent **串行嵌套**。
+    #
+    # 取值史（两次都是实测驱动，不是拍脑袋）：
+    #   1800 → 300：F11 权限死锁后按「暴露延迟」单方面优化。
+    #   300 → 900：任务 ttt 实测 300s 砍掉了**正在正常干活**的 agent ——
+    #              服务端日志 step 0..8 稳步推进，11:45:57 还在下一步，
+    #              11:46:10 刚派出子 agent，11:46:44 被 abort，
+    #              距上次活动仅 34 秒。它没卡住，是被误杀。
+    #
+    # 900s 是双向折中：显著大于实测工作量（约 5 分钟且仍在推进），
+    # 又只有原值的一半，死锁最多静默 15 分钟。真正把「死锁」压到秒级的
+    # 不是这个数字，而是 F11 那层 `permission.asked` 订阅 —— 超时是**兜底**，
+    # 不该承担第一道防线的职责。
+    #
+    # 改动它必须同时维持超时层级（见 tests/unit/agents/test_timeout_hierarchy.py）。
+    CHAT_TIMEOUT = 900.0
     HEALTH_TIMEOUT = 10.0          # 健康检查超时
     ABORT_TIMEOUT = 10.0           # 中止会话超时
     STARTUP_TIMEOUT = 60.0         # 启动总超时（秒）
@@ -78,11 +99,19 @@ class OpenCodeTransport:
         self._event_stop = threading.Event()
         self._tools: Optional[Dict[str, bool]] = None
         self._permission_rules: Optional[List[Dict[str, str]]] = None
+        # 事件泵观察到的工具调用序列。用途只有一个：超时/失败时能说清
+        # 「它当时干到哪了」，把「卡死」与「正在干活被砍」区分开。
+        self._observed_tools: List[str] = []
 
     # ── 公开属性 ──
     @property
     def server_url(self) -> Optional[str]:
         return self._server_url
+
+    @property
+    def observed_tools(self) -> List[str]:
+        """本轮已观察到的工具调用名（按首次出现顺序，已去重）。"""
+        return list(self._observed_tools)
 
     @property
     def session_id(self) -> Optional[str]:
@@ -302,7 +331,19 @@ class OpenCodeTransport:
             )
             resp.raise_for_status()
         except requests.Timeout:
-            raise OpenCodeTransportError(f"opencode 响应超时: {url}")
+            # 超时报错必须带上「它当时干到哪了」。任务 ttt 的事故里 UI 只有
+            # 一句「响应超时」，读者无法区分「卡死」与「正在干活被砍」——
+            # 那次是后者，而确认这件事需要去翻服务端日志。
+            done = self.observed_tools
+            progress = (f"超时前已完成 {len(done)} 次工具调用"
+                        f"（{', '.join(done[-5:])}）" if done
+                        else "超时前未观察到任何工具调用")
+            raise OpenCodeTransportError(
+                f"opencode 响应超时（CHAT_TIMEOUT={self.CHAT_TIMEOUT:.0f}s）: {url}\n"
+                f"  {progress}\n"
+                f"  若 agent 仍在正常推进，说明上限偏小；"
+                f"若长时间无工具调用，才是真卡住。"
+            )
         except requests.HTTPError as e:
             body = ""
             if e.response is not None:
@@ -362,6 +403,36 @@ class OpenCodeTransport:
             return False
         return True
 
+    # ── 权限审批应答（permission 判定）──
+
+    def respond_permission(self, request_id: str, response: str = "once") -> bool:
+        """应答一个待批权限请求。
+
+        与 question 同构的阻塞语义：只要服务端发出 `permission.asked`，
+        POST /message 就一直挂着，直到有人应答或 CHAT_TIMEOUT。
+
+        端点形状取自 opencode 1.18.20 二进制（反编译）：
+
+            POST /session/{sessionID}/permissions/{permissionID}
+            body: {"response": "once" | "always" | "reject"}
+
+        `once` 而非 `always`：`always` 会把规则写进服务端的 approved 列表并
+        持久化，等于让一次越界读悄悄放宽后续所有会话的判定面。每次都问、
+        每次都记日志，是可观测性想要的方向。
+        """
+        if not self._server_url or not self._session_id:
+            return False
+        url = (f"{self._server_url}/session/{self._session_id}"
+               f"/permissions/{request_id}")
+        try:
+            r = requests.post(url, json={"response": response},
+                              params=self._params(),
+                              timeout=self.HEALTH_TIMEOUT)
+            r.raise_for_status()
+        except requests.RequestException:
+            return False
+        return True
+
     def abort_session(self) -> None:
         if self._server_url and self._session_id:
             try:
@@ -378,7 +449,8 @@ class OpenCodeTransport:
     def start_events(self, on_delta: Optional[Callable[[str], None]] = None,
                      on_tool: Optional[Callable[[str, Dict[str, Any]], None]] = None,
                      on_idle: Optional[Callable[[], None]] = None,
-                     on_question: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None) -> None:
+                     on_question: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None,
+                     on_permission: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
         """订阅 /event，把增量文本与工具调用实时交给回调。
 
         必要性：POST /session/{id}/message 只返回**最终**助手消息，中间步骤的
@@ -388,6 +460,16 @@ class OpenCodeTransport:
         ``on_question`` 同样只能从事件流拿到：agent 调用原生 question 工具后，
         POST /message 会一直阻塞等人回答，此时唯一的通知渠道就是
         ``question.asked`` 事件。不订阅就会死等到 CHAT_TIMEOUT。
+
+        ``on_permission`` 是同一个坑的另一半，且代价更隐蔽：权限 ask 不是
+        agent 主动发起的动作，而是它**不知情**地踩到判定边界时由服务端发出的。
+        任务 `newtask` 实测：agent glob 越出 workdir → 服务端发
+        `permission.asked` 并静默等待 → 无人应答 → 26 分钟里既没有报错、
+        也没有任何提示，UI 一直显示「正在处理中」。
+
+        底规则（`opencode._ASK_CAPABLE_PERMISSIONS`）是第一道防线，但它
+        兜不住两种情况：opencode 将来新增权限类型，以及 `doom_loop` 这种
+        求值时不带 session 规则的权限。所以这一层必须存在。
 
         注意 ``on_question`` 会在独立线程里跑：它内部要等真人回答（可能几分钟），
         若占住 pump 就再也收不到 delta / tool / idle 事件。
@@ -400,6 +482,7 @@ class OpenCodeTransport:
 
         seen_tools: set = set()
         seen_questions: set = set()
+        seen_permissions: set = set()
 
         def _pump() -> None:
             try:
@@ -430,14 +513,24 @@ class OpenCodeTransport:
                                     on_delta(delta)
                         elif etype == "message.part.updated":
                             part = props.get("part") or {}
-                            if on_tool and part.get("type") == "tool":
+                            if part.get("type") == "tool":
                                 state = part.get("state") or {}
                                 if state.get("status") in ("running", "completed"):
                                     key = (part.get("id"), state.get("status"))
                                     if key not in seen_tools:
                                         seen_tools.add(key)
-                                        on_tool(part.get("tool") or "",
-                                                state.get("input") or {})
+                                        name = part.get("tool") or ""
+                                        # `invalid` 是 opencode 对「模型没按
+                                        # schema 产出工具调用」给的占位名（实测
+                                        # 免费模型偶发）。把它算作进展会误导
+                                        # 超时诊断 —— 那恰恰是**没有**进展。
+                                        if (name and name != "invalid"
+                                                and name not in self._observed_tools):
+                                            self._observed_tools.append(name)
+                                        # 记录与回调分开：进展记录是诊断设施，
+                                        # 不该因为没人订阅 on_tool 就丢失。
+                                        if on_tool:
+                                            on_tool(name, state.get("input") or {})
                         elif etype == "session.idle" and on_idle:
                             on_idle()
                         elif etype in ("question.asked", "question.v2.asked"):
@@ -453,6 +546,21 @@ class OpenCodeTransport:
                             threading.Thread(
                                 target=on_question,
                                 args=(qid, props.get("questions") or []),
+                                daemon=True,
+                            ).start()
+                        elif etype in ("permission.asked", "permission.v2.asked"):
+                            if not on_permission:
+                                continue
+                            pid = props.get("id")
+                            if not pid or pid in seen_permissions:
+                                continue
+                            sid = props.get("sessionID")
+                            if sid and self._session_id and sid != self._session_id:
+                                continue  # 同上：全局流，别应答别人的请求
+                            seen_permissions.add(pid)
+                            threading.Thread(
+                                target=on_permission,
+                                args=(pid, props),
                                 daemon=True,
                             ).start()
             except Exception:

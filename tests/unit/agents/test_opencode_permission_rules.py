@@ -9,7 +9,9 @@
 
 被测的四条纪律（2.7.3 / D0-6）：
 1. 只用 allow / deny，绝不用 ask —— harness 不订阅 permission.asked，
-   一旦产生 ask 会死等到 CHAT_TIMEOUT（1800 秒）。
+   一旦产生 ask 会死等到 CHAT_TIMEOUT（300 秒）。
+   注：该纪律成文时 CHAT_TIMEOUT 为 1800s，F11 事故后已降至 300s，
+   并补上了 permission.asked 订阅作为第二层防线。
 2. deny 只覆盖 write / edit —— bash 无法按路径约束，不假装堵住了。
 3. 规则在 POST /session 创建时一次性带入，禁止 PATCH（PATCH 是 merge，
    累积 + findLast 会让 deny 被后续 allow 覆盖）。
@@ -30,7 +32,7 @@ def _rules(stage: str = "03-coding"):
 # ── 纪律 1：不得出现 ask ──
 
 def test_no_ask_action_anywhere():
-    """ask 会让 harness 死等 1800 秒 —— 比不设防更糟。"""
+    """ask 会让 harness 死等到 CHAT_TIMEOUT —— 比不设防更糟。"""
     for stage in ("01-brainstorming", "03-coding", "04-review", "05-archive"):
         rules = _rules(stage)
         assert rules, f"{stage} 未产生任何规则 —— 空规则集下 opencode 默认 ask"
