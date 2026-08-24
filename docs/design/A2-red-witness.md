@@ -351,7 +351,7 @@ phase == 03b:
    **A3-A11 的实施应把「跑一次 e2e」当作准出的必要条件**，
    而不是可选的补充验证；A6 的 O2 若只读单元测试结果，会漏掉同一类故障。
 
-### 10.6 八处对设计原文的修正（均由实施期实测推翻原文）
+### 10.6 十处对设计原文的修正（均由实施期实测推翻原文）
 
 | 原文 | 实测结果 | 定案 |
 |---|---|---|
@@ -363,6 +363,8 @@ phase == 03b:
 | —（原文未涉及） | 上一处修好后 e2e 五阶段走通，但 `verify.py` 复查钩子时**另起进程、不带环境变量**，同一份合法 `.state` 又被判 `tampered`。根因是设计问题：**签名用哪把密钥是那份数据的属性，不是读它的进程的属性** —— 靠环境变量维系意味着任何一次环境丢失都让 mock 产出永久不可校验 | `verify_evidence` 改为从 `.state` **自描述**判断签名域（`red_witness.mock is True`），环境变量只决定新写入用哪把密钥。安全方向是收紧：mock 密钥是源码里的公开常量，因此只有**明确标了 `mock: true`** 的记录才允许用它校验，抹掉标记想蒙过去签名立刻对不上。契约见 `test_mock_signature_is_self_describing.py` |
 | R2「npm 项目跳过见证并标注 `unavailable`」 | 照原文只在文档里写了，实现里没有落点：`hash_test_files` 只认 `.py`，纯 npm 项目在 03a 撞上「无测试：必须先写测试文件」的硬拒绝。**这不是跳过，是永久卡死** —— agent 写多少 `*.test.js` 都不会被看见，不存在「补上测试就能过」的自救路径（实测：`node test.js` 项目走真实钩子，门禁退出码 1） | 03a 在冻结集为空时先问「这个栈有 pytest 语义吗」（`_has_pytest_surface`：pytest.ini / pyproject / setup.py / tests\_ 目录 / 任意 Python 源码），没有则 `leave_witness_flow` + `mark_unavailable` 放行。**phase 必须抹回 `none`**，否则钩子不会把判定交回 `run_project_tests`，npm 的失败测试会过闸 —— 与本表第二行同一个洞。判据不能用「有没有 .py 文件」的反面来写：只有 `impl.py` 而漏写测试的 03a 仍须被拦（实测该处曾推翻 2 条既有契约）。契约见 `test_red_witness_non_python.py` |
 | —（原文未涉及） | `status` 字段只在 `mark_unavailable` 里被写，`record_red` / `record_green` 从不清它。真实序列「返工轮记 unavailable → 下一轮见证到红 → 转绿」跑完后，`status` 仍是 `unavailable`（实测）—— 一次货真价实的见证在 A6/A10 的报告里显示成 ❓。方向上它是「把做到了的说成没做到」，但若 ❓ 既可能是真没见证、也可能是陈旧残留，这个字段就失去了信息量 | `record_red` / `record_green` 经 `_mark_status_ok()` 把 `status` 转 `ok` 并清掉 `unavailable_reason`（留着会出现「ok 却附着一条未见证的理由」这种自相矛盾的记录）；`request_rewitness` 反向清掉 `status`，否则「已转绿」会在「测试已解冻、红未重新见证」的窗口里继续对下游生效。修正方向是「见证发生时才转 ok」而非「把 unavailable 一律去掉」—— 后者会把 ❓ 变成假 ✅。契约见 `test_red_witness_status_freshness.py` |
+| R4「agent 在 03a 就写实现，导致测试直接绿」→「退出码 0 被拒绝即可覆盖；无需额外检测」 | 拒绝实现了，**出路没有**。任务 `helloworld` 的真实死法：agent 用 `bash` heredoc 绕过 03a 的写入约束（`bash` 无法按路径约束，A0 的 U0-1）把 `src/` 下三个实现文件全部写完，20 个测试因此全绿，`phase` 停在 03a。`request_rewitness` 只能从 03b→03a，`leave_witness_flow` 没有 CLI 入口 —— 困在 03a 且测试已绿时命令行上不存在合法路径，只能手改 `.state`。**与本表第四行同一条判例：拦住一条路而不给替代路径，等于把人推向绕过机制** | 补 `abandon_witness()` + CLI `--abandon-witness <理由>`（理由必填，留痕 `abandon_reason`/`abandon_count`/`abandoned_at`），并在 03a **两条**拒绝路径（见证不到红 / 无测试）的输出里打印这条命令。四条约束：记 `unavailable` 而非伪造 `green_at`；phase 必须抹回 `none` 把判定交回 `run_project_tests`；**不动 `failed_nodes`**（4.1 单调性）；`_check_03a` 仍然拒绝全绿的 03a（验收第 4 条不变）—— 放弃是人的显式动作，不是自动放宽。契约见 `test_red_witness_abandon.py` |
+| —（原文未涉及，由上一行的判据连带查出） | `run_project_tests` 的测试面判据是 `pytest.ini` / `pyproject.toml` / 顶层 `test_*.py` 三者之一，**认不出只放在 `tests/` 下的测试**。`repo/helloworld` 正是这个形状（`src/*.py` + `tests/test_*.py`，无 pyproject），20 个测试一个没跑，钩子打印「未发现 pytest 测试面」并返回 0 —— 失败的测试套件就此过闸。而见证侧的 `_has_pytest_surface` 认得 `tests/`，其 docstring 里写着「`tests/` 布局在那边是靠 pyproject 命中的」，该假设对无 pyproject 的项目不成立。**两侧判据错位使 A2 的所有让路路径把判定交给一个空转的函数** ——让路从「不接管判定」变成「取消判定」，是本表第二/七行那个洞的第三种形态 | 在 `lib_run_tests.sh` 里补 shell 版 `_has_pytest_surface()`，与见证侧判据对齐（补 setup.py / setup.cfg / tox.ini / 顶层 `*_test.py` / `tests|test` 目录下**确有** `test_*.py`\|`*_test.py`）。只认「目录存在」不够：空的 `tests/` 会让 pytest 报退出码 5，那时应走「无测试面」而非「跑了但没测试」。真无测试的项目仍如实打印「未发现 pytest 测试面」，不得反过来说成已执行。契约见 `test_hook_test_surface_detection.py` |
 
 ---
 

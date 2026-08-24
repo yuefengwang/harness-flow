@@ -461,6 +461,37 @@ def request_rewitness(task: str, reason: str = "") -> Dict[str, Any]:
     return _mutate_witness(task, fn)
 
 
+def abandon_witness(task: str, reason: str = "") -> Dict[str, Any]:
+    """放弃本轮红见证，把判定交回 `run_project_tests`（A2 的 R4 出路）。
+
+    存在的意义与 `request_rewitness` 完全对称 —— 那条是「03b 发现测试写错」
+    的出路，这条是「03a 见证不到红」的出路。R4 当初判定「退出码 0 被拒绝
+    即可覆盖；无需额外检测」，只做了拒绝：agent 一旦在 03a 就把实现写完
+    （`bash` 绕过写入约束，A0 的 U0-1），测试再也不可能红，而 03a 没有任何
+    合法出口 —— 任务 `helloworld` 因此永久卡死，只能手改 `.state`。
+
+    这不是「放宽见证」：`_check_03a` 仍然拒绝全绿的 03a（验收第 4 条不变）。
+    放弃是**人的显式动作**，留痕、计数、并且如实记成 `unavailable`。
+
+    三处刻意的选择：
+
+    * `leave_witness_flow` 必须调 —— phase 停在 `03a` 会让钩子不把判定交回
+      `run_project_tests`，失败的测试反而过闸（10.6 第二/七行同一个洞）。
+    * `mark_unavailable` 而非伪造 `green_at` —— 放弃的结论是 ❓ 不是 ✅。
+    * **不动 `failed_nodes`** —— 判据集单调（4.1）。这一轮可以放弃，
+      已经见证过的 bug 不能因此从判据集里消失。
+    """
+    leave_witness_flow(task)
+    mark_unavailable(task, f"人为放弃本轮 Red 见证 —— {reason}")
+
+    def fn(raw):
+        raw["abandon_count"] = int(raw.get("abandon_count") or 0) + 1
+        raw["abandon_reason"] = reason
+        raw["abandoned_at"] = _now()
+
+    return _mutate_witness(task, fn)
+
+
 def append_witnessed_nodes(task: str, nodes: List[str]) -> Dict[str, Any]:
     """把新节点追加进判据集（A9 接口）。
 
@@ -664,7 +695,7 @@ def _check_03a(task: str, target: Path) -> GateResult:
         return GateResult(False, [
             "❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）",
             "   红绿流程要求测试先于实现 —— 没有测试就没有判据。",
-        ])
+        ] + _abandon_hint(task))
 
     exit_code, nodes = _run_in_target(target)
     verdict = classify_exit_code(exit_code, nodes)
@@ -672,7 +703,7 @@ def _check_03a(task: str, target: Path) -> GateResult:
         return GateResult(False, [
             f"❌ 未能见证有效的红（退出码 {exit_code}）",
             f"   {verdict.reason}",
-        ])
+        ] + _abandon_hint(task))
 
     record_red(task, verdict, frozen)
     lines = [
@@ -800,9 +831,25 @@ def _check_not_witnessed(task: str, target: Path) -> GateResult:
 
 
 _USAGE = ("用法: python3 -m sw_lib.workflow.red_witness <task-name> "
-          "[--phase | --begin | --rewitness <理由>]")
+          "[--phase | --begin | --rewitness <理由> | --abandon-witness <理由>]")
 
-_FLAGS = ("--phase", "--begin", "--rewitness")
+_FLAGS = ("--phase", "--begin", "--rewitness", "--abandon-witness")
+
+
+def _abandon_hint(task: str) -> List[str]:
+    """03a 拒绝时附上的合法出路。
+
+    拒绝必须给下一步 —— A2 的 10.6 第六行已就哈希拒绝判过同一件事：
+    「拦住一条路而不给替代路径，等于把人推向绕过机制」。03a 的拒绝
+    此前一条出路都没给，任务 `helloworld` 因此只能手改 `.state`。
+    """
+    return [
+        "   若本轮确实无法见证红（例如实现已先落盘），走这条显式放弃："
+        f"\n     python3 -m sw_lib.workflow.red_witness {task} "
+        f"--abandon-witness '<为什么见证不到红>'",
+        "   放弃会留痕并把本项记为 unavailable（❓，不是通过），"
+        "测试判定交回常规门禁。",
+    ]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -816,6 +863,8 @@ def main(argv: Optional[List[str]] = None) -> int:
       钩子据此决定要不要把测试判定交回 `run_project_tests`。
       **绝不跑测试**：它在 `set -e` 的钩子里被调用，且 pre 侧只有 30 秒。
     * ``--begin`` —— 显式进入 03a（幂等）。给 `pre_check_03-coding.sh` 用。
+    * ``--abandon-witness <理由>`` —— 放弃本轮见证（理由必填，留痕并计数）。
+      03a 见证不到红时唯一的合法出路；记 `unavailable` 而非通过。
 
     未知标志必须报错退出，不能被当成任务名吞掉 —— 前一版按位置参数解析，
     `--phase` 被当成任务名，钩子读到空串却毫无报错，分流从未生效。
@@ -840,6 +889,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "--rewitness '断言的期望值写错了'\n"
                   "理由会留痕在 .state 里 —— 没有理由的回退，"
                   "与静默改测试没有区别（A2 的 3.4）。", file=sys.stderr)
+            return 2
+    elif "--abandon-witness" in flags:
+        # 理由必填，同 --rewitness：没有理由的放弃，与静默跳过见证无区别。
+        if len(positional) < 2:
+            print("--abandon-witness 必须给出理由，例如：\n"
+                  "  python3 -m sw_lib.workflow.red_witness <task> "
+                  "--abandon-witness '03a 期间实现已落盘，无法再见证红'\n"
+                  "理由会留痕在 .state 里，并作为 unavailable 的原因"
+                  "出现在下游报告中。", file=sys.stderr)
             return 2
     elif len(positional) != 1:
         print(_USAGE, file=sys.stderr)
@@ -871,6 +929,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[Red Witness] 已回退到 03a（第 {record.get('rewitness_count')} 次）")
         print(f"   理由: {reason}")
         print("   冻结哈希已清空，判据节点保留 —— 请改好测试并重新见证到红。")
+        return 0
+
+    if "--abandon-witness" in flags:
+        reason = " ".join(positional[1:]).strip()
+        if not reason:
+            print("--abandon-witness 的理由不能是空串", file=sys.stderr)
+            return 2
+        record = abandon_witness(task, reason)
+        print(f"[Red Witness] 已放弃本轮见证"
+              f"（第 {record.get('abandon_count')} 次）")
+        print(f"   理由: {reason}")
+        print("   phase 已回到 none —— 测试判定交回常规门禁。")
+        print("   本项在下游报告中记为 unavailable（❓），**不是**通过。")
         return 0
 
     result = check_gate(task)

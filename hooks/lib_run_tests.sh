@@ -85,12 +85,51 @@ _project_python() {
     return 0
 }
 
+# 项目有没有 pytest 测试面。返回 0 = 有，1 = 没有。
+#
+# 判据必须与 red_witness._has_pytest_surface 保持一致 —— 两侧错位的后果是
+# A2 的让路路径（--abandon-witness / 非 Python 栈 / 存量任务）把测试判定
+# 「交回 run_project_tests」，而它认不出测试面、直接返回 0，于是让路从
+# 「不接管判定」变成「取消判定」。
+#
+# 现场 bug（任务 helloworld）：布局是 src/*.py + tests/test_*.py，既无
+# pytest.ini 也无 pyproject.toml。旧判据三条全不命中，20 个测试一个没跑，
+# 钩子打印「未发现 pytest 测试面」并放行。见证侧却认得 tests/ ——
+# 同一份代码，两侧结论相反。
+_has_pytest_surface() {
+    local dir="$1"
+    [ -n "$dir" ] && [ -d "$dir" ] || return 1
+
+    # 显式声明用 pytest / setuptools 的项目
+    [ -f "$dir/pytest.ini" ] && return 0
+    [ -f "$dir/pyproject.toml" ] && return 0
+    [ -f "$dir/setup.py" ] && return 0
+    [ -f "$dir/setup.cfg" ] && return 0
+    [ -f "$dir/tox.ini" ] && return 0
+
+    # 顶层 test_*.py / *_test.py
+    ( cd "$dir" && ls test_*.py >/dev/null 2>&1 ) && return 0
+    ( cd "$dir" && ls ./*_test.py >/dev/null 2>&1 ) && return 0
+
+    # tests/ 或 test/ 目录下有 Python 测试文件。
+    # 只认「目录存在」不够：一个空的 tests/ 会让 pytest 报退出码 5
+    # （no tests ran），那时该走「无测试面」而不是「跑了但没测试」。
+    local d
+    for d in tests test; do
+        [ -d "$dir/$d" ] || continue
+        if find "$dir/$d" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
+                -print -quit 2>/dev/null | grep -q .; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_project_tests() {
     local dir="$1"
     local fail_label="${2:-pytest 失败}"
 
-    if [ -f "$dir/pytest.ini" ] || [ -f "$dir/pyproject.toml" ] \
-       || ( cd "$dir" && ls test_*.py >/dev/null 2>&1 ); then
+    if _has_pytest_surface "$dir"; then
         echo "运行 pytest ($dir)..."
         local extra_path
         extra_path=$(_pytest_pythonpath "$dir")
