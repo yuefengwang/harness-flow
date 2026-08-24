@@ -318,14 +318,45 @@ class Verifier:
             except Exception as e:
                 self.check("facts", "tests.json parseable", False, str(e))
 
-        # 03 的结构化声明（A3 的 3.5）。mock 场景下 MockAgent 未必填写，
-        # 所以只要求「字段存在」而不要求非空 —— 但字段缺失说明没人调用
-        # record_claims()，那是真缺口。
+        # 03 的结构化声明（A3 的 3.5）。
+        #
+        # 原判据只要求「字段存在」，理由写的是「mock 未必填写」—— 那条判据
+        # 让空 claims 一路绿到底：实测落盘的是 {'task_ids': [], 'verify_cmd':
+        # '', 'files_touched': []}，字段在、内容空。空 claims 与「没有 claims」
+        # 在下游同义，验收 18 的 claims-vs-diff 对照一次都不会触发。
+        # MockAgent 现已产出结构化声明段，故判据升级为**内容非空**。
         claims = ((self.state().get("stages") or {})
                   .get("03-coding", {}).get("claims"))
         self.check("facts", "03 claims recorded in .state",
                    isinstance(claims, dict),
                    f"claims={claims}" if claims is not None else "claims 字段缺失")
+
+        if isinstance(claims, dict):
+            self.check("facts", "claims declare a task id",
+                       bool(claims.get("task_ids")),
+                       f"task_ids={claims.get('task_ids')}")
+            self.check("facts", "claims declare a verify cmd",
+                       bool(claims.get("verify_cmd")),
+                       f"verify_cmd={claims.get('verify_cmd')!r}")
+
+            declared = claims.get("files_touched") or []
+            self.check("facts", "claims declare files touched",
+                       bool(declared), f"files_touched={declared}")
+
+            # 声明必须对得上真实产出。多报比漏报更危险：对照会通过，
+            # 而它对照的是假数据。
+            target = str(self.state().get("target_dir") or "").strip()
+            if declared and target and target != ".":
+                tdir = Path(target)
+                if not tdir.is_absolute():
+                    tdir = ROOT / tdir
+                if tdir.is_dir():
+                    actual = {p.name for p in tdir.iterdir() if p.is_file()}
+                    fabricated = {d.split("/")[-1] for d in declared} - actual
+                    self.check("facts", "no fabricated files in claims",
+                               not fabricated,
+                               f"声明了未写入的文件: {sorted(fabricated)}"
+                               if fabricated else f"{len(declared)} 项均对得上")
 
     def save_report(self):
         """保存验收报告到任务目录。"""

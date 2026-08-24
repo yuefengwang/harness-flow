@@ -305,10 +305,25 @@ class MockAgent(BaseAgent):
 
         time.sleep(min(self.response_delay, 1.0))
         files_md = "\n".join(f"- `{rel}`" for rel in written) or "- (无)"
+        # 产出必须带模板要求的结构化声明段（Task / Verify cmd / Files Touched），
+        # 否则 03 准出解析出来的 claims 是空的，而 mock 是 e2e 的唯一驱动 ——
+        # 空 claims 与「没有 claims」在下游同义：验收 18 的 claims-vs-diff
+        # 对照一次都不会触发，整条路径能一路绿到底。
+        #
+        # Files Touched 直接由 `written` 生成，不写死：声明一批没写过的文件
+        # 比不声明更糟 —— 对照会通过，而它对照的是假数据。
         self._say(
             "## 🤖 AI Output\n\n"
+            "## Task\n"
+            f"`{self.name}-1`: 按 02-planning 的任务清单完成实现\n\n"
             "### 实现摘要\n"
             "按 02-planning 的任务清单完成实现，并补齐 README 与单元测试。\n\n"
+            "## Red-Green\n"
+            "- [x] **Red**: repro/test fails\n"
+            "- [x] **Green**: fix passes\n"
+            "- **Verify cmd**: `python3 -m pytest -q`\n\n"
+            "## Files Touched\n"
+            f"{files_md}\n\n"
             "### 产出文件\n"
             f"{files_md}\n"
         )
