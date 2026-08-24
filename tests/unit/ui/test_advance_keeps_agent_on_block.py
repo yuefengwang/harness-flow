@@ -24,16 +24,31 @@ def _task_dir():
     """硬校验读的是 `.state`，所以这里要真的签署，而不是往文件里写 `[x]`。
 
     阶段文件仍然写出来（hook 会检查它存在），但里面的勾选不再有任何效力。
+
+    ⚠️ 夹具补了 **AI 产出区**：`check_01-brainstorming.sh` 现在要求产出区
+    存在且有实质内容（`sw_lib/workflow/output_check.py`）。此前只写模板正文
+    就能过闸 —— 那正是任务 helloworld 空转过闸的形状。本文件关心的是
+    「校验未通过时别关掉 agent」，所以要让**硬校验本身通过**，
+    否则测的就不再是原来那件事了。
     """
     d = TASKS / _TASK
     d.mkdir(parents=True, exist_ok=True)
     write_state(_TASK, {"id": _TASK, "stage": "01-brainstorming",
                         "stage_idx": 0, "stage_status": "running"})
+    nonce = ss.issue_output_nonce(_TASK, "01-brainstorming")
     (d / "01-brainstorming.md").write_text(
         "# 01-Brainstorming\n\n"
         "## Design Decision (ADR)\n"
         "- **Proposal**: done\n\n"
-        "## Gate\n"
+        + ss.render_output_block(nonce,
+            "## 需求澄清结果\n\n"
+            "- 功能范围：最小可用的登录与会话管理\n"
+            "- 技术栈：Python + FastAPI，SQLite 存储\n"
+            "- 歧义分数：6/10，已低于目标阈值\n\n"
+            "## 设计决策\n\n"
+            "- 方案：先做单体实现，接口留出替换点\n"
+            "- 理由：规模小，拆分收益不足以抵消复杂度\n")
+        + "\n## Gate\n"
         "- [ ] Design approved\n"
         "- [ ] Ready for Planning\n",
         encoding="utf-8")

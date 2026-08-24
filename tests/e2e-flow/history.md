@@ -34,3 +34,32 @@
 - **根因**: MockAgent review 场景在 AI Output 中写入了 `**建议路由: 05-Archive**`，但未填写模板中的 `- **Route**: ``___``` 字段
 - **修复**: `tests/e2e-flow/driver.py` 在 review 阶段 Agent 完成后、`/advance` 前，直接写入 Route 字段
 - **验证**: `tests/e2e-flow/driver.py` + `verify.py` 全部通过
+
+## 2026-08-24: MockAgent 02/05 产出过薄 + 一条恒真的验收项
+
+- **症状**:
+  1. 给 01/02 补上「产出区必须有实质内容」的硬校验后，e2e 挂在 02-planning：
+     去噪后仅 65 字符，阈值 80。
+  2. 修完继续跑，`WBS items preserved` 打印「0 unchecked WBS items」——
+     而 mock 明明输出了 3 条 WBS 条目。
+- **根因**:
+  1. MockAgent 的 02 产出只有三行 WBS 标题、05 落在 `_scenario_generic`
+     一句「工作已顺利完成」收工（46 字符）。**薄的是 mock，不是阈值太高**：
+     阈值 80 由实测校准（真实产出 200+ / 空转 <30），降它去迎合 mock
+     属于「放宽标准让存量变绿」（A6 的 9.3 禁止）。
+  2. 那条验收项有两个 bug 叠加：`ok` 参数写死成字面量 `True`（数出几条都记
+     `[✓]`）；取产出区用 `split("## 🤖 AI Output")[1]`，而该标题在文件里出现
+     两次（sw 写的 + agent 正文里自己写的），`[1]` 只是中间那行围栏注释。
+     两个 bug 合起来让判据恒真，与本轮修掉的 `grep -q "## Task DAG"` 同类。
+- **修复**:
+  - `sw_lib/agents/mock.py`: 02 产出补齐 Task DAG（含 Deps/Do/Verify）、
+    Test Strategy、Tech Detail 三段（对齐 `fact_pack.build_plan` 的提取标题）；
+    新增 `_scenario_archive` 产出 Summary/Memory/Retro。WBS 条目保持 `[ ]`。
+  - `tests/e2e-flow/verify.py`: 新增 `output_region()` 按围栏 nonce 取产出区；
+    WBS 判据改为「至少一条未勾选且零条已勾选」的真判断。
+  - 判据：`tests/unit/agents/test_mock_output_substance.py`（14 项，复用
+    `check_output` 本身当尺子并要求 20% 余量）、
+    `tests/unit/agents/test_e2e_verify_no_tautology.py`（3 项，源码级扫描
+    `self.check` 的 `ok` 不得为字面量 `True`）。
+- **验证**: `driver.py` 45/45 通过（原 44 项，新增「产出区按围栏定位」一项）；
+  `python3 -m pytest tests/unit -q` 1428 passed

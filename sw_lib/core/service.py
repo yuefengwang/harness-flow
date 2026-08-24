@@ -58,7 +58,14 @@ def _write_context_marker(target_dir: str, project_name: str, task_type: str):
     marker_dir = _prepare_target_dir(target_dir)
     marker = {
         "project": project_name,
-        "target_dir": str(marker_dir.resolve()),
+        # 与 `.state` 保持**同一种表示法**：原样存传入的 target_dir。
+        #
+        # 此前这里用 `.resolve()` 存绝对路径，而 `.state` 存相对路径 ——
+        # 同一个概念两种写法。agent 读到 `.sw-context` 的绝对路径后，
+        # 在自己的 cwd（就是该目录）里又拼了一层，于是探路全部落空
+        # （任务 helloworld 实测）。表示法不一致本身就是故障源，
+        # 哪一种都可以，但必须只有一种。
+        "target_dir": target_dir,
         "type": task_type,
         "created": now(),
     }

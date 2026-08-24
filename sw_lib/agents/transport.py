@@ -66,6 +66,27 @@ class OpenCodeTransport:
     #
     # 改动它必须同时维持超时层级（见 tests/unit/agents/test_timeout_hierarchy.py）。
     CHAT_TIMEOUT = 900.0
+
+    # 空闲上限（秒）：距**上次观测到活动**多久没动静就算卡住。
+    #
+    # 为什么需要它 —— CHAT_TIMEOUT 是墙上时钟，它无法区分下面两件事：
+    #   - agent 卡在权限 ask 上，0 次工具调用，一直不动（F11 的 26 分钟）
+    #   - agent 在写第 5 个测试文件，39 次工具调用稳步推进（helloworld）
+    # 两者在墙上时钟看来都只是「这一轮很久」，于是只能靠调大常数来避免
+    # 误杀，而调大常数又让真死锁沉默更久。两次事故（ttt 300→900、
+    # helloworld 900 又被砍）都是这个形状。
+    #
+    # 取 300s 的依据是三条实测边界：
+    #   - 下界 A：helloworld 实测工具调用最大间隔 92s（跑 pytest + LLM 往返），
+    #     取两倍余量 → ≥ 184s
+    #   - 下界 B：必须大于 QUESTION_TIMEOUT(180s) —— 等真人回答期间 agent
+    #     本来就不动，那是在等人不是卡住（helloworld 里用户想了 65 秒）
+    #   - 上界：< CHAT_TIMEOUT(900s)，否则这一层不产生任何新信息
+    #
+    # 关系由 tests/unit/agents/test_idle_based_timeout.py 锁定 ——
+    # 锁的是**关系与区间**而非具体数字，教训见
+    # test_timeout_hierarchy.py 第一条（曾把待标定取值写成 == 300.0）。
+    IDLE_TIMEOUT = 300.0
     HEALTH_TIMEOUT = 10.0          # 健康检查超时
     ABORT_TIMEOUT = 10.0           # 中止会话超时
     STARTUP_TIMEOUT = 60.0         # 启动总超时（秒）
@@ -102,11 +123,43 @@ class OpenCodeTransport:
         # 事件泵观察到的工具调用序列。用途只有一个：超时/失败时能说清
         # 「它当时干到哪了」，把「卡死」与「正在干活被砍」区分开。
         self._observed_tools: List[str] = []
+        # 活动时间戳用单调时钟：系统时间被改（NTP 校正、手动调整）不应
+        # 让一个正常会话突然被判成空闲。
+        self._last_activity_at: float = time.monotonic()
+        self._last_activity_what: str = ""
 
     # ── 公开属性 ──
     @property
     def server_url(self) -> Optional[str]:
         return self._server_url
+
+    # ── 活动观测（空闲判据的事实来源）──
+    #
+    # 与 A6 的客观轨同一条思路：判据取 harness **自己观测到**的事实
+    # （SSE 事件流里的工具调用），不取 agent 的自述。
+
+    @property
+    def last_activity_at(self) -> float:
+        """上次观测到活动的时间戳（单调时钟）。"""
+        return self._last_activity_at
+
+    def note_activity(self, what: str = "") -> None:
+        """记下一次活动。由 SSE 事件处理在观测到工具调用时调用。"""
+        self._last_activity_at = time.monotonic()
+        if what:
+            self._last_activity_what = what
+
+    def idle_seconds(self) -> float:
+        """距上次活动的秒数。**不是**会话总时长。"""
+        return max(0.0, time.monotonic() - self._last_activity_at)
+
+    def is_idle(self) -> bool:
+        """是否已超过空闲上限没有任何动静。
+
+        用它可以在 CHAT_TIMEOUT 到期**之前**就区分开「卡住」与「在干活」，
+        从而让超时报错说出正确的诊断，而不是让读者去翻服务端日志。
+        """
+        return self.idle_seconds() > self.IDLE_TIMEOUT
 
     @property
     def observed_tools(self) -> List[str]:
@@ -338,11 +391,31 @@ class OpenCodeTransport:
             progress = (f"超时前已完成 {len(done)} 次工具调用"
                         f"（{', '.join(done[-5:])}）" if done
                         else "超时前未观察到任何工具调用")
+
+            # 诊断由**空闲时长**给出，不再让读者自己判断。
+            #
+            # 此前这里只说「若仍在推进说明上限偏小；若长时间无调用才是真卡住」
+            # —— 把判断推给读者，而判断所需的信息（距上次活动多久）恰恰只有
+            # harness 掌握。任务 helloworld 因此被误读成「模型卡住了」，
+            # 实际是最后一次工具调用距断开仅 5 秒。
+            idle = self.idle_seconds()
+            if idle > self.IDLE_TIMEOUT:
+                diagnosis = (
+                    f"  诊断：**疑似卡住** —— 距上次活动已 {idle:.0f}s"
+                    f"（超过空闲上限 {self.IDLE_TIMEOUT:.0f}s）。"
+                    f"常见成因是等待某个无人应答的审批或输入。")
+            else:
+                diagnosis = (
+                    f"  诊断：**agent 当时仍在推进** —— 距上次活动仅 {idle:.0f}s"
+                    f"（未达空闲上限 {self.IDLE_TIMEOUT:.0f}s），"
+                    f"是被墙上时钟上限切断的，不是卡死。\n"
+                    f"  这一轮的工作量超出了单轮上限：请把任务拆小，"
+                    f"或调高 CHAT_TIMEOUT（当前 {self.CHAT_TIMEOUT:.0f}s）。")
+
             raise OpenCodeTransportError(
                 f"opencode 响应超时（CHAT_TIMEOUT={self.CHAT_TIMEOUT:.0f}s）: {url}\n"
                 f"  {progress}\n"
-                f"  若 agent 仍在正常推进，说明上限偏小；"
-                f"若长时间无工具调用，才是真卡住。"
+                f"{diagnosis}"
             )
         except requests.HTTPError as e:
             body = ""
@@ -527,6 +600,11 @@ class OpenCodeTransport:
                                         if (name and name != "invalid"
                                                 and name not in self._observed_tools):
                                             self._observed_tools.append(name)
+                                        # 每次观测到工具调用都刷新活动时间，
+                                        # 包括重复调用同一个工具 —— 判「还在
+                                        # 动」看的是有没有新事件，不是有没有
+                                        # 新工具种类。
+                                        self.note_activity(name)
                                         # 记录与回调分开：进展记录是诊断设施，
                                         # 不该因为没人订阅 on_tool 就丢失。
                                         if on_tool:

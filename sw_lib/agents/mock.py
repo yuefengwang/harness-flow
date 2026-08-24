@@ -154,6 +154,8 @@ class MockAgent(BaseAgent):
                 self._scenario_coding()
             elif stage_key == "04-review":
                 self._scenario_review()
+            elif stage_key == "05-archive":
+                self._scenario_archive()
             else:
                 self._scenario_generic(stage_key)
                 
@@ -275,15 +277,43 @@ class MockAgent(BaseAgent):
         self._say(output)
 
     def _scenario_planning(self):
+        """02-planning 场景：产出规划阶段真正要交的三段。
+
+        原产出只有三行 WBS 标题，去噪后 65 字符 —— 本轮给 01/02 补上
+        「产出区必须有实质内容」的硬校验（阈值 80，实测校准）之后，e2e 立刻
+        挂在这里。阈值不动：那是「放宽标准让存量变绿」（A6 的 9.3）。
+        薄的是 mock —— 一个连自家门禁都过不了的驱动测不出任何东西。
+
+        段落形态对齐 `templates/02-planning.md`：Task DAG（含 Deps/Do/Verify）、
+        Test Strategy、Tech Detail。这不是为了凑字数 ——
+        `fact_pack.build_plan` 正是按这几个标题关键词提取规划事实喂给设计
+        审查轨，标题对不上它拿到的就是空段。
+
+        WBS 条目刻意保持 `[ ]`：e2e 有一条判据在确认产出区里的 `[ ]` 没被
+        全局替换污染，mock 自己输出 `[x]` 会让那条判据当场失效。
+        """
         self._say("正在基于 Brainstorming 的结论拆解任务清单...")
         self._pause(2)
-        
+
         output = (
             "## 🤖 AI Output\n\n"
-            "### 任务拆解 (WBS)\n"
-            "1. [ ] 定义数据模型\n"
-            "2. [ ] 实现核心 Service\n"
-            "3. [ ] 编写单元测试\n"
+            "### 任务拆解 (WBS) / Task DAG\n"
+            "1. [ ] **Task 1**: 定义数据模型 | Deps: None\n"
+            "   - **Do**: 按需求确定字段与约束，落成模块内的数据结构\n"
+            "   - **Verify**: 导入模块，构造样例数据无异常\n"
+            "2. [ ] **Task 2**: 实现核心 Service | Deps: Task 1\n"
+            "   - **Do**: 基于数据模型实现业务入口函数，保持接口层与逻辑分离\n"
+            "   - **Verify**: 调用入口函数，返回值符合预期\n"
+            "3. [ ] **Task 3**: 编写单元测试 | Deps: Task 2\n"
+            "   - **Do**: 覆盖正常路径与边界输入\n"
+            "   - **Verify**: `python3 -m pytest -q` 全绿\n\n"
+            "### Test Strategy\n"
+            "- **Method**: unit（核心逻辑）+ manual（一次端到端手动确认）\n"
+            "- **Key path**: 入口函数 → 数据模型 → 返回结果\n"
+            "- **Repro script**: `python3 -m pytest -q`\n\n"
+            "### Tech Detail\n"
+            "- **Key types/interfaces**: 单模块导出一个纯函数入口，无全局状态\n"
+            "- **Files to touch**: 实现模块、对应测试模块、README\n"
         )
         self._say(output)
 
@@ -458,7 +488,44 @@ class MockAgent(BaseAgent):
 
         self._say(self.role_flavored_output(output))
 
+    def _scenario_archive(self):
+        """05-archive 场景：产出 Summary / Memory / Retro 三段。
+
+        改前归档阶段落在 `_scenario_generic`，一句「工作已顺利完成」就收工
+        （去噪后 46 字符）—— 归档等于没被 e2e 覆盖过，而 `check_05-archive.sh`
+        正在 grep 这三个章节（目前只 warn 不 fail，但那是钩子宽松，
+        不是产出该薄的理由）。
+
+        章节名沿用 `templates/05-archive.md` 的英文标题：归档记录会被
+        `_perform_archival` 复制进 docs/history，标题是那边的检索锚点。
+        """
+        self._say("正在汇总本次任务的交付内容与经验...")
+        self._pause(2)
+
+        output = (
+            "## 🤖 AI Output\n\n"
+            "### Summary\n"
+            f"- **Delivered**: 任务 `{self.name}` 的最小可运行实现，含单元测试与 README\n"
+            "- **Key changes**: 新增实现模块与对应测试，补齐用法说明\n\n"
+            "### Memory\n"
+            "- **Learnings/pitfalls**: 阶段产出要直接写在回复正文里，"
+            "记账文件由 harness 维护，agent 无权改写\n"
+            "- **Patterns to promote**: 先写测试再写实现，验证命令随产出一并声明\n\n"
+            "### Retro\n"
+            "| Faster | Slower | Fix |\n"
+            "|--------|--------|-----|\n"
+            "| 需求澄清一次问清 | 环境路径确认耗时 | 启动时打印工作目录 |\n\n"
+            "### Cleanup\n"
+            "- 临时文件已清理，日志已归档\n"
+        )
+        self._say(output)
+
     def _scenario_generic(self, stage_key: str):
+        """没有专属脚本的阶段的兜底。
+
+        目前五个阶段都有专属场景，这条路不该再被走到 —— 保留它是为了
+        「新增阶段时不至于整轮崩掉」，而不是给某个阶段当长期实现。
+        """
         stage_name = STAGE_NAMES[self.stage_idx] if self.stage_idx < len(STAGE_NAMES) else stage_key
         self._say(f"正在执行 {stage_name} 阶段的自动化工作...")
         self._pause(2)

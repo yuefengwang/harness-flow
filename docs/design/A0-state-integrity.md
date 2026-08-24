@@ -361,6 +361,40 @@ base.py agent 跑完 → 翻 stage_status=idle（读旧快照，整体写回）
 > 与 2.9.5 的教训同构：两次假绿都源于**把「什么都没发生」当成「通过」**。
 > 线程内异常、模型未调用工具，都属于这一类。
 
+### 2.9.7 任务 helloworld 的现场：七处「指令与约束互不校验」（已修）
+
+用户运行任务 `helloworld`（真实 opencode 会话）后交出完整日志。前一轮已修掉
+03a 的死锁（A2 的 10.6 末两行），本节记的是**同一份日志里剩下的七处** ——
+它们的共同形状是：**指令（prompt）与约束（权限规则 / 门禁判据）由两套独立
+代码维护，彼此从不校验**。于是 harness 一边要求 agent 做某件事，一边在硬层
+禁止它，或者一边宣称检查过，一边判据恒真。
+
+| # | 现场证据 | 根因 | 处置与判据 |
+|---|---|---|---|
+| 1 | 日志里 `invalid {'tool': 'bash', 'error': "Model tried to call unavailable tool 'bash'"}`，以及五个阶段模板都写着 `ask_user` | `ask_user` 是 harness 的抽象名（`TOOL_MAP` 的**键**），agent 只能调 opencode 原生名 `question`。prompt 写的是抽象名，每次必撞 `invalid tool` | 新增 `PromptBuilder.describe_tools(stage, role_id)`，从 `TOOL_MAP` **推导**原生名下发，不写死文案；五个模板 + `system.yaml` 改为 `question`。判据 `test_prompt_tool_contract.py` |
+| 2 | 01 阶段模板区全是 `___`，agent 从未写成功过一次 | 01 prompt 命令「用 `write_file` 回填 `workspace/tasks/{task}/01-brainstorming.md`」，而 `_permission_rules()` 对 `workspace/**` 的 write/edit **一律 deny** —— **成功率恒为 0** 的指令 | 删掉该指令，改为「产出直接写在回复正文里」并列出应含结构。产出区由 harness 落盘，agent 无需也无权改那个文件 |
+| 3 | 8 次 read/glob 打空，路径形如 `repo/helloworld/repo/helloworld` | prompt 告知「代码生成目录: repo/helloworld」（harness 相对路径），而 agent 的 cwd **就是**该目录 | `_build_project_info()` 改为「你当前的工作目录就是本任务的代码目录」，**不给任何路径**；`_write_context_marker` 去掉 `.resolve()`，与 `.state` 同一表示法。判据 `test_prompt_path_frame.py` |
+| 4 | 01/02 两阶段模板区全是 `___` 与空表格，却双双过闸并推进到 03 | `check_01` 只验「文件存在 + gate 已签署」；`check_02` 只 `grep -q "## Task DAG"` —— **那个标题是模板自带的，判据恒真**，且它**完全没验 gate 签署**（实测未签署也能过闸） | 新增 `sw_lib/workflow/output_check.py`：产出区（nonce 围栏内）必须有实质内容，阈值 80 由实测校准（真实产出去噪后 303 字符，空转 <30）。两个钩子接入，`check_02` 补上 gate 检查。判据 `test_early_stage_output_check.py` |
+| 5 | 日志里 `todowrite` 出现 9 次、还有 `skill` 与 `invalid` | `_MANAGED_TOOLS` 只列 9 个，这三个都不在其中 —— harness 对它们的存在毫无记录 | 新增 `_UNMANAGED_TOOLS` 并逐个写明为什么不管；`skill` 标注为**风险最高**（来自用户全局 `.agents/`），是知情选择而非遗漏。判据 `test_managed_tool_coverage.py` |
+| 6 | 03 阶段 opencode 就绪 10:00:40，**最后一次工具调用在 +895s**，+900s 断开 —— 距上次活动仅 **5 秒** | `CHAT_TIMEOUT` 是**墙上时钟**，区分不出「卡死」与「在干活」。同类事故已两次（任务 `ttt` 300→900、`helloworld` 900 又砍一次），每次只是把数字调大 | 新增 `IDLE_TIMEOUT = 300.0` 与 `note_activity()` / `idle_seconds()`，用 `time.monotonic()`；取值三条边界：≥ 实测最大工具间隔 92s 的两倍、> `QUESTION_TIMEOUT`(180s)、< `CHAT_TIMEOUT`(900s)。超时报错改为**由空闲时长给出诊断**。判据 `test_idle_based_timeout.py`（**只锁关系与区间，不锁数值** —— 教训见 `test_timeout_hierarchy.py` 第一条） |
+| 7 | 修完 4 之后 e2e 挂在 02：产出去噪后仅 65 字符；修完继续跑，`WBS items preserved` 打印「0 unchecked」而 mock 明明输出 3 条 | ① MockAgent 的 02 产出只有三行 WBS 标题、05 落在 `_scenario_generic` 一句话收工 —— **mock 薄得过不了自家门禁**；② 那条 e2e 验收项 `ok` 参数写死成字面量 `True`，且按 `## 🤖 AI Output` 标题 split 取 `[1]`（该标题在文件里出现两次，`[1]` 只是中间的围栏注释行）—— 两个 bug 叠成恒真判据 | mock 的 02 补齐 Task DAG / Test Strategy / Tech Detail（对齐 `fact_pack.build_plan` 的提取标题），新增 `_scenario_archive`；`verify.py` 新增 `output_region()` 按围栏 nonce 取产出区，WBS 判据改为真判断。判据 `test_mock_output_substance.py`（复用 `check_output` 本身当尺子并要求 20% 余量）、`test_e2e_verify_no_tautology.py`（源码级扫描 `ok` 不得为字面量 `True`） |
+
+**第 7 项走到过一个岔路口，值得单独记**：e2e 卡在 `65 < 80` 时，把阈值降到 65
+是一步就能变绿的改法。但阈值是实测校准出来的（真实 200+ / 空转 <30），
+为迁就 mock 去动它，等于**让 e2e 反过来定义什么算「有产出」**——
+正是 A6 的 9.3 明令禁止的「放宽标准让存量变绿」。定案是补 mock：
+一个连自家门禁都过不了的驱动，测不出任何有价值的东西。
+
+> 本节与 2.9.5 / 2.9.6 的教训同构，但换了一个方向：那两条是「把什么都没发生
+> 当成通过」，这七条是**「把彼此矛盾的两套规则各自当成正确」**。
+> 单元测试对后者结构性失明 —— 它们各自都有测试，各自都绿。
+> 第 1、2、4 项在真实会话里已经连续失败了整整一个任务的生命周期，
+> 而 1400+ 条单元测试全程无一变红。**这是「单元全绿 ≠ 机制接通」的第五次**
+> （前四次见 A2 的 10.5）。共同解法只有一条：**为「指令与约束一致」本身写
+> 判据**，而不是分别测试指令和约束。
+
+---
+
 ---
 
 ## 2.8 实施中发现的自伤缺陷（D0-1 的漏洞，已修）

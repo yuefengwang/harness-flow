@@ -33,6 +33,7 @@ class PromptBuilder:
         stage: str,
         stage_idx: int,
         previous_output: Optional[Dict[str, Any]] = None,
+        role_id: Optional[str] = None,
     ) -> Optional[str]:
         """Build the complete agent prompt for a stage.
 
@@ -55,6 +56,13 @@ class PromptBuilder:
         orchestration = self.registry.get_system_rules()
         if orchestration:
             parts.append(orchestration)
+
+        # 工具说明必须在规则之后、任务内容之前：先让模型知道自己能调什么，
+        # 再给它规则。缺了这段，模型只能靠猜，然后撞 invalid tool
+        # （任务 helloworld 的 `ask_user` / `bash` 两次）。
+        tools_desc = self.describe_tools(stage, role_id=role_id)
+        if tools_desc:
+            parts.append(tools_desc)
 
         project_info = self._build_project_info(task_name)
         if project_info:
@@ -87,15 +95,72 @@ class PromptBuilder:
 
         return "\n\n".join(parts)
 
+    def describe_tools(self, stage: str, role_id: Optional[str] = None) -> str:
+        """如实告知本阶段可调用的工具（按 role 解析后的真实工具面）。
+
+        存在的理由是任务 `helloworld` 的两条现场：
+
+        * prompt 写「**必须**使用 `ask_user`」，而那是 harness 的**抽象名**，
+          agent 侧真实工具叫 `question`。模型照 prompt 调用，先撞一次
+          `invalid tool 'ask_user'` 才纠正。
+        * 01 阶段的 analyst 没有 `run_command`，prompt 里没有任何地方说明
+          本阶段能用什么，于是模型尝试 `bash` 又撞一次 `invalid`。
+
+        所以工具名**必须从 `TOOL_MAP` 推导**而不是写死在文案里：映射表是
+        权限规则实际使用的那一份（`_tool_switches()` 也读它），两边共用
+        一个来源，就不会各自漂移。
+
+        `role_id` 透传给 `get_tools_for_stage`，因此多角色审查（A4/A5）下
+        每个角色看到的是自己那份权限，而不是 stage 默认角色的。
+        """
+        from ..agents.opencode import TOOL_MAP
+        from ..core.config import get_tools_for_stage
+
+        try:
+            allowed = list(get_tools_for_stage(stage, role_id=role_id) or [])
+        except Exception:
+            # 解析失败时**不猜**：给一句明确的「未知」比编一份工具清单安全。
+            # 编出来的清单会让模型去调不存在的工具，正是这段要消除的故障。
+            return ("=== 可用工具 ===\n"
+                    "（本阶段工具面解析失败 —— 请只使用你确认可用的工具，"
+                    "不要凭猜测调用。）")
+
+        # 抽象名 → agent 真能调用的原生名。顺序稳定，便于判据与人眼比对。
+        lines = ["=== 可用工具（本阶段实际生效，调用时请用下列名字）==="]
+        for harness_tool in sorted(allowed):
+            native = TOOL_MAP.get(harness_tool, ())
+            if not native:
+                continue
+            shown = " / ".join(f"`{n}`" for n in native)
+            lines.append(f"- {harness_tool}: {shown}")
+
+        lines.append("")
+        lines.append("未列出的工具本阶段**不可用** —— 调用它只会拿到 "
+                     "invalid tool，请勿尝试。")
+        return "\n".join(lines)
+
     def _build_project_info(self, task_name: str) -> Optional[str]:
+        """项目信息段。**不给路径，只说参照系**。
+
+        原实现把 `.state` 里的 `target_dir`（harness 相对路径，如
+        `repo/helloworld`）直接写进 prompt。而 agent 的 cwd 已经**就是**
+        那个目录（`OpenCodeAgent._default_workdir`），于是它把这行理解成
+        「cwd 下还有一层 repo/helloworld」，一连串 read/glob 全打在空处
+        （任务 helloworld 实测 8 次）。
+
+        与 `_read_hook_rules` 的自足化同一条纪律：agent 需要的是能直接用的
+        信息，不是需要它自己换算参照系的路径。cwd 就是目标目录，说这句即可。
+        """
         st = read_state(task_name)
         target_dir = st.get("target_dir", "")
         if not target_dir:
             return None
         return (
             "=== 项目信息 ===\n"
-            f"代码生成目录: {target_dir}\n"
-            "所有的业务代码、模板、静态文件等都应生成到此目录下。"
+            "**你当前的工作目录就是本任务的代码目录。**\n"
+            "所有业务代码、模板、静态文件都直接写在当前工作目录下"
+            "（用相对路径，例如 `src/main.py`、`tests/test_main.py`）。\n"
+            "不要在当前目录下再创建以任务名或 `repo/` 开头的子目录。"
         )
 
     def _read_global_rules(self) -> Optional[str]:

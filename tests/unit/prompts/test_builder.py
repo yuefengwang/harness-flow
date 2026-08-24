@@ -102,9 +102,24 @@ class TestPromptBuilder:
         assert "前一阶段产出" in output
 
     def test_builder_includes_project_info(self, task_setup, builder):
-        """Project info (target_dir) is injected into prompt."""
+        """项目信息段必须存在，且用 **agent 的参照系**表述目标目录。
+
+        ⚠️ 本条是对初版的**显式重做**（DEV-PROTOCOL 1.2）。初版断言
+        `"repo/test-project" in output` —— 即要求把 `.state` 里的
+        `target_dir`（harness 相对路径）原样注入 prompt。那个前提本身是错的：
+
+        agent 的 cwd 已经**就是**该目录（`OpenCodeAgent._default_workdir`），
+        再告诉它「代码生成目录: repo/test-project」，它只能理解成 cwd 下还有
+        一层同名目录。任务 helloworld 因此连续 8 次 read/glob 打在空处。
+
+        判据改为：项目信息段存在、并且**不**把 harness 相对路径交给 agent。
+        完整契约见 `test_prompt_path_frame.py`。
+        """
         output = builder.build(task_setup, "01-brainstorming", 0)
-        assert "repo/test-project" in output
+        assert "项目信息" in output, "项目信息段整段消失了"
+        assert "repo/test-project" not in output, (
+            "harness 相对路径被原样注入 prompt —— agent 的 cwd 就是该目录，"
+            "它会再拼一层")
 
     def test_builder_includes_hook_rules(self, task_setup, builder):
         """Hook rules from hooks/{stage}.md are injected."""

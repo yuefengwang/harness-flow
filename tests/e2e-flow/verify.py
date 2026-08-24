@@ -50,6 +50,24 @@ class Verifier:
         f = self.task_dir / f"{stage}.md"
         return f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
 
+    def output_region(self, stage: str) -> str:
+        """按 sw 写的围栏取出产出区正文；没有产出区返回空串。
+
+        不能按 ``## 🤖 AI Output`` 标题 split：那个标题在文件里出现两次
+        （sw 写的那个 + agent 在正文里自己写的那个），split 出来的 ``[1]``
+        只是夹在两者之间的围栏注释行，正文全在后面。围栏标记带 nonce、
+        agent 猜不到，是唯一可靠的边界。
+        """
+        content = self.stage_file(stage)
+        m = re.search(r"<!-- sw:ai-output:start ([0-9a-f]{8,}) -->", content)
+        if not m:
+            return ""
+        end = f"<!-- sw:ai-output:end {m.group(1)} -->"
+        e = content.rfind(end)
+        if e < m.end():
+            return ""
+        return content[m.end():e]
+
     def state(self) -> dict:
         sf = self.task_dir / ".state"
         if sf.exists():
@@ -197,15 +215,29 @@ class Verifier:
         # 02-planning
         sf02 = self.stage_file("02-planning")
         if sf02:
-            # 检查 WBS 条目（AI Output 中的 [ ]）未被替换
-            if "## 🤖 AI Output" in sf02:
-                ai_part = sf02.split("## 🤖 AI Output")[1]
-                wbs_unchecked = re.findall(r"^\d+\.\s*\[ \]", ai_part, re.MULTILINE)
-                # 允许 AI Output 中有未勾选的 WBS 条目
-                # （这些是 MockAgent 输出的，不是模板 checkbox）
-                self.check("02-planning", "WBS items preserved (unchecked OK)",
-                           True,
-                           f"{len(wbs_unchecked)} unchecked WBS items (expected)")
+            # 产出区里的 WBS 条目必须保持 `[ ]` 原样。
+            #
+            # 这条判据守的是「产出区不被全局 [ ]→[x] 替换污染」（历史事故：
+            # 模板 checkbox 的勾选逻辑误伤了 AI Output 区）。
+            #
+            # 改前它有两个 bug 叠在一起，合起来让判据恒真：
+            #   1. ok 参数写死成 True —— 数出几条都记 [✓]；
+            #   2. 按 `## 🤖 AI Output` 标题 split 取 [1] —— 那个标题出现两次
+            #      （sw 写的 + agent 正文里自己写的），[1] 只是中间那行围栏
+            #      注释，正文一个字都没取到。
+            # 症状是它打印「0 unchecked WBS items」而 mock 明明输出了 3 条。
+            region = self.output_region("02-planning")
+            self.check("02-planning", "Output region located by fence",
+                       bool(region.strip()),
+                       "围栏内取不到产出正文" if not region.strip() else "")
+            if region.strip():
+                unchecked = re.findall(r"^\d+\.\s*\[ \]", region, re.MULTILINE)
+                checked = re.findall(r"^\d+\.\s*\[[xX]\]", region, re.MULTILINE)
+                self.check("02-planning", "WBS items preserved unchecked",
+                           bool(unchecked) and not checked,
+                           f"{len(unchecked)} unchecked / {len(checked)} checked"
+                           + ("（产出区的 WBS 被勾选了，疑似全局替换误伤）"
+                              if checked else ""))
 
         # 04-review
         sf04 = self.stage_file("04-review")

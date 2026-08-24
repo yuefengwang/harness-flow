@@ -60,6 +60,36 @@ _MANAGED_TOOLS: Tuple[str, ...] = (
     "list", "glob", "read", "grep", "write", "edit", "apply_patch", "bash", "question",
 )
 
+# agent 实际能调用、但 harness **有意不托管**的工具。
+#
+# 这份名单的作用是「知情地放行」而不是豁免。任务 helloworld 的日志里出现了
+# 三个当时既不在 `_MANAGED_TOOLS`、也没有任何记录的工具 —— harness 对自己
+# 的约束面缺乏自知。A4 的 1.3 已声明「只解析权限、不实施」，A0 的 2.9.5 又
+# 实测 `bash` 能绕过路径 deny；在此之上若连「有哪些工具存在」都不掌握，
+# 「纯只读的 design_critic」这类声明就失去依据。
+#
+# 逐个说明为什么不管：
+#
+# * `todowrite` —— opencode 自带的待办清单，纯会话内状态，不触碰文件系统
+#   也不执行命令。helloworld 里被调了 9 次（模型自己的冗余行为），无害。
+#   托管它只会多一条永远 allow 的规则。
+# * `skill` —— **风险最高的一个**。它能加载任意技能包（helloworld 里加载了
+#   `using-superpowers`），是一个 harness 既不知道内容、也无法约束的能力
+#   入口。来源是用户全局的 `.agents/` 配置，不是 harness 下发的。
+#   这里**不**托管它，理由是：opencode 的技能机制在服务端展开，session
+#   规则拦不住它加载什么；真正的边界仍然是 write/edit 的路径 deny 与
+#   evidence 的 HMAC 校验（与 `bash` 同理，纪律 2）。
+#   ⚠️ 登记在此是为了留痕：这是知情的选择，不是遗漏。
+# * `invalid` —— 不是真工具，是 opencode 在模型调用不存在的工具时回给的
+#   合成事件（`{'tool': 'bash', 'error': "...unavailable tool..."}`）。
+#   它的出现本身就是「prompt 与工具面不一致」的信号，
+#   现已由 `tests/unit/prompts/test_prompt_tool_contract.py` 从源头拦住。
+_UNMANAGED_TOOLS: Tuple[str, ...] = (
+    "todowrite",
+    "skill",
+    "invalid",
+)
+
 # 非工具类权限：opencode 的内置 agent 默认表里就写着 `ask`，因此**必须**由
 # session 规则显式压掉，否则触发即死锁（任务 newtask 实测卡死 26 分钟）。
 #
