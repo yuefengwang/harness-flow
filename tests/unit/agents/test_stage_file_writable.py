@@ -160,17 +160,31 @@ def test_non_stage_files_under_task_dir_stay_denied():
             f"放行溢出到了 {name}"
 
 
-def test_readonly_stage_still_cannot_write_stage_file():
-    """只读阶段（04-review）不因这次放行而获得写权限。
+def test_review_stage_file_is_writable_but_criteria_are_not():
+    """04-review 的阶段文件可写，判据目标仍然不可写。
 
-    04 的 reviewer 拿到的是事实包，它的产出同样由 harness 落盘。
-    给它写权限会让「审查者不修改被审对象」这条失去硬层支撑。
+    ⚠️ **判据重做**（DEV-PROTOCOL 1.2）。本函数初版叫
+    `test_readonly_stage_still_cannot_write_stage_file`，断言 04 不可写，
+    理由是「审查者不修改被审对象」。任务 `qqqq` 推翻了那个前提：客观轨 O6
+    要求 `repo/<task>/README.md` 存在，而 04 没有写权限、03 的 prompt 又不提
+    README —— 要求在 04 兑现、能力只在 03 存在，两次 `/advance` 输出逐字相同
+    （A0 的 2.9.11）。用户拍板给 reviewer `write_file`。
+
+    「审查者不修改被审对象」这条纪律并没有废掉，只是换了兑现方式：
+    从「整个阶段不能写」收窄成「写不到判据」。真正会让审查失去意义的是
+    reviewer 能改 `.state`（自己签 Gate、改 red_witness 的 unavailable），
+    那部分仍然 deny。
     """
     rules = _rules(stage="04-review", task="ppppp")
 
     assert _verdict(rules, "write",
-                    "workspace/tasks/ppppp/04-review.md") != "allow", \
-        "只读阶段被放开了 write"
+                    "workspace/tasks/ppppp/04-review.md") == "allow", \
+        "04 的阶段文件不可写 —— 与 01/02/03 不一致，且 O6 无人能过"
+
+    for path in ("workspace/tasks/ppppp/.state",
+                 "workspace/tasks/ppppp/facts/tests.json"):
+        assert _verdict(rules, "write", path) == "deny", \
+            f"04 的写权限溢出到判据目标: {path}"
 
 
 # ── 既有纪律不得被这次改动破坏 ──

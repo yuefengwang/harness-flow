@@ -198,6 +198,13 @@ for c in r["checks"]:
             "unavailable": "❓"}.get(c["verdict"], "?")
     tail = c.get("detail") or c.get("reason") or ""
     print(f"  {icon} {c["id"]} {c["name"]}: {c["verdict"]} {tail}")
+    # 硬失败时 detail 与 reason **都要打**。原先是 `detail or reason`，
+    # 于是同时有两者的项（O6）永远只显示 detail —— 「缺 README」说了是什么，
+    # 没说谁去修。任务 qqqq 的两次 /advance 输出逐字相同即由此而来：
+    # 拦住一条路却不给替代路径（A2 的 10.6）。
+    hint = c.get("reason") or ""
+    if c["verdict"] == "fail" and hint and hint != c.get("detail"):
+        print(f"     ↳ {hint}")
 print("HARD_FAIL_IDS=" + ",".join(r["hard_fail_ids"]))
 sys.exit(1 if r["hard_fail"] else 0)
 ' "$TASK_NAME" "${TEST_DIR:-}" 2>&1) && OBJ_RC=0 || OBJ_RC=$?

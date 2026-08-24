@@ -567,6 +567,55 @@ def extract_claims(text: str) -> Dict[str, Any]:
     return {"task_ids": task_ids, "verify_cmd": verify_cmd, "files_touched": files}
 
 
+def extract_claims_from_stage_file(content: str) -> Dict[str, Any]:
+    """从整个 03 阶段文件解析声明：**围栏区优先，模板区回落**。
+
+    任务 `qqqq` 的现场：agent 把三个文件名规规矩矩填进了模板区的
+    `## Files Touched`，而原实现只解析围栏内的产出区，于是 `.state` 里
+    claims 为 `null`、O5 记 `unavailable`（A0 的 2.9.9 第 3 条）。
+    声明就在眼前，判据却说「未声明」。
+
+    只读围栏区在当时是对的 —— 那会儿模板区 agent **写不进去**
+    （`workspace/**` 整段 deny），能出现在那里的只有未回填的占位符。
+    上一轮放行阶段文件、并在 prompt 里明确要求回填之后，前提就变了：
+    模板区成了 agent 的正式落点。继续只读围栏等于让它按要求做事，
+    然后判它没做。
+
+    **顺序不能反。** 围栏区由 sw 落盘、nonce 不可预测，可信度高于模板区
+    （后者 agent 可任意改写）。若模板区优先，agent 在模板里写一份好看的
+    清单、在产出里写另一份，我们会取到前者 —— 而对照 diff 用的必须是
+    它真正宣称做过的事。
+
+    逐字段回落，而不是「整块二选一」：`verify_cmd` 常写在模板的 Red-Green
+    段，`files_touched` 却可能只在产出区里。整块取会让另一个字段凭空丢失。
+    """
+    if not content:
+        return {"task_ids": [], "verify_cmd": "", "files_touched": []}
+
+    from . import stage_state as _ss
+
+    region = ""
+    split = _ss.split_output_region(content)
+    if split is not None:
+        head, tail = split
+        # `split_output_region` 返回围栏**外**的两段，中间那块才是产出区。
+        if content.startswith(head) and content.endswith(tail):
+            middle = content[len(head):len(content) - len(tail)] if tail \
+                else content[len(head):]
+            region = middle
+
+    primary = extract_claims(region) if region.strip() else \
+        {"task_ids": [], "verify_cmd": "", "files_touched": []}
+    fallback = extract_claims(content)
+
+    # 逐字段取：围栏区给了就用它，没给才回落模板区。
+    return {
+        "task_ids": primary["task_ids"] or fallback["task_ids"],
+        "verify_cmd": primary["verify_cmd"] or fallback["verify_cmd"],
+        "files_touched": primary["files_touched"] or fallback["files_touched"],
+    }
+
+
 def read_claims(task: str) -> Dict[str, Any]:
     from ..core.state import read_state
 

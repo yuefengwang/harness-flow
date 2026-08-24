@@ -174,16 +174,27 @@ def _readme_check(target: Path) -> Dict[str, Any]:
     这是本模块存在的一个直接理由：现有 hook 让缺 README 在归档路由下是
     错误、返工路由下是警告，形成「Route 决定严重性、严重性又决定 Route」
     的闭环。判定不该知道 Route 是什么。
+
+    失败时**必须给出下一步**。任务 `qqqq` 的两次 `/advance` 输出逐字相同 ——
+    文案只说「修掉再推进」，没说谁去修、修什么，于是用户只能原地重试
+    （A2 的 10.6 已判过同型：拦住一条路而不给替代路径）。
     """
     f = target / "README.md"
+    #: 缺 README 时的下一步。04 的 reviewer 现在有 write_file（任务 qqqq 的
+    #: 死锁定案，见 A0 的 2.9.11），所以这条建议是**可执行的** ——
+    #: 在放开写权限之前写这句话只会是空头指示。
+    fix_hint = (f"下一步：让 04 的 agent 用 `write` 创建 "
+                f"{target.name}/README.md（含项目用途、启动方式、"
+                f"验证命令），或返工到 03-coding 补文档后重新推进。"
+                f"README 是 03 的交付物，理想情况下不该拖到 04 才补。")
     if not f.is_file():
         return _check("O6", "readme", VERDICT_FAIL,
                       detail=f"{target.name}/ 下无 README.md",
-                      severity=SEVERITY_HIGH)
+                      severity=SEVERITY_HIGH, reason=fix_hint)
     body = f.read_text(encoding="utf-8", errors="replace")
     if not body.strip():
         return _check("O6", "readme", VERDICT_FAIL, detail="README.md 为空",
-                      severity=SEVERITY_HIGH)
+                      severity=SEVERITY_HIGH, reason=fix_hint)
 
     holes = sum(body.count(t) for t in ("TODO", "___", "FIXME"))
     if holes:

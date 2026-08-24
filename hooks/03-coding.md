@@ -57,6 +57,16 @@
 - **Rule**: update doc/comments when logic changes
 - **Check**: code change includes doc updates
 
+## hook-03-07: README 是本阶段的交付物
+- **When**: before stage exit
+- **Rule**: 目标仓库根目录必须有 `README.md`，含项目用途、安装/启动方式、
+  验证命令，且**不含** `TODO` / `___` / `FIXME` 占位符。
+- **Check**: 由 04 的客观轨 O6 硬校验（`objective_check._readme_check`）。
+- **为什么归 03**：03 是唯一同时拥有 `write_file` 与 `run_command` 的阶段。
+  这条要求从前只写在 04 与 05 的 hooks 里，而 04 的 reviewer 当时没有写权限
+  —— 要求在 04 兑现、能力只在 03 存在，任务 `qqqq` 因此在两次 `/advance`
+  之间原地卡死（A0 的 2.9.11）。判据的**兑现阶段**必须与**能力所在阶段**一致。
+
 ## hook-03-06: User Interaction via Tool
 - **When**: 需要用户确认、选择或输入时
 - **Rule**: **必须**使用 `question` 工具，**禁止**在正文中输出编号选项列表

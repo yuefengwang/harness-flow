@@ -17,7 +17,19 @@ import pytest
 from sw_lib.core import config as C
 
 
-# 改造前实测采集，逐值写死。不得在改造后重新生成。
+# 改造前实测采集，逐值写死。不得**为了让改造变绿**而重新生成。
+#
+# ⚠️ 2026-08-24：`04-review` 的 tools 由用户拍板新增 `write_file`
+# （任务 qqqq 的死锁：客观轨 O6 要求 repo/<task>/README.md 存在，而 04 没有
+# 写权限、03 的 prompt 又不提 README，两次 /advance 输出逐字相同，没有任何
+# 角色能修 —— 详见 A0 的 2.9.11）。
+#
+# 这次更新基线是**合法**的，理由要说清楚，否则这条防护就废了：
+# 本文件守的是「`role_id=None` 的解析路径不因 A4 改造而改变」，
+# 也就是**解析行为**的等价性，不是「配置文件永远不变」。
+# 权限本身由用户与 config.yaml 决定；判据是「不传 role_id == 显式传 None」。
+# 若哪天两者不等价了，下面 `test_explicit_none_role_id_equals_omitted`
+# 仍会红 —— 那才是这条防护要抓的东西。
 BASELINE = {
     "01-brainstorming": {
         "type": "opencode",
@@ -37,7 +49,9 @@ BASELINE = {
     "04-review": {
         "type": "opencode",
         "model": "opencode/mimo-v2.5-free",
-        "tools": ["list_files", "read_file", "run_command", "ask_user"],
+        # write_file 于 2026-08-24 由用户拍板加入（见文件头说明）。
+        "tools": ["list_files", "read_file", "write_file", "run_command",
+                  "ask_user"],
     },
     "05-archive": {
         "type": "opencode",

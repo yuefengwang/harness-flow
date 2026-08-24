@@ -618,11 +618,17 @@ class StageRunnable(HarnessRunnable):
         try:
             from . import fact_pack
             body = stage_file.read_text(encoding="utf-8", errors="replace")
-            # 只解析围栏内的 AI 产出区。整篇解析会先撞上模板里的空占位段
-            # （`- **Verify cmd**: `___`` 与空的 Files Touched），
-            # 于是 agent 的真实声明被抢先匹配掉 —— 实测过这个现象。
-            body = self._agent_output_region(body)
-            claims = fact_pack.extract_claims(body)
+            # 围栏区优先、模板区回落（`extract_claims_from_stage_file`）。
+            #
+            # 原实现只解析围栏区，理由是「整篇解析会先撞上模板里的空占位段」。
+            # 那个顾虑本身成立，但解法用错了刀：占位符该由 `_is_placeholder`
+            # 挡掉，而不是把整个模板区排除在外。
+            #
+            # 代价在任务 `qqqq` 现形：agent 把三个文件名规规矩矩填进模板区的
+            # `## Files Touched`（上一轮放行 + prompt 明确要求它这么做），
+            # claims 却是 null、O5 记 unavailable —— 声明就在眼前，
+            # 判据说「未声明」。
+            claims = fact_pack.extract_claims_from_stage_file(body)
             fact_pack.record_claims(
                 task_name,
                 task_ids=claims["task_ids"],

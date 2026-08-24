@@ -440,7 +440,7 @@ D0-1 想保住的东西恰好被 D0-1 自己引入的空壳挤掉了。
 |---|---|---|---|
 | 1 | 13:20:42 → 13:29:58 静默 **9 分 16 秒**，按 `IDLE_TIMEOUT=300` 本该 13:25:42 切断 | `transport.py:156` 的 `is_idle()` **除自身测试外零生产调用点**（`rg -n "is_idle"` 只有定义 + 测试）。上一轮加了方法却只在超时报错文案里用了 `idle_seconds()` —— 又一次「判据存在、无人调用」 | ❌ 未修 |
 | 2 | agent 把 7 任务 DAG 写进 `repo/helloworld2/PLAN.md`，而 `workspace/tasks/helloworld2/02-planning.md` 的 `Task DAG` 段仍是 `___`，产出区只有 262 字符摘要 | 02 的 prompt 至今只有一句「请开始规划阶段的工作」，**没有任何地方说明产出该落在哪**。上一轮只修了 01 的模板（2.9.7 第 2 条），02 同形状的问题漏了 | ❌ 未修 |
-| 3 | 03 的 claims 三字段全空：`{"task_ids": [], "verify_cmd": "", "files_touched": []}` | 04 的 claims-vs-diff 对照因此拿到空数据，A3 的「声明与事实对照」空转 | ❌ 未修 |
+| 3 | 03 的 claims 三字段全空：`{"task_ids": [], "verify_cmd": "", "files_touched": []}` | 04 的 claims-vs-diff 对照因此拿到空数据，A3 的「声明与事实对照」空转 | ✅ **已修**（根因见 2.9.11 第 1 条：声明写在模板区，而抽取只读围栏区） |
 
 另有一处**顺序倒置**：13:30:23 签署 Gate、13:30:29 硬校验才失败，
 `.state` 里因此留下一条与事实矛盾的记录，且无任何机制标记这种矛盾。
@@ -543,6 +543,113 @@ Gate 签署与硬校验的先后关系需要单独设计，本轮不动。
 另新增 `test_write_instruction_probe_is_not_vacuous`：三个可写阶段若全部
 skip，说明上一条判据空转。**「全 skip 的绿」在本项目已出现多次**，
 这次把空转本身变成红。
+
+---
+
+### 2.9.11 任务 qqqq 的现场：判据的兑现阶段与能力阶段错位（已修）
+
+上一轮的三处修复在这个任务上生效了 —— 01 落盘成功、歧义分数 9 过闸、
+02/03 都写进了正确的阶段文件。但流程在 04 卡死。
+
+现场：`16:20:10` 与 `16:21:39` 两次 `/advance`，输出**逐字相同**：
+
+```text
+❌ repo/qqqq/ 下无 README.md
+❌ 客观轨硬失败: O6
+   这些是程序判定的事实，不是意见 —— 修掉再推进。
+error | 硬校验未通过，必须满足所有条件才能推进
+```
+
+Gate 四项全签、Route 已定 `05-archive`、pytest 2 passed。唯一拦路的是 O6。
+用户重试一次得到一模一样的结果 —— 因为**重试不改变任何输入**。
+
+#### 根因：要求在 04 兑现，能力只在 03 存在
+
+| 环节 | 事实 |
+|---|---|
+| 03-coding | 唯一同时有 `write_file` 与 `run_command` 的阶段，但 prompt 与 hooks **通篇不提 README** |
+| 04-review | `config.roles.reviewer.tools` 无 `write_file`；校验通过后 agent 已退出 |
+| O6 | `severity=high` 硬阻断（`objective_check._readme_check`） |
+
+于是没有任何角色能创建那个文件。这不是 agent 偷懒，是**流程设计里没有人
+负责这件事**。
+
+> **判例**：一条判据的**兑现阶段**必须与**能力所在阶段**一致，否则它不是
+> 质量门禁，是死锁。同型已在 2.9.7 出现过（prompt 让写、硬层禁写），
+> 那次错位在权限维度，这次在阶段维度。
+>
+> 推论：**新增任何硬阻断判据时，必须同时回答「谁在哪一步能满足它」。**
+> 答不出来就说明判据放错了阶段。
+
+#### 三处定案（第 3 条由用户拍板）
+
+**1. claims 从模板区也能抽取**（`fact_pack.extract_claims_from_stage_file`）
+
+`qqqq` 的 03 产出里三个文件名**写得明明白白**（`## Files Touched` 下
+`main.py` / `test_main.py` / `requirements.txt`），而 `_record_coding_claims`
+只解析围栏内的产出区，于是 `.state` 的 claims 为 `null`、O5 记
+`unavailable` —— 这正是 2.9.9 第 3 条登记的未修项，根因至此查清。
+
+只读围栏区在当时是对的：那会儿模板区 agent 写不进去（`workspace/**` 整段
+deny），能出现在那里的只有占位符。上一轮放行阶段文件、并在 prompt 里**要求**
+回填之后，前提就变了 —— 继续只读围栏等于让 agent 按要求做事，然后判它没做。
+
+顺序刻意是**围栏区优先、模板区回落**，且逐字段回落：围栏区由 sw 落盘、
+nonce 不可预测，可信度高于 agent 可任意改写的模板区。反过来会让 agent
+在模板里写一份好看的清单、在产出里写另一份，而我们取到前者。
+占位符由 `_is_placeholder` 挡住 —— 原实现担心的正是这个，但用错了刀：
+该挡的是占位符，不是整个模板区。
+
+**2. O6 的失败结论给出下一步**
+
+两次 `/advance` 输出逐字相同的直接原因是文案只说「修掉再推进」，
+没说谁去修、修什么（A2 的 10.6 已判过同型）。现在 `reason` 里写明：
+让 04 的 agent 创建 README，或返工到 03 补文档。
+**注意先后**：这句建议在放开写权限**之前**写就只是空头指示。
+
+⚠️ 写了 `reason` 还不够 —— `check_04-review.sh` 的打印是
+`c.get("detail") or c.get("reason")`，而 O6 **两者都有**，于是 `or` 短路，
+那句下一步永远不会显示。「产出了正确的信息但没接到出口」是本项目的常见形状
+（与「判据存在、无人调用」同族）。现在硬失败项把 `detail` 与 `reason` 都打，
+并由 `test_hook_actually_prints_the_next_step` 钉住：
+判据要求脚本里 `c.get("reason")` 出现 **≥2 次**，只有 `detail or reason`
+那一处不算 —— 那个表达式在 detail 非空时恒短路。
+
+**3. 给 04 的 reviewer `write_file`**（用户拍板）
+
+与「审查者不修改被审对象」有张力，所以那条纪律换了兑现方式 ——
+从「整个阶段不能写」收窄成「**写不到判据**」：
+
+- 可写：`repo/<task>/**`（含 README）、`workspace/tasks/<task>/04-review.md`
+- 仍 deny：`.state`（Gate / red_witness / claims）、`facts/`、
+  `STATUS.json`、`.evidence_key`
+
+真正会让审查失去意义的是 reviewer 能改 `.state` —— 那样它可以自己签 Gate、
+把 red_witness 的 `unavailable` 改成通过。那部分一个字节都没放开。
+
+**`design_critic` 不受影响**，仍是纯只读（A8 的 3.6）。它与 04 的单角色回落
+`reviewer` 是两个角色；A8/A9 尚未实现，此时顺手放开无人会发现。
+
+**4. 03 的 prompt 与 hooks 明确 README 是 03 的交付物**
+
+新增 `hook-03-07`，prompt 里写清「项目是什么 / 怎么启动 / 怎么验证」
+且不留占位符。只做前三条的话，结果是每个任务都要在 04 补一次文档，
+而 04 的定位是审查 —— 判据落在 03 才让「兑现阶段 = 能力阶段」成立。
+
+#### 按 1.2 重做的两条判据
+
+`test_readonly_stage_does_not_allow_write` 与
+`test_readonly_stage_still_cannot_write_stage_file`（后者是上一轮我自己写的）
+都把「04 只读」当成不变量。不变量现改为「04 写不到判据」，两处均已在
+docstring 里显式声明重做理由。
+
+#### 顺带发现（未修，登记）
+
+日志 `16:11:48` 有一条 `edit` 的目标是 `01-brstorming.md`（少了个 `a`）——
+agent 自己拼错了文件名。edit 静默失败，agent **没有感知到**，继续宣布 01
+完成。本次未影响推进（它随后用正确路径写了一次），但形状与 2.9.7 第 2 条
+同源：**写失败没有反馈给 agent**。若哪次拼错的是唯一那次写入，
+就会重演「以为自己写了」。
 
 ---
 

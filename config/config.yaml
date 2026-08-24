@@ -101,9 +101,22 @@ harness:
       description: "\u4EE3\u7801\u8BC4\u5BA1\u5458\uFF1A\u5FEB\u901F\u3001\u4E25\u82DB\
         \u7684\u903B\u8F91\u68C0\u67E5"
       model: opencode/mimo-v2.5-free
+      # write_file 是**用户拍板**加的（任务 qqqq 的死锁）：O6 要求
+      # repo/<task>/README.md 存在且非空，而 04 原先没有写权限、03 的 prompt
+      # 又不提 README —— 要求在 04 兑现、能力只在 03 存在，于是两次 /advance
+      # 输出逐字相同，没有任何角色能修。详见 A0 的 2.9.11。
+      #
+      # 与「审查者不修改被审对象」的张力由硬层边界兜住：判据区（.state /
+      # facts/ / STATUS.json / .evidence_key）仍然 deny，reviewer 改不了
+      # Gate、red_witness 与 claims。守护判据见
+      # tests/unit/workflow/test_review_readme_deadlock.py。
+      #
+      # ⚠️ 这**不**适用于 design_critic（A8 的 3.6 纯只读）—— 那是主观轨
+      # 审查者，与 04 的单角色回落 reviewer 是两个角色。
       tools:
       - list_files
       - read_file
+      - write_file
       - run_command
       - ask_user
   stage_roles:

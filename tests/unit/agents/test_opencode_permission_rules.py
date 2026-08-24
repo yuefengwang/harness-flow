@@ -83,15 +83,33 @@ def test_state_paths_are_denied_with_redundant_patterns():
 
 # ── 阶段权限仍然生效（不得因加固而放宽）──
 
-def test_readonly_stage_does_not_allow_write():
-    """04-review 是只读阶段，不应出现 write allow。"""
+def test_review_stage_write_does_not_reach_criteria():
+    """04-review 有写权限，但**判据区必须仍然 deny**。
+
+    ⚠️ **判据重做**（DEV-PROTOCOL 1.2）。原判据是「04 不得出现 write allow」，
+    前提是「04 是只读阶段」。任务 `qqqq` 证明那个前提与客观轨 O6 直接矛盾：
+    O6 要求 `repo/<task>/README.md` 存在且非空，而 03 的 prompt 从不提 README、
+    04 又没有写权限 —— 两次 `/advance` 输出逐字相同，没有任何角色能修
+    （A0 的 2.9.11）。用户拍板给 reviewer `write_file`。
+
+    所以不变量从「04 不能写」换成「04 写不到判据」：reviewer 能补 README、
+    能回填自己的阶段文件，但改不了 `.state`（Gate / red_witness / claims）
+    与 `facts/`。否则「审查」会变成自证。
+
+    注意 `design_critic` 的纯只读是**另一条**独立声明（A8 的 3.6），
+    由 `test_review_readme_deadlock.test_design_critic_stays_read_only` 守。
+    """
     rules = _rules("04-review")
     assert rules, "04-review 未产生任何规则"
-    allow_write = [r for r in rules
-                   if r["permission"] == "write" and r["action"] == "allow"]
-    assert not allow_write, f"只读阶段放开了 write: {allow_write}"
     assert any(r["permission"] == "read" and r["action"] == "allow"
-               for r in rules), "只读阶段连 read 都没放开，agent 无法工作"
+               for r in rules), "连 read 都没放开，agent 无法工作"
+
+    denied = {r["pattern"] for r in rules
+              if r["permission"] == "write" and r["action"] == "deny"}
+    joined = " ".join(denied)
+    assert ".state" in joined, f"04 的 write 未挡住 .state: {sorted(denied)}"
+    assert any("facts" in p for p in denied), \
+        f"04 的 write 未挡住 facts/: {sorted(denied)}"
 
 
 def test_switches_and_rules_agree_on_enabled_tools():

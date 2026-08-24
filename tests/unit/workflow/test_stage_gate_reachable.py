@@ -31,9 +31,26 @@ def test_writable_stages_can_fill_own_template(stage):
     )
 
 
-def test_review_stage_stays_read_only():
-    """04-review 是只读审查阶段，不应获得写权限（Route 由 TUI 代填）。"""
-    assert "write_file" not in get_tools_for_stage("04-review")
+def test_review_stage_can_write_but_critic_stays_read_only():
+    """04-review 有写权限；主观轨的 `design_critic` 仍然纯只读。
+
+    ⚠️ **判据重做**（DEV-PROTOCOL 1.2）。原判据「04 不应获得写权限」与客观轨
+    O6 直接矛盾：O6 要求 `repo/<task>/README.md` 存在且非空，而 03 的 prompt
+    从不提 README、04 又不能写 —— 任务 `qqqq` 因此在两次 `/advance` 之间原地
+    卡死，输出逐字相同（A0 的 2.9.11）。用户拍板给 reviewer `write_file`。
+
+    「审查者不改被审对象」换成硬层的精确边界（判据区仍 deny），见
+    `tests/unit/workflow/test_review_readme_deadlock.py`。
+    这里只守配置层的两件事：reviewer 能写、design_critic 不能。
+    """
+    assert "write_file" in get_tools_for_stage("04-review"), \
+        "04 无 write_file —— O6 要求的 README 无人能创建"
+
+    from sw_lib.core.config import get_tools_for_role
+
+    critic = get_tools_for_role("design_critic", "04-review")
+    assert "write_file" not in critic, \
+        f"design_critic 被顺手放开了写权限（A8 的 3.6 纯只读）: {critic}"
 
 
 def test_role_tools_are_known_names():
