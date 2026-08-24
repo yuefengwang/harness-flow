@@ -76,8 +76,19 @@ def test_purity_detail_records_a0_a1_as_already_implemented():
     detail = bl.check_review_side_clean().get("purity_detail", {})
 
     assert detail.get("implemented_before_capture") == ["A0", "A1", "A2"], detail
-    # A4/A5 已落盘，不再属于 untouched；A6-A9 仍未实施。
-    assert set(detail.get("review_side_untouched", [])) == {"A6", "A7", "A8", "A9"}, detail
+    # untouched 必须与实际文件存在性一致，不写死名单。
+    #
+    # ⚠️ 本断言按 DEV-PROTOCOL 1.2 **显式声明重做**。原来写死
+    # `== {"A6","A7","A8","A9"}`，A6 落地后如实变成 {"A7","A8","A9"} 而变红。
+    # 那条红是对的 —— 纯度检查正确反映了改造进度，是**判据**把一个会变的
+    # 事实钉成了常量。
+    untouched = set(detail.get("review_side_untouched", []))
+    expected = {bl._MODULE_TO_TASK[Path(rel).name]
+                for rel in bl.REVIEW_SIDE_MODULES
+                if Path(rel).name in bl._MODULE_TO_TASK
+                and not (ROOT / rel).is_file()}
+    assert untouched == expected, (
+        f"untouched={untouched} 与实际缺失的模块 {expected} 不一致")
     assert detail.get("note"), "必须写明该基线只对『审查能力』这一观测量有效"
 
 

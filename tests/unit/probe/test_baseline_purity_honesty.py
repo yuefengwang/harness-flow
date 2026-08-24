@@ -11,7 +11,11 @@ A11 若引用这份基线做对照，会把 A4/A5 带来的变化算进 A6-A9 �
 判据：污染维度必须包含所有已落盘的审查侧改造，且声明文字不得与事实矛盾。
 """
 
+from pathlib import Path
+
 from sw_lib.probe import baseline as B
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_a5_subgraph_counts_as_review_side_contamination():
@@ -40,8 +44,41 @@ def test_purity_note_does_not_claim_single_reviewer():
         "纯度声明仍称 04 是单 reviewer，而 A5 已把它展开为并行子图"
 
 
-def test_untouched_still_lists_unimplemented_tasks():
-    """未实施的任务仍须如实列出，供 A11 判断可比性。"""
-    untouched = B.check_review_side_clean()["purity_detail"]["review_side_untouched"]
-    for t in ("A6", "A7", "A8", "A9"):
-        assert t in untouched, f"{t} 尚未实施却未列入 untouched"
+def test_untouched_matches_actual_file_absence():
+    """untouched 必须与**实际文件存在性**一致，不能是一份写死的名单。
+
+    ⚠️ 本测试按 DEV-PROTOCOL 1.2 **显式声明重做**。
+    原判据是 `for t in ("A6","A7","A8","A9"): assert t in untouched`。
+    A6 落地后 `objective_check.py` 存在，纯度检查如实把 A6 移出 untouched ——
+    那正是它该做的事。继续断言 A6 未实施，等于要求纯度检查对已落盘的改造
+    装作没看见，而那恰是「诚实纯度」这项改动要消除的行为。
+
+    新判据对任何维度的落地都成立，不必随 A7/A8/A9 逐个落地反复改。
+    """
+    result = B.check_review_side_clean()
+    detail = result["purity_detail"]
+    untouched = set(detail["review_side_untouched"])
+    contaminated = set(result.get("contaminated_dimensions") or [])
+
+    for rel in B.REVIEW_SIDE_MODULES:
+        task = B._MODULE_TO_TASK.get(Path(rel).name)
+        if not task:
+            continue
+        exists = (ROOT / rel).is_file()
+        if exists:
+            assert task not in untouched, (
+                f"{rel} 已存在，{task} 却仍被列为 untouched —— 基线在说谎")
+            assert task in contaminated, (
+                f"{rel} 已存在，{task} 却未列入 contaminated_dimensions")
+        else:
+            assert task in untouched, (
+                f"{rel} 不存在，{task} 却未列入 untouched")
+
+
+def test_untouched_and_contaminated_do_not_overlap():
+    """同一维度不得既算未触碰又算已污染。"""
+    result = B.check_review_side_clean()
+    untouched = set(result["purity_detail"]["review_side_untouched"])
+    contaminated = set(result.get("contaminated_dimensions") or [])
+    assert not (untouched & contaminated), (
+        f"维度分类自相矛盾：{untouched & contaminated}")

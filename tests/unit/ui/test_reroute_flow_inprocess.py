@@ -56,7 +56,12 @@ class _StubExecutor:
 
 @pytest.fixture
 def task(tmp_path):
-    """停在 04-review 的任务，target_dir 下有真实产出（否则硬校验会拦）。"""
+    """停在 04-review 的任务，target_dir 下有真实产出（否则硬校验会拦）。
+
+    「真实产出」含**可跑的测试**：A6 的客观轨 O3 会把 collected=0 判为
+    硬失败（改造前那种项目能通过测试门禁，那正是 O3 要拦的）。
+    夹具少了测试文件，返工流程会卡在 blocked 而与被测的路由逻辑无关。
+    """
     d = TASKS / _TASK
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True, exist_ok=True)
@@ -65,6 +70,9 @@ def task(tmp_path):
     target.mkdir()
     (target / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     (target / "README.md").write_text("# app\n\n用法。\n", encoding="utf-8")
+    (target / "test_app.py").write_text(
+        "from app import f\n\n\ndef test_f():\n    assert f() == 1\n",
+        encoding="utf-8")
 
     write_state(_TASK, {
         "id": _TASK, "stage": "04-review",

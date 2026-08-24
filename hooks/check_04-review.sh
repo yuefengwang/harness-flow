@@ -83,7 +83,13 @@ if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
         README_ERRORS=$((README_ERRORS + 1))
     else
         # 检查占位符（软告警）
-        PLACEHOLDERS=$(grep -c 'TODO\|___\|FIXME' "$README_FILE" 2>/dev/null || echo 0)
+        # `grep -c` 零匹配时**打印 0 并以退出码 1 结束**，所以旧写法
+        # `... || echo 0` 会再追加一个 0，变量成了两行的 "0\n0"，
+        # 紧接着的 `[ "$PLACEHOLDERS" -gt 0 ]` 报 integer expression expected。
+        # 判定恰好没错（`[` 失败走 else，等价于「无占位符」），
+        # 但每次 README 干净时都往 stderr 吐一行 shell 错误。
+        PLACEHOLDERS=$(grep -c 'TODO\|___\|FIXME' "$README_FILE" 2>/dev/null | head -1)
+        [ -n "$PLACEHOLDERS" ] || PLACEHOLDERS=0
         if [ "$PLACEHOLDERS" -gt 0 ]; then
             echo "⚠️  README 中包含 $PLACEHOLDERS 个占位符(TODO/___/FIXME)"
             README_WARNINGS=$((README_WARNINGS + 1))
@@ -149,14 +155,58 @@ else
     echo "[README Check] ⚠️  无法确定目标目录（target_dir 为空），跳过 README 校验"
 fi
 
-# 如果目标走向 Archive 但 README 有错误 → 硬阻断
-if [ "$ROUTE_VAL" = "05-archive" ] && [ "$README_ERRORS" -gt 0 ]; then
-    echo "❌ README 文档存在 $README_ERRORS 个错误，不能推进到归档阶段。请修复后重试。"
-    exit 1
+# README 的严重性判定已移交客观轨（A6 的 3.2）。
+#
+# 这里原本会先判 Route 是否为归档、再判 README 错误数是否大于零
+# （原 153 行那个复合条件；此处刻意不复现它的字面形式 —— 守护测试
+# test_hook_no_longer_gates_readme_on_route 用源码正则钉这个模式，
+# 注释里照抄一遍会让它继续报红，而那条红是对的）。
+# 即缺 README 在归档路由下是错误、返工路由下只是警告。那形成一个闭环：
+# Route 决定严重性，严重性又决定 Route。客观轨一律按最严标准判，
+# 与 Route 无关；返工时的宽容由 A9 仲裁器的优先级顺序体现
+# （已在返工路径上，不会因 README 再次返工）。
+if [ "$README_ERRORS" -gt 0 ] || [ "$README_WARNINGS" -gt 0 ]; then
+    echo "[README Check] 发现 $README_ERRORS 个错误, $README_WARNINGS 个警告（判定见客观轨 O6）"
 fi
 
-if [ "$README_ERRORS" -gt 0 ] || [ "$README_WARNINGS" -gt 0 ]; then
-    echo "[README Check] 发现 $README_ERRORS 个错误, $README_WARNINGS 个警告"
+# ── 客观轨（A6）──
+#
+# 纯程序判定，零 LLM 调用。它消费 A3 的事实包，产出结构化结果并决定
+# 是否硬阻断。三件现有 hook 判不出来的事由它兜住：
+#   O3 零测试 / 全部 skip —— 前者当前根本没被检查（无测试面时整段 return 0），
+#      后者退出码是 0，只有计数能区分它与真全绿；
+#   O6 README —— 按最严标准，不看 Route；
+#   O5/O8 前提缺失 —— 记 unavailable，**不计为通过**。
+echo "[Objective Track] 客观轨判定..."
+OBJ_OUT=$(python3 -c '
+import json, sys
+sys.path.insert(0, ".")
+from sw_lib.workflow import objective_check as OC
+from sw_lib.workflow.fact_pack import read_claims
+
+task = sys.argv[1]
+target = sys.argv[2]
+claims = {}
+try:
+    claims = read_claims(task) or {}
+except Exception:
+    pass
+
+r = OC.run_checks(target, files_touched=claims.get("files_touched") or None)
+for c in r["checks"]:
+    icon = {"pass": "✅", "fail": "❌", "warn": "⚠️ ",
+            "unavailable": "❓"}.get(c["verdict"], "?")
+    tail = c.get("detail") or c.get("reason") or ""
+    print(f"  {icon} {c["id"]} {c["name"]}: {c["verdict"]} {tail}")
+print("HARD_FAIL_IDS=" + ",".join(r["hard_fail_ids"]))
+sys.exit(1 if r["hard_fail"] else 0)
+' "$TASK_NAME" "${TEST_DIR:-}" 2>&1) && OBJ_RC=0 || OBJ_RC=$?
+echo "$OBJ_OUT" | grep -v '^HARD_FAIL_IDS=' || true
+if [ "$OBJ_RC" -ne 0 ]; then
+    OBJ_IDS=$(echo "$OBJ_OUT" | grep '^HARD_FAIL_IDS=' | cut -d= -f2)
+    echo "❌ 客观轨硬失败: ${OBJ_IDS:-未知}"
+    echo "   这些是程序判定的事实，不是意见 —— 修掉再推进。"
+    exit 1
 fi
 
 echo "[Hard Check] ✅ 通过"

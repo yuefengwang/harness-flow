@@ -174,18 +174,36 @@ def test_missing_readme_blocks_archive(tmp_path):
         shutil.rmtree(task_dir, ignore_errors=True)
 
 
-def test_missing_readme_allowed_on_reroute(tmp_path):
-    """返工路由不拦：这一轮的目的本来就是回去补东西。"""
-    target = _project(tmp_path / "repo-reroute", with_readme=False)
-    name = "pytest-hook-readme-reroute"
-    task_dir = _make_task(name, target, "04-review")
-    _review_md(task_dir)
-    ss.write_route(name, "03-Coding")
-    try:
-        r = _run_hook("check_04-review.sh", name)
-        assert r.returncode == 0, f"返工路由被 README 检查拦住:\n{r.stdout}"
-    finally:
-        shutil.rmtree(task_dir, ignore_errors=True)
+def test_missing_readme_verdict_does_not_depend_on_route(tmp_path):
+    """缺 README 的判定必须与 Route 无关（A6 的 3.2 / 验收 3）。
+
+    ⚠️ 本测试按 DEV-PROTOCOL 1.2 **显式声明重做**。
+    原判据是「返工路由不拦：这一轮的目的本来就是回去补东西」，
+    它与 test_missing_readme_blocks_archive 合起来正是 A6 要消除的循环依赖：
+    Route 决定严重性、严重性又决定 Route。
+
+    那条旧判据准确描述了改造前的行为，所以它不是写错，而是**前提已被推翻**。
+    继续断言「返工时可以缺 README」等于把循环依赖钉死在测试里。
+
+    新判据更严（两种 Route 下都拦），返工时的宽容改由 A9 仲裁器的
+    优先级顺序体现 —— 已在返工路径上，不会因 README 再次返工。
+    """
+    results = {}
+    for route, suffix in (("05-Archive", "arch"), ("03-Coding", "rework")):
+        target = _project(tmp_path / f"repo-{suffix}", with_readme=False)
+        name = f"pytest-hook-readme-{suffix}"
+        task_dir = _make_task(name, target, "04-review")
+        _review_md(task_dir)
+        ss.write_route(name, route)
+        try:
+            r = _run_hook("check_04-review.sh", name)
+            results[route] = r.returncode
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+    assert results["05-Archive"] == results["03-Coding"], (
+        f"README 判定随 Route 变化：{results} —— 循环依赖仍在")
+    assert results["05-Archive"] != 0, "缺 README 应按最严标准阻断"
 
 
 def test_readme_present_passes_archive(tmp_path):

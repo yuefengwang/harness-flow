@@ -15,6 +15,7 @@
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -145,6 +146,21 @@ def _has_pytest_surface(target: Path) -> bool:
     return False
 
 
+def _pytest_pythonpath(target: Path) -> Optional[str]:
+    """src-layout 时需要的 PYTHONPATH（与 `lib_run_tests.sh` 的
+    `_pytest_pythonpath()` 同构）。
+
+    源码在 `src/` 下但包未安装时，pytest 收集期就 ModuleNotFoundError，
+    而 agent 自己是用 PYTHONPATH=src 跑通的 —— 采集层不加就会得出
+    **与 agent 相反的结论**（任务 T2 的教训）。
+
+    这里必须与 shell 那侧保持一致：两处对「怎么跑 pytest」的判断一旦分歧，
+    同一个 hook 就会自己跟自己矛盾（A6 上线后实测：shell 报 1 passed、
+    客观轨的 O2 报 1 failed）。
+    """
+    return "src" if (target / "src").is_dir() else None
+
+
 def collect_tests(target_dir: str) -> Dict[str, Any]:
     """真实运行 pytest 并采集结构化结果。
 
@@ -183,11 +199,18 @@ def collect_tests(target_dir: str) -> Dict[str, Any]:
         base["raw"] = "target_dir 下没有 pytest 语义的测试面"
         return base
 
+    env = os.environ.copy()
+    extra = _pytest_pythonpath(target)
+    if extra:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (f"{extra}{os.pathsep}{existing}"
+                             if existing else extra)
+
     try:
         proc = subprocess.run(
             [py, "-m", "pytest", "--tb=no", "-q"],
             cwd=str(target), capture_output=True, text=True,
-            timeout=PYTEST_TIMEOUT,
+            timeout=PYTEST_TIMEOUT, env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         base["raw"] = f"pytest 执行失败: {exc}"
