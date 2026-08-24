@@ -230,6 +230,17 @@ class MockAgent(BaseAgent):
     # ── 具体场景实现 ──
 
     def _scenario_brainstorming(self):
+        """01-brainstorming 场景：产出必须带歧义分数。
+
+        本轮把 `hook-01-01`（「Score < 8 → block Planning entry」）从文档里的
+        装饰数字接成了真判据，mock 的产出立刻挂在自家门禁上：它两轮 question
+        问完就直接给结论，从不自评歧义。补的是 mock，不是阈值 ——
+        阈值 8 照抄 hook 原文，为了迁就 mock 去动它就是 A6 的 9.3 明令禁止的
+        「放宽标准让存量变绿」。
+
+        分数写在产出区（围栏内），与真实 agent 的落点一致：`read_ambiguity_score`
+        只读产出区，模板区不算数。
+        """
         self._say("你好！我是你的需求分析专家。我已阅读了你的任务需求。")
         self._pause(1)
         self._say("在开始设计之前，我需要确认几个关键细节：")
@@ -273,6 +284,10 @@ class MockAgent(BaseAgent):
             "- **核心架构**: 采用分层解耦设计\n\n"
             "### 方案建议\n"
             "建议使用标准的 Service 模式，将业务逻辑与接口层分离。\n"
+            "\n### 歧义评估\n"
+            "歧义分数：9 / 10\n"
+            f"两轮澄清已确定国际化策略（{choice}）与 API 风格（{style}），"
+            "剩余不确定项仅为实现细节，不影响方案选型。\n"
         )
         self._say(output)
 

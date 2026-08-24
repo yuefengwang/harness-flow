@@ -344,8 +344,66 @@ class OpenCodeAgent(BaseAgent):
                 rules.append({"permission": perm, "pattern": pattern,
                               "action": "deny"})
 
+        # 判据区 deny **之后**再放行本任务的阶段文件（`findLast` 后者优先）。
+        #
+        # 上面那条 `workspace/**` deny 的目的是保护判据，但它顺手挡住了
+        # 阶段模板 —— 而模板区不是任何判据：`check_01` 读 `.state` 拿 Gate、
+        # 读围栏区判产出，模板区在判定里根本不出现。代价却是砍掉了 agent
+        # 唯一可执行的终止动作（任务 `ppppp`：14 轮 question、零产出，
+        # 因为它能做的只有继续问）。
+        #
+        # 顺序不能反：allow 若排在 deny 之前会被 `workspace/**` 整段盖掉，
+        # 那正是纪律 4 的反面。这里是**刻意**的例外 —— 精确到单个文件路径的
+        # allow 排在通配 deny 之后，覆盖面比它窄得多。
+        rules.extend(self._stage_file_write_rules())
+
         rules.extend(self._substage_write_rules())
         return rules
+
+    #: 允许 agent 回填的阶段文件名（与 `STAGES` 同源，避免两份清单漂移）。
+    def _stage_file_write_rules(self) -> List[Dict[str, str]]:
+        """放行**本任务本阶段**的模板文件，供 agent 回填产出结构。
+
+        三条边界，缺一条这次放行就会变成一个洞：
+
+        1. **只放行本任务本阶段**那一个文件。并行任务下，A 的 agent 改 B 的
+           产出会让 B 的审查读到一份没人负责的文本，且极难追溯。
+        2. **判据目标一律不放开** —— `.state`（Gate/decisions/签名，有 HMAC）、
+           `facts/`、`.log` / `.input` 都不在放行范围。放行的是模板，不是目录。
+        3. **只读阶段不放行**。04-review 的 reviewer 不该能改被审对象；
+           它的产出同样由 harness 落盘。判据是「该阶段的 write 开关是否打开」，
+           与 `_tool_switches()` 同源，不另立一份阶段名单。
+
+        任务名缺失时返回空列表：拼不出精确 pattern 就**回落到全段 deny**。
+        失败方向必须选在「拦住」那一侧 —— 拼不出来就放行 `workspace/**`
+        是把方向选反了。
+        """
+        task = str(getattr(self, "name", "") or "").strip()
+        if not task:
+            return []
+        stage = str(getattr(self, "stage", "") or "").strip()
+        if not stage:
+            return []
+
+        # 与工具开关同源：write 关着的阶段（04-review）不得由这里悄悄放开。
+        try:
+            switches = self._tool_switches()
+        except Exception:
+            return []
+
+        rel = f"workspace/tasks/{task}/{stage}.md"
+        out: List[Dict[str, str]] = []
+        for perm in ("write", "edit"):
+            if not switches.get(perm):
+                continue
+            # 两种写法都放行：agent 的 cwd 是 `repo/<task>`，它既可能写
+            # 仓库相对路径，也可能写绝对路径。只放行一种等于放行一半，
+            # 命中不了就又变成「指令成功率恒为 0」——
+            # 与被删掉那条 `write_file` 指令同一个坑（A0 的 2.9.7 第 2 条）。
+            for pattern in (rel, f"*/{rel}"):
+                out.append({"permission": perm, "pattern": pattern,
+                            "action": "allow"})
+        return out
 
     # ── A2 的 3.3：03a / 03b 的写入约束（硬层）──
 

@@ -22,4 +22,4 @@
 
 ## hook-02-05: User Interaction via Tool
 - **When**: 需要用户确认决策时
-- **Rule**: **必须**使用 `ask_user` / `question` 工具，**禁止**在正文中输出编号选项
+- **Rule**: **必须**使用 `question` 工具，**禁止**在正文中输出编号选项

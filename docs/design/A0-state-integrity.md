@@ -448,6 +448,104 @@ Gate 签署与硬校验的先后关系需要单独设计，本轮不动。
 
 ---
 
+### 2.9.10 任务 ppppp 的现场：约束只有下界没有上界（已修）
+
+用户报「无限 ask_user」。**它不是死循环 bug** —— 每一轮都在等真人回答，
+每一次回答都落了盘。它是**没有出口**。
+
+现场：`15:02:00 → 15:07:58` 共 **14 轮 `question`**，13 条 decisions 全部
+写入 `.state`，而产出区与模板区**全空**。
+
+#### 根因：修一条矛盾时顺手删掉了终止动作
+
+提交 `c0b7338`（即 2.9.7 第 2 条）把 01 prompt 的落盘指令
+
+> **必须回填模板**：用 `write_file` 写回 `workspace/tasks/{task}/01-brainstorming.md`
+
+改成
+
+> **产出直接写在回复正文里**，不要试图写任务记账文件
+
+当初改它的理由完全成立：`_permission_rules()` 对 `workspace/**` 的 write/edit
+一律 deny，那条指令的成功率恒为 0。**但删掉的东西比修掉的更重要** ——
+那是 agent 唯一**可执行**的终止动作，而且模板只有 3 个问题槽位，天然带边界。
+
+换上的替代物是一段没有工具调用、没有数量锚点的描述性文字。
+「把产出写在正文里」无法被 agent 判定为「已完成」：它每说一句话都在正文里，
+于是「我说完了吗」这个问题**没有可执行的答案**，只能继续问。
+
+叠加第二个缺口：`hook-01-02` 只写「≥3 questions」，是**下界**；
+而本该提供上界的 `hook-01-01`（「Score < 8 → block Planning entry」）
+全仓库检索 `ambiguity` 只有一个字段定义、**零消费方** ——
+「判据存在、无人调用」的**第七例**（前六见 2.9.8 与 A2 的 10.6）。
+
+> **判例**：约束只给下界不给上界，等于没有收敛条件。
+> 删掉一条「做不到的指令」之前，先问它在流程里承担的是什么角色 ——
+> 那条指令做不到，但它**指的方向是对的**。
+
+#### 三处定案
+
+**1. 权限精确放行**（`agents/opencode._stage_file_write_rules`）
+
+那段 `workspace/**` deny 保护的是一块**没人当判据用的区域**：`check_01` 读
+`.state` 拿 Gate、读围栏区判产出，**模板区在任何判据里都不出现**。
+代价却是砍掉了 agent 的终止动作。现放行 `workspace/tasks/{task}/{stage}.md`
+（相对 + 绝对两种写法），排在判据区 deny **之后**（`findLast` 后者优先）。
+
+三条边界：只放行本任务本阶段那一个文件；判据目标（`.state` / `.state.lock` /
+`facts/` / `STATUS.json` / `.evidence_key` / `.log` / `.input` / `.context`）
+一律不放开；只读阶段（04-review）不放行，判据与 `_tool_switches()` 同源。
+任务名或 stage 缺失时返回空列表 —— 拼不出精确 pattern 就**回落全段 deny**，
+失败方向选在「拦住」那一侧。
+
+**2. 围栏与 Gate 的事后校验**（`workflow/output_check.check_tamper`）
+
+放开写权限同时暴露了两样东西：产出区围栏与 `## Gate`。现在**只盯这两处，
+模板正文一律不管** —— 把「文件被改过」当成违规等于把刚放开的权限又收回去。
+真相源全在 `.state`（`output_nonce` 与 `gate`，受 HMAC 覆盖），agent 动不了它，
+这是本校验能成立的根据。校验顺序刻意是**篡改先查**：围栏被伪造时，
+从围栏里读出的「实质内容」毫无意义（同 A2 `_check_03b` 的「哈希先查、测试后跑」）。
+
+**3. 歧义分数接线**（`workflow/output_check.read_ambiguity_score`）
+
+`hook-01-01` 从装饰数字变成真判据：读产出区的 `歧义分数：<0-10>`，
+低于 8 或**读不到**都拦下本阶段。这才是**语义**收敛条件 ——
+用户明确否决了「加轮次上限」那条路（上限会把「消除歧义」变成「凑够数」，
+且恰好在最需要澄清的复杂任务上最先失效）。
+
+分数只从**产出区**读，不读模板区：模板区现在是 agent 可写的，
+拿它当判据等于让 agent 自己给自己打分 —— 2.9.7 已判过同一个错
+（`check_02` 拿模板自带标题当判据，判据恒真）。
+读不到返回 `None` 而非 `0`：0 是「歧义极高」这个具体结论，不可得是另一回事。
+
+#### 连带修掉的三处
+
+| # | 问题 | 处置 |
+|---|---|---|
+| 1 | 落点给**相对**路径，agent 的 cwd 是 `repo/<task>`，它会再拼一层（同 2.9.7 的参照系错） | `builder.build` 新增 `{stage_file}` 占位符，注入**绝对**路径 |
+| 2 | 2.9.9 第 2 条：02 prompt 没说产出落在哪（`helloworld2` 把 DAG 写进 `PLAN.md`） | 02/03 prompt 补全落点与必写小节；02 的标题名不可改 —— `fact_pack.build_plan` 按标题提取事实 |
+| 3 | `hooks/*.md` 里还有 **5 处** `ask_user`（2.9.7 第 1 条只改了模板与 `system.yaml`） | 全部改为 `question`。hooks 全文会被 `_read_hook_rules` 内联进 prompt，所以这些字面量与模板里的错误等价 |
+
+#### 三条判据的重做（DEV-PROTOCOL 1.2）
+
+本轮有三条**既有**判据因为前提变了而必须重做，都已在测试 docstring 里显式声明：
+
+1. `test_prompt_does_not_order_writes_into_guarded_paths` —— 原是「写入动词 +
+   `workspace/` 的文本黑名单」，前提是整段 deny。现改为**按真实权限语义
+   （`findLast`）解析 prompt 里每条路径**：让写判据区会红，让写阶段文件不会红。
+2. `test_full_prompt_contains_no_harness_relative_task_paths` —— 原断言子串
+   `workspace/tasks/<task>` 不出现，把**绝对**路径也一并禁掉了，而绝对路径
+   恰是正解。现只禁相对写法。
+3. `test_stage_termination_anchor` 自身初版读的是 **YAML 模板原文**，
+   而 agent 读的是 `build()` 渲染后的完整 prompt。改扫渲染结果后，
+   立刻抓出上面那 5 处 hooks 里的 `ask_user` —— 原契约测试从不覆盖 hooks。
+
+另新增 `test_write_instruction_probe_is_not_vacuous`：三个可写阶段若全部
+skip，说明上一条判据空转。**「全 skip 的绿」在本项目已出现多次**，
+这次把空转本身变成红。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，

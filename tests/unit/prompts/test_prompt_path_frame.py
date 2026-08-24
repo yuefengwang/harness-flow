@@ -115,15 +115,38 @@ def test_full_prompt_contains_no_harness_relative_task_paths(builder, task):
 
     注意：`system.yaml` 的「严禁读取 workspace/tasks/*/.state」是**禁令**，
     不是让它去访问的路径，所以判据只针对带具体任务名的路径。
+
+    ⚠️ **判据重做**（DEV-PROTOCOL 1.2）。初版断言「子串 `workspace/tasks/<task>`
+    不出现」，那把**绝对**路径也一并禁掉了 —— 而绝对路径恰恰是本问题的**正解**：
+    agent 拿到 `/Users/.../workspace/tasks/<task>/01-brainstorming.md` 无需换算
+    参照系，直接可用。禁掉它的后果是 prompt 无法告诉 agent 产出该落在哪，
+    于是它只能自己挑地方（任务 `helloworld2` 把 DAG 写进了 `repo/*/PLAN.md`），
+    或者根本没有终止动作（任务 `ppppp`：14 轮 question）。
+
+    真正的分界是**相对 vs 绝对**，不是「提不提这个目录」。现改为只禁相对写法。
     """
     name, _ = task()
     prompt = builder.build(task_name=name, stage="01-brainstorming", stage_idx=0)
     assert prompt, "build 返回空"
 
-    bad = f"workspace/tasks/{name}"
-    assert bad not in prompt, (
-        f"prompt 里出现了 harness 相对的任务路径 {bad!r} —— "
-        f"agent 的 cwd 是 repo/{name}，它解析不到这个位置。")
+    needle = f"workspace/tasks/{name}"
+    root = str(ROOT)
+    offenders = []
+    for idx in range(len(prompt)):
+        idx = prompt.find(needle, idx)
+        if idx < 0:
+            break
+        # 命中处往前回看：若它是 `<harness 根>/workspace/tasks/...` 的尾部，
+        # 那就是绝对路径，agent 直接可用，不算违规。
+        prefix = prompt[max(0, idx - len(root) - 1):idx]
+        if prefix.endswith(root + "/"):
+            continue
+        offenders.append(prompt[max(0, idx - 40):idx + len(needle) + 30])
+
+    assert not offenders, (
+        f"prompt 里出现了 harness **相对**的任务路径 {needle!r} —— "
+        f"agent 的 cwd 是 repo/{name}，它会在 cwd 下再拼一层。\n"
+        f"命中上下文: {offenders}")
 
 
 def test_context_marker_and_state_agree_on_target_dir():

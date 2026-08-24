@@ -50,6 +50,7 @@ class PromptBuilder:
             stage=stage,
             stage_name=stage_name,
             global_rules=global_rules,
+            stage_file=str(TASKS / task_name / f"{stage}.md"),
         )
         parts.append(system_prompt)
 

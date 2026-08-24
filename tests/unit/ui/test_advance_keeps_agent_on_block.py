@@ -30,6 +30,11 @@ def _task_dir():
     就能过闸 —— 那正是任务 helloworld 空转过闸的形状。本文件关心的是
     「校验未通过时别关掉 agent」，所以要让**硬校验本身通过**，
     否则测的就不再是原来那件事了。
+
+    ⚠️ 同理，产出区的**歧义分数必须达标**：`hook-01-01` 已接线为真判据
+    （`output_check.read_ambiguity_score`，阈值 8）。夹具原先写的是 6 分，
+    硬校验会正确地拦下它 —— 于是本文件测的就变成了「校验失败路径」，
+    而 `test_passing_validation_still_finalizes_agent` 需要的是通过路径。
     """
     d = TASKS / _TASK
     d.mkdir(parents=True, exist_ok=True)
@@ -44,7 +49,7 @@ def _task_dir():
             "## 需求澄清结果\n\n"
             "- 功能范围：最小可用的登录与会话管理\n"
             "- 技术栈：Python + FastAPI，SQLite 存储\n"
-            "- 歧义分数：6/10，已低于目标阈值\n\n"
+            "- 歧义分数：9/10，关键点已全部澄清\n\n"
             "## 设计决策\n\n"
             "- 方案：先做单体实现，接口留出替换点\n"
             "- 理由：规模小，拆分收益不足以抵消复杂度\n")

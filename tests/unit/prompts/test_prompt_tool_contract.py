@@ -29,7 +29,7 @@ import re
 
 import pytest
 
-from sw_lib.agents.opencode import TOOL_MAP, _MANAGED_TOOLS
+from sw_lib.agents.opencode import TOOL_MAP, _MANAGED_TOOLS, OpenCodeAgent
 from sw_lib.core.config import ROOT, STAGES, get_tools_for_stage
 from sw_lib.prompts import PromptRegistry
 
@@ -86,6 +86,38 @@ def _prompt_texts():
     return out
 
 
+#: 渲染探针用的任务名。回收前缀，避免在 `repo/` 留孤儿目录。
+_RENDER_TASK = "pytest-tool-contract"
+
+
+def _rendered_prompt(stage: str) -> str:
+    """`build()` 渲染后的完整 prompt —— agent 实际收到的那份文本。
+
+    模板里的落点是 `{stage_file}` 占位符，扫原文一条也抓不到。
+    判据必须看渲染结果，否则就是在测一份没有人读过的文本。
+    """
+    import shutil
+
+    from sw_lib.core.config import TASKS
+    from sw_lib.core.state import write_state
+    from sw_lib.prompts import PromptBuilder
+
+    d = TASKS / _RENDER_TASK
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        write_state(_RENDER_TASK, {
+            "id": _RENDER_TASK, "stage": stage,
+            "stage_idx": STAGES.index(stage), "stage_status": "pending",
+            "agent": "mock", "target_dir": f"repo/{_RENDER_TASK}",
+        })
+        builder = PromptBuilder(PromptRegistry(TPL_DIR))
+        return builder.build(task_name=_RENDER_TASK, stage=stage,
+                             stage_idx=STAGES.index(stage)) or ""
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _mentioned_tools(text):
     """正文里被反引号括起、且看起来像工具名的词。"""
     found = set()
@@ -126,6 +158,23 @@ def test_prompt_only_names_agent_callable_tools(source):
 
 # ── 2. prompt 不得要求 agent 写硬层禁写的路径 ──
 
+def _verdict(rules, permission: str, path: str) -> str:
+    """复刻 opencode 的权限求值：星号 → `.*`（带 `s` 标志），`findLast` 胜出。
+
+    与 `tests/unit/agents/test_stage_file_writable.py` 同一套语义。
+    「规则表里有一条 allow」不等于「这条路径可写」—— 后面任何命中的 deny
+    都会盖掉它，而顺序正是这套规则最容易写错的地方（纪律 4）。
+    """
+    verdict = "ask"
+    for r in rules:
+        if r["permission"] != permission:
+            continue
+        pat = "^" + re.escape(r["pattern"]).replace(r"\*", ".*") + "$"
+        if re.match(pat, path, re.S):
+            verdict = r["action"]
+    return verdict
+
+
 def _guarded_write_patterns():
     """硬层对 write/edit 的禁写名单，取自实际生效的规则生成器。
 
@@ -155,6 +204,17 @@ class _FakeAgent:
     def _substage_write_rules(self):
         return []
 
+    def _stage_file_write_rules(self):
+        """借用**生产实现**，不自己伪造一份。
+
+        这里曾经是 `return []`（当时生产侧还没有这个方法）。写成假实现
+        会让本文件的判据看着一套规则、agent 实际跑另一套 ——
+        那正是本文件存在的理由（指令与约束各自维护、彼此不校验）。
+        """
+        from sw_lib.agents.opencode import OpenCodeAgent
+
+        return OpenCodeAgent._stage_file_write_rules(self)
+
 
 def test_guarded_patterns_are_discoverable():
     """前提自检：能真的取到硬层禁写名单，否则下一条判据是空转。
@@ -174,22 +234,71 @@ def test_prompt_does_not_order_writes_into_guarded_paths(source):
     01 的「必须回填 `workspace/tasks/{task_name}/01-brainstorming.md`」
     与 `guarded` 里的 `workspace/**` 直接冲突，成功率恒为 0。
     agent 收不到任何否定信号，于是「以为自己写了」。
+
+    ⚠️ **判据重做**（DEV-PROTOCOL 1.2）。第二版是「写入动词 + `workspace/`
+    的文本黑名单」，它建立在一个已经不成立的前提上：`workspace/**` **整段**
+    deny。现在硬层是逐路径求值 —— 阶段文件
+    （`workspace/tasks/<task>/<stage>.md`）被精确放行，判据区（`.state` /
+    `facts/` / `STATUS.json`）仍然 deny。
+
+    继续用文本黑名单会把**正确的**落盘指令判成违规，而那条指令正是 agent
+    唯一可执行的终止动作（任务 `ppppp`：删掉它之后 14 轮 question、零产出）。
+
+    所以判据改为：抽出 prompt 里提到的每条 `workspace/...` 路径，用**真实的
+    权限求值语义**（`findLast`）判它可不可写。这样两个方向都守得住 ——
+    prompt 让写判据区会红，prompt 让写阶段文件不会红。
     """
     text = _prompt_texts()[source]
 
-    # 找出 prompt 里以写入动词引导、且指向 workspace/ 的指令。
-    #
-    # ⚠️ 初版这里用了 `[^\n]{0,80}` —— **单行**匹配。而 01 的真实文案里
-    # 「用 `write_file` 把结论写回」与 `workspace/tasks/...` 恰好跨行，
-    # 于是判据绿着、bug 还在（DEV-PROTOCOL 1.2 显式重做）。
-    # 现在跨行匹配：写入动词与 workspace 路径之间允许换行。
-    writes_to_workspace = re.search(
-        r"(write_file|write|edit|回填|写回|写入)[\s\S]{0,120}?workspace/", text)
+    # 写入动词与路径之间允许换行：01 的真实文案里两者恰好跨行，
+    # 单行匹配会让判据绿着而 bug 还在（这是第二版修掉的坑，保留该行为）。
+    stage = source if source in STAGES else "01-brainstorming"
 
-    assert writes_to_workspace is None, (
-        f"{source} 的 prompt 命令 agent 写入 workspace/ 下的路径，"
-        f"但硬层对 write/edit 把 workspace/** 一律 deny —— "
-        f"这条指令的成功率是 0。\n命中文本: {writes_to_workspace.group(0)!r}")
+    # 扫**渲染后**的文本：模板里落点是 `{stage_file}` 占位符，
+    # 扫原文会一条也抓不到 —— 那种「全 skip」的绿是空转，本项目已撞过多次。
+    if source in STAGES:
+        text = _rendered_prompt(stage)
+
+    hits = re.findall(
+        r"(?:write_file|write|edit|回填|写回|写入)[\s\S]{0,160}?"
+        r"([^\s`'\"]*workspace/tasks/[^\s`'\")）]+)", text)
+    if not hits:
+        pytest.skip(f"{source} 的 prompt 没有指向 workspace 的写入指令")
+
+    probe = _FakeAgent()
+    probe.stage = stage
+    # 放行是**按任务精确匹配**的（`_stage_file_write_rules` 只放行本任务本阶段），
+    # 所以探针的任务名必须与渲染时用的一致，否则判据会假红。
+    probe.name = _RENDER_TASK
+    rules = OpenCodeAgent._permission_rules(probe)
+
+    for raw in hits:
+        # 渲染后是绝对路径；`system.yaml` 里可能仍有占位符写法，一并代入。
+        path = raw.replace("{task_name}", _RENDER_TASK).rstrip(".,;：")
+        assert _verdict(rules, "write", path) == "allow", (
+            f"{source} 的 prompt 命令 agent 写 {path}，硬层却 deny —— "
+            f"这条指令的成功率是 0，agent 收不到否定信号，"
+            f"于是「以为自己写了」（A0 的 2.9.7 第 2 条）")
+
+
+def test_write_instruction_probe_is_not_vacuous():
+    """前提自检：上一条判据必须真的检到了落盘指令。
+
+    若三个可写阶段全部 skip，那条判据就是空转 —— 一个「全 skip 的绿」
+    在本项目已经出现过多次（A2 的 probe 用例、空循环假绿）。
+    这里把空转本身变成红。
+    """
+    found = {}
+    for stage in ("01-brainstorming", "02-planning", "03-coding"):
+        text = _rendered_prompt(stage)
+        found[stage] = bool(re.search(
+            r"(?:write|edit|回填|写回|写入)[\s\S]{0,160}?\S*workspace/tasks/",
+            text))
+
+    missing = sorted(s for s, ok in found.items() if not ok)
+    assert not missing, (
+        f"{missing} 的 prompt 里没有可被检出的落盘指令 —— "
+        f"上一条判据对这些阶段是空转，且 agent 没有终止动作可执行")
 
 
 # ── 3. prompt 必须如实告知本阶段可用的工具 ──
