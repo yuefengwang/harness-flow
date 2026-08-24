@@ -4,16 +4,27 @@
 全是 `___` 与空表格。`check_01` 只验「文件存在 + gate 已签署」，
 `check_02` 只 `grep -q "## Task DAG"` —— 那个标题是模板自带的，判据恒真。
 
-判据落在**产出区**（`<!-- sw:ai-output:start <nonce> -->` 围栏内）而不是
-模板区，这是刻意的：
+判据**以产出区为主、模板区为备**（`_substance_report`）：
 
-* 围栏由 sw 写入、nonce 不可预测，「哪段是 agent 说的」是确定的；
-* 模板区 agent 既不该也不能改 —— 硬层对 `workspace/**` 的 write 一律 deny，
-  prompt 里那条「用 write_file 回填模板」的指令成功率恒为 0（本轮已删）。
-  拿模板区的 `___` 当判据，等于要求 agent 做一件被禁止的事。
+* 围栏区（`<!-- sw:ai-output:start <nonce> -->` 之内）由 sw 写入、
+  nonce 不可预测，「哪段是 agent 说的」是确定的，所以它优先；
+* 模板区回落是任务 `rrr` 逼出来的：放行阶段文件写权限之后，模板区成了
+  agent 的**正式落点**（02 的 prompt 明确要求它回填）。`rrr` 的 agent
+  照做了 —— 7 个任务的 DAG 全在模板区 —— 然后又调了一次 `question`，
+  最终回复只剩一句 39 字符的收尾话，围栏区因此只收到那一句，
+  判据报「仅 30 字符」把它拦下。判据只量一个来源，而产出有两个落点。
+
+回落**不是**「量整篇」。02 模板自带的标题与 `- **Method**: unit /
+integration / manual` 这类样板文字去噪后早已超过阈值，量整篇会让判据恒真
+—— 那正是 helloworld 那次的错。所以回落先减去发货模板里已有的行
+（`_added_lines`），只算 agent 真正添进去的内容。
 
 与 A2 的 `has_code_output` 同一条纪律：空转的代价必须在本阶段暴露，
 而不是推迟到下游才发现，然后来回返工。
+
+与 `fact_pack.extract_claims_from_stage_file` 是同一套语义（围栏优先、
+模板回落）—— A0 的 2.9.11 第 1 条已经在 claims 上判过这个形状，
+那次只修了 claims，没有回头检查本模块。
 """
 
 from __future__ import annotations
@@ -22,7 +33,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from ..core.config import TASKS
+from ..core.config import TASKS, TPLS
 from . import stage_state
 
 #: 产出区里出现这些就算占位符，不算内容。
@@ -77,6 +88,79 @@ def read_output_region(task: str, stage: str) -> Optional[str]:
     body = re.sub(r"<!-- sw:ai-output:(start|end) [0-9a-f]+ -->", "", body)
     body = body.replace(stage_state.AI_OUTPUT_HEADING, "")
     return body
+
+
+def read_template_region(task: str, stage: str) -> Optional[str]:
+    """取出围栏**之外**的模板区正文；文件不存在返回 None。
+
+    Gate 区一并去掉：那是 `render_gate_section` 从 `.state` 渲染出来的，
+    不是 agent 写的。把 harness 自己的输出算进「agent 的产出」，
+    等于让判据给自己打分。
+    """
+    path = TASKS / task / f"{stage}.md"
+    if not path.is_file():
+        return None
+    content = path.read_text(encoding="utf-8", errors="replace")
+
+    parts = stage_state.split_output_region(content)
+    if parts is None:
+        outside = content
+    else:
+        before, after = parts
+        outside = before + after
+
+    return _strip_gate_section(outside)
+
+
+def _strip_gate_section(text: str) -> str:
+    """去掉 `## Gate` 区（到下一个二级标题为止）。"""
+    out: List[str] = []
+    in_gate = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_gate = line.startswith("## Gate")
+        if not in_gate:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _template_lines(stage: str) -> frozenset:
+    """发货模板里的行（去噪后）。读不到模板就返回空集合。
+
+    读 `templates/{stage}.md` 而不是任务目录里的副本：任务副本已经被
+    agent 改过，拿它当基准等于拿被测对象当尺子。模板是我们维护的、
+    agent 碰不到的文件。
+    """
+    tpl = TPLS / f"{stage}.md"
+    if not tpl.is_file():
+        return frozenset()
+    try:
+        content = tpl.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    return frozenset(
+        n for n in (_strip_noise(line) for line in content.splitlines()) if n)
+
+
+def _added_lines(region: str, stage: str) -> str:
+    """模板区里 agent **新增**的部分（逐行减去发货模板已有的行）。
+
+    为什么必须相消：02 模板自带 `## Task DAG` / `## Test Strategy` /
+    `## Tech Detail` 三个标题与 `- **Method**: unit / integration / manual`
+    这类样板，去噪后合计已超过阈值 80。不减就等于「文件存在即通过」——
+    A0 的 2.9.7 判过这个错（`check_02` 拿模板自带的标题当判据，判据恒真）。
+
+    逐行相消而不是整段 diff：agent 通常是**就地替换** `___`
+    （`- **Do**: ___` → `- **Do**: 创建项目结构...`），行的位置与数量都会变，
+    但「这一行在模板里原样出现过吗」是确定的。
+    """
+    known = _template_lines(stage)
+    added = []
+    for line in region.splitlines():
+        noise_free = _strip_noise(line)
+        if noise_free and noise_free not in known:
+            added.append(noise_free)
+    return "".join(added)
 
 
 #: `hook-01-01` 的准出阈值：产出区里的歧义分数低于它就不许进 02。
@@ -290,13 +374,14 @@ def check_output(task: str, stage: str) -> OutputVerdict:
             "   请重新运行本阶段，确认 agent 给出了实质产出后再签署门禁。",
         ])
 
-    substance = _strip_noise(region)
-    if len(substance) < _MIN_SUBSTANCE:
+    count, where = _substance_report(task, stage, region)
+    if count < _MIN_SUBSTANCE:
         return OutputVerdict(False, [
             f"❌ {stage} 的产出区没有实质内容"
-            f"（去掉占位符与格式符后仅 {len(substance)} 字符，"
+            f"（去掉占位符与格式符后仅 {count} 字符，"
             f"至少需要 {_MIN_SUBSTANCE}）",
             "   占位符（`___` / TODO / FIXME）不算内容。",
+            "   两个落点都查过了：回复正文（产出区）与模板区回填。",
             "   请让 agent 给出本阶段真正的结论后再签署门禁。",
         ])
 
@@ -306,11 +391,37 @@ def check_output(task: str, stage: str) -> OutputVerdict:
     if ambiguity:
         return OutputVerdict(False, ambiguity)
 
-    lines = [f"✅ {stage} 产出区有实质内容（{len(substance)} 字符）"]
+    lines = [f"✅ {stage} {where}有实质内容（{count} 字符）"]
     score = read_ambiguity_score(task, stage)
     if score is not None:
         lines.append(f"   歧义分数 {score} ≥ 阈值 {AMBIGUITY_THRESHOLD}")
     return OutputVerdict(True, lines)
+
+
+def _substance_report(task: str, stage: str, region: str) -> Tuple[int, str]:
+    """实质内容的字符数与它的来源。**围栏区优先，模板区回落。**
+
+    顺序不能反，理由与 `fact_pack.extract_claims_from_stage_file` 相同：
+    围栏区由 sw 落盘、nonce 不可预测，可信度高于 agent 可任意改写的模板区。
+    若模板区优先，agent 在模板里写一份好看的、在回复里写另一份，
+    判据会读到前者。
+
+    只在围栏区**不足**时才看模板区 —— 不是两处相加。相加会让两段各自都
+    达不到标准的碎片凑够阈值，而「产出够不够」问的是有没有一份完整交付，
+    不是总字数。
+    """
+    fenced = len(_strip_noise(region))
+    if fenced >= _MIN_SUBSTANCE:
+        return fenced, "产出区"
+
+    template = read_template_region(task, stage)
+    if not template:
+        return fenced, "产出区"
+
+    added = len(_added_lines(template, stage))
+    if added > fenced:
+        return added, "模板区（agent 回填）"
+    return fenced, "产出区"
 
 
 _USAGE = "用法: python3 -m sw_lib.workflow.output_check <task-name> <stage>"

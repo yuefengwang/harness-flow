@@ -19,14 +19,23 @@ import queue
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from ..core.config import CONFIG_DIR, STAGES, STAGE_NAMES
+from ..core.config import CONFIG_DIR, STAGES, STAGE_NAMES, TASKS
 from ..core.utils import sw_log
+from ..workflow.stage_state import split_output_region
 from .base import BaseAgent
 
 # 场景脚本跑完时打进 .log 的标记。e2e driver 靠它判断「这一轮说完了」，
 # 替代原先「日志静默 3 秒」的猜测 —— 那种猜法会在两行输出之间的 sleep 里
 # 误判，是 e2e 三轮挂一轮的根因。标记是确定性的：每个阶段恰好一条。
 SCENARIO_DONE_MARKER = "mock_agent scenario complete"
+
+#: 置 1 时，02 场景改走「模板区写全、回复只留一句收尾话」的形态。
+#:
+#: 这是任务 `rrr` 现场的真实形状：agent 用 `write` 把完整规划写进模板区，
+#: 然后调 `question` 确认推进，最终回复只剩 39 字符的收尾话 ——
+#: 围栏区因此只收到那一句。默认关闭：正常形态（产出写在回复正文）
+#: 仍是 e2e 的主路径，这个开关只为把那次误判钉成可复现的判据。
+TEMPLATE_ONLY_ENV = "SW_MOCK_PLANNING_TEMPLATE_ONLY"
 
 
 class MockAgent(BaseAgent):
@@ -306,12 +315,29 @@ class MockAgent(BaseAgent):
 
         WBS 条目刻意保持 `[ ]`：e2e 有一条判据在确认产出区里的 `[ ]` 没被
         全局替换污染，mock 自己输出 `[x]` 会让那条判据当场失效。
+
+        `SW_MOCK_PLANNING_TEMPLATE_ONLY=1` 时改走任务 `rrr` 的现场形态：
+        同一份规划用 `write` 落进模板区，回复正文只留一句收尾话。
+        见 `_scenario_planning_template_only`。
         """
+        if os.environ.get(TEMPLATE_ONLY_ENV, "").strip() in ("1", "true", "yes"):
+            self._scenario_planning_template_only()
+            return
+
         self._say("正在基于 Brainstorming 的结论拆解任务清单...")
         self._pause(2)
 
-        output = (
-            "## 🤖 AI Output\n\n"
+        self._say("## 🤖 AI Output\n\n" + self._planning_body())
+
+    @staticmethod
+    def _planning_body() -> str:
+        """02 要交的三段正文。两种落点形态共用同一份内容。
+
+        抽出来是因为「产出写在哪里」与「产出是什么」是两件事：
+        `rrr` 的误判只跟落点有关，内容它写得很完整。共用一份文本才能让
+        复现场景的差异**只有**落点，否则测出来的红分不清是哪一个变量造成的。
+        """
+        return (
             "### 任务拆解 (WBS) / Task DAG\n"
             "1. [ ] **Task 1**: 定义数据模型 | Deps: None\n"
             "   - **Do**: 按需求确定字段与约束，落成模块内的数据结构\n"
@@ -330,7 +356,62 @@ class MockAgent(BaseAgent):
             "- **Key types/interfaces**: 单模块导出一个纯函数入口，无全局状态\n"
             "- **Files to touch**: 实现模块、对应测试模块、README\n"
         )
-        self._say(output)
+
+    #: `rrr` 现场 agent 的最终回复原文（39 字符）。
+    PLANNING_CLOSING_LINE = "请在 TUI 中输入 `/advance` 推进到 03-coding 阶段。"
+
+    def _scenario_planning_template_only(self):
+        """复现任务 `rrr`：规划写进模板区，回复只留收尾话。
+
+        真实链路是 agent 调 opencode 自带的 `write` 覆写 `02-planning.md`
+        （上一轮放行了阶段文件写权限，02 的 prompt 明确要求它这么做）。
+        MockAgent 没有工具调用层，直接写文件即可 —— 要复现的是**落点**，
+        不是工具协议。
+
+        写法刻意与 agent 一致：整篇覆写、把 `___` 换成真内容、围栏与 Gate
+        原样保留。只替换占位符而不动别处，是为了不触发 `check_tamper`——
+        那是另一条判据的辖区，混进来会让红的原因变得不唯一。
+
+        旁白与写入通知走 `sw` 源、不走 `agent` 源。真实链路里 opencode 的
+        `🔧 write ...` 日志同样不进围栏 —— 落盘取的是 `_agent_text_buffer`
+        （on_text 回调），工具调用日志只进 `.log`。MockAgent 没有 text buffer，
+        走的是 `_agent_output_lines` 里 `source == "agent"` 的回落分支，
+        因此旁白若挂在 agent 源上就会被算进回复正文 —— 那样围栏区里
+        凭空多出几十个字符，复现出的就不是 `rrr` 的形状了。
+        """
+        path = TASKS / self.name / "02-planning.md"
+        if not path.is_file():
+            self._add_log("error", f"template-only 场景需要 {path} 已存在")
+            return
+
+        self._add_log("sw", "正在基于 Brainstorming 的结论拆解任务清单...")
+        body = path.read_text(encoding="utf-8", errors="replace")
+        filled = self._fill_planning_template(body)
+        path.write_text(filled, encoding="utf-8")
+        self._add_log("sw", f"🔧 write {path.name}（模板区）")
+
+        # 回复正文只剩这一句 —— 围栏区能收到的就只有它。
+        self._say(self.PLANNING_CLOSING_LINE)
+
+    @classmethod
+    def _fill_planning_template(cls, body: str) -> str:
+        """把 02 模板区的占位符换成真内容；围栏区与 Gate 区一律不动。"""
+        region = split_output_region(body)
+        if region is None:
+            head, fenced, tail = body, "", ""
+        else:
+            before, after = region
+            head = before
+            fenced = body[len(before):len(body) - len(after)] if after \
+                else body[len(before):]
+            tail = after
+
+        # 模板正文（围栏之前那段）整段换成回填后的版本。
+        marker = "## Task DAG"
+        idx = head.find(marker)
+        if idx < 0:
+            return body
+        return head[:idx] + cls._planning_body() + "\n" + fenced + tail
 
     def _scenario_coding(self):
         """03-coding 场景：在 target_dir 下写出一个能跑通测试的最小项目。
