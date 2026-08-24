@@ -579,11 +579,39 @@ class MonitorTUI:
         if reviewers:
             status_text += f" [cyan]({reviewers})[/]"
 
+        # 红绿见证的三态（A2 的 10.6）。降级为事后处理之后「见证被绕过」
+        # 是常态，因此必须**在用户全程盯着的地方**显示 —— 只写进 `.state`
+        # 等于机制自我消解，而且更坏：留下一份「我们检查过」的痕迹。
+        witness = self._witness_badge()
+        if witness:
+            status_text += f" [yellow]{witness}[/]"
+
         return Panel(
             Text.from_markup(f"{title}{status_text}"),
             box=box.ROUNDED,
             style="blue"
         )
+
+    def _witness_badge(self) -> str:
+        """头部的红绿见证角标。真见证过时返回空 —— 一切正常无需占位。
+
+        只显示需要注意的两种：被绕过、以及其它「见证未发生」。
+        读失败一律返回空串：面板渲染崩掉比少显示一个角标严重得多
+        （与 `active_roles_label` 的 try/except 同一条纪律）。
+        """
+        if self.state.stage != "03-coding":
+            return ""
+        try:
+            from ..workflow.red_witness import witness_summary
+
+            summary = witness_summary(self.state.name)
+        except Exception:
+            return ""
+        if summary.get("status") in ("ok", "absent", "in_progress"):
+            return ""
+        if summary.get("bypassed"):
+            return f"❓ 见证被绕过 x{summary.get('bypass_count')}"
+        return "❓ 见证未发生"
 
     def _on_settlement(self):
         """引擎回调：进入任务结算流程"""

@@ -12,10 +12,17 @@
 
 ## hook-03-02a: Red Witness (红由 harness 亲自观测)
 - **When**: 03a 子阶段（尚未见证到红）
-- **Rule**: **只写测试，不写实现**。测试必须因**断言失败**而红 ——
-  引用不存在的模块（ImportError）不算红，那叫「造红」，会被门禁拒绝。
-  收集不到测试、测试全部通过、测试全部 skip，同样无法见证。
-- **Check**: harness 在准出时真实执行 pytest，要求退出码为 1 且有失败节点
+- **Rule**: 顺序是 **先写测试 → 让 harness 跑一次看到红 → 再写实现**。
+  测试必须因**断言失败**而红 —— 引用不存在的模块（ImportError）不算红，
+  那叫「造红」，会被门禁**拒绝**；收集不到测试、测试全部 skip、
+  以及「测试自证（不依赖被测代码）却全绿」，同样被拒绝。
+- **若实现已先落盘**：harness 不会拦你（它无法阻止经 `bash` 写文件），
+  但会把本阶段如实记为 `unavailable`（❓）并**指名是哪些实现文件**，
+  该记录一路进入 04 的审查事实与 05 的归档报告。
+  **那不是通过** —— 此时测试的绿证明不了实现被验证过，
+  因为没有任何断言曾经先失败。
+- **Check**: harness 在准出时真实执行 pytest。见证到红要求退出码 1 且有失败
+  节点；退出码 0 且存在实现文件时按绕过记录并放行（测试判定交回常规门禁）
 
 ## hook-03-02b: Frozen Tests (测试已冻结)
 - **When**: 03b 子阶段（红已见证，正在写实现）
@@ -29,10 +36,11 @@
 
 ## hook-03-02c: Witness Is Not Optional (见证未发生 ≠ 已通过)
 - **When**: 门禁打印「Red 见证未发生（unavailable）」时
-- **Rule**: 那表示本阶段的红绿流程**没有被 harness 观测到**（存量任务、
-  返工轮次、mock 模式或开关关闭）。它不是一次通过 —— 汇报时必须记为 ❓，
-  **不得**写成「已完成红绿验证」。
-- **Check**: `.state` 的 `red_witness.status == "unavailable"` 或 `mock == true`
+- **Rule**: 那表示本阶段的红绿流程**没有被 harness 观测到**（实现先落盘、
+  存量任务、返工轮次、非 Python 栈、mock 模式或开关关闭）。
+  它不是一次通过 —— 汇报时必须记为 ❓，**不得**写成「已完成红绿验证」。
+- **Check**: `.state` 的 `red_witness.status == "unavailable"`、
+  `bypassed == true` 或 `mock == true`
 
 ## hook-03-03: Simplicity First (简约至上)
 - **When**: during (branching/multi-state)

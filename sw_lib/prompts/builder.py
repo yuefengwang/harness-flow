@@ -220,6 +220,14 @@ class PromptBuilder:
             "=== 审查事实（由 harness 生成，developer 未参与编辑）===",
             "本阶段**不提供** 03-coding 阶段的自由叙述：审查对象是事实，不是自述。",
         ]
+        # 事实的**可信度限定**必须先于事实本身出现（A2 的 10.6）。
+        # `manifest.json` 不在 `_FACT_ORDER` 里，于是 warnings 此前从未进过
+        # prompt —— 采集到却没人读，与没采集是同一回事。
+        # 先于 diff/tests 出现是刻意的：reviewer 读到 19 passed 之前就该知道
+        # 那 19 个绿是否有见证支撑。
+        caveats = self._read_fact_caveats(task_name)
+        if caveats:
+            chunks.append(caveats)
         for name in self._FACT_ORDER:
             path = facts_dir / name
             if not path.is_file():
@@ -231,6 +239,33 @@ class PromptBuilder:
         if len(chunks) == 2:
             chunks.append("（事实包为空 —— 同样不得据此判定通过）")
         return "\n\n".join(chunks)
+
+    def _read_fact_caveats(self, task_name: str) -> Optional[str]:
+        """事实包 manifest 里的 warnings，渲染成 prompt 里的可信度限定。
+
+        读磁盘上的 manifest 而不是重新调 `witness_warnings()`：注入的必须
+        是**这一份事实包生成时**记录的限定，而不是读 prompt 那一刻重算的
+        结果。两者可能不同（例如生成后有人动了 `.state`），而 reviewer
+        看到的应当与它手上的事实同源。
+        """
+        import json
+
+        path = TASKS / task_name / "facts" / "manifest.json"
+        if not path.is_file():
+            return None
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+        warnings = manifest.get("warnings")
+        if not isinstance(warnings, list) or not warnings:
+            return None
+        lines = ["--- 事实的可信度限定（harness 生成，必须先读）---"]
+        lines += [f"- {w}" for w in warnings if str(w).strip()]
+        lines.append("以上任一项成立时，**不得**据该事实判定通过；"
+                     "应按 unavailable（❓）处置并在产出中写明。")
+        return "\n".join(lines)
 
     def _read_current_template(self, task_name: str, stage: str, stage_name: str) -> Optional[str]:
         path = TASKS / task_name / f"{stage}.md"

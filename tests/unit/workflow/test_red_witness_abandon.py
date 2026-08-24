@@ -21,6 +21,25 @@
 3. phase 必须抹回 `none` —— 否则钩子不把判定交回 `run_project_tests`，
    等于整个测试判定消失（10.6 第二/七行同一个洞，已被踩过两次）；
 4. **不清 `failed_nodes`** —— 判据集单调（A2 的 4.1）。
+
+---
+
+## 本文件已按 DEV-PROTOCOL 1.2 显式重做（勿静默回退）
+
+初版的夹具 `_deadlocked` 用「实现已落盘 → 测试全绿」这一形态制造死锁，
+并断言它必须被拒绝。**该形态现在会被门禁自动让路**（`_check_impl_first_bypass`，
+见 test_red_witness_post_hoc.py），因此夹具与两条前提自检必须重做。
+
+重做的依据是用户拍板：`bash` 绕过我们拦不住（session 权限规则只对
+write/edit 有路径字段），要求人每轮手敲 `--abandon-witness` 去确认一件
+harness 已经看清的事实，只是转嫁成本。A2 验收第 4 条中「实现先落盘」
+这一支因此降级为事后处理，**其余各支未被放开**。
+
+被重做的是「用什么形态制造 03a 拒绝」，不是「03a 能不能被放宽」：
+新夹具改用**恒真测试且无实现文件**（`assert 1 == 1`），它现在仍然被拒绝 ——
+自证的测试没有任何不可抗因素，让路没有理由。整条 `--abandon-witness`
+契约（理由必填、留痕计数、记 unavailable、不做失败测试的后门）**一字未改**：
+造红、全 skip、无测试、恒真全绿这四种拒绝仍然存在，人仍然需要那条出路。
 """
 
 import json
@@ -90,36 +109,37 @@ def _cli(*args):
     )
 
 
-#: 复刻 helloworld 的死锁现场：实现已写完，测试因此全绿，phase 停在 03a。
-_ALL_GREEN = {
-    "src/__init__.py": "",
-    "src/models.py": "def amount():\n    return 100\n",
-    "tests/test_models.py": (
-        "from src.models import amount\n\n\n"
-        "def test_amount():\n    assert amount() == 100\n"
-    ),
+#: 03a 仍会被拒绝的一种形态：测试自证（恒真）且目标目录里没有实现文件。
+#:
+#: 刻意**不用**「实现已落盘 → 全绿」那一形态：它现在由
+#: `_check_impl_first_bypass` 自动让路（本文件顶部的重做声明）。
+#: 恒真测试没有「实现被 bash 先写进去」这个不可抗因素，让路无从谈起，
+#: 因此它是验证「出路本身」时最干净的靶子。
+_SELF_GREEN = {
+    "tests/test_tautology.py": "def test_ok():\n    assert 1 == 1\n",
 }
 
 
-def _deadlocked(task, name):
-    """把任务置入 helloworld 的死锁态，并确认它确实卡住了。"""
-    name, target = task(name, _ALL_GREEN)
+def _stuck_in_03a(task, name, files=None):
+    """把任务置入「03a 被拒绝」的状态，并确认它确实卡住了。"""
+    name, target = task(name, files if files is not None else _SELF_GREEN)
     _enter_witness_flow(name)
     assert rw.read_phase(name) == "03a", "前提不成立：未进入 03a"
     r = _run_hook(name)
-    assert r.returncode != 0, f"前提不成立：全绿的 03a 竟然过闸了:\n{r.stdout}"
+    assert r.returncode != 0, f"前提不成立：03a 竟然过闸了:\n{r.stdout}"
     return name, target
 
 
 # ── 死锁现场必须可复现（判据的前提）──
 
-def test_all_green_in_03a_is_still_rejected(task):
-    """A2 验收第 4 条不得被这次改动放宽：03a 全绿仍必须拒绝。
+def test_self_green_in_03a_is_still_rejected(task):
+    """出路的存在不能让「见证不到红也能过」——「自证全绿」仍必须拒绝。
 
-    出路的存在不能让「见证不到红也能过」，否则整个 A2 失去意义。
-    这条先钉住，后面所有放行路径都必须绕开它而不是推翻它。
+    A2 验收第 4 条现在只对「实现先落盘」那一支降级（见文件顶部的重做
+    声明）。其余各支必须原样拒绝，否则出路就成了后门：恒真测试是最省事
+    的一种，`assert 1 == 1` 不依赖任何被测代码，放开它等于宣布 03a 不设防。
     """
-    name, _ = _deadlocked(task, "rw-abandon-still-rejected")
+    name, _ = _stuck_in_03a(task, "rw-abandon-still-rejected")
     r = _run_hook(name)
     assert r.returncode != 0
     assert "未能见证有效的红" in r.stdout, r.stdout
@@ -130,10 +150,13 @@ def test_all_green_in_03a_is_still_rejected(task):
 def test_03a_rejection_tells_user_how_to_abandon(task):
     """03a 拒绝时必须打印出路 —— 出路存在但没人知道，等于不存在。
 
+    降级为事后处理**没有**让这条失效：造红、全 skip、无测试、恒真全绿
+    四种拒绝依然存在，人仍然需要一条留痕的出路。
+
     这是 A2 的 10.6 第六行判过的同一件事：哈希拒绝当初也是「拦住却不
     给下一步」，补 `--rewitness` 时一并要求门禁把命令打出来。
     """
-    name, _ = _deadlocked(task, "rw-abandon-hint")
+    name, _ = _stuck_in_03a(task, "rw-abandon-hint")
     r = _run_hook(name)
     assert r.returncode != 0
     assert "--abandon-witness" in r.stdout, \
@@ -164,7 +187,7 @@ def test_abandon_returns_phase_to_none(task):
     必须是 `none` 而不是留在 03a：钩子按 `--phase` 决定要不要把测试判定
     交回 `run_project_tests`，停在 03a 等于判定消失（10.6 第二/七行）。
     """
-    name, _ = _deadlocked(task, "rw-abandon-phase")
+    name, _ = _stuck_in_03a(task, "rw-abandon-phase")
 
     r = _cli(name, "--abandon-witness", "03a 期间实现已写完，无法再见证红")
 
@@ -174,7 +197,7 @@ def test_abandon_returns_phase_to_none(task):
 
 def test_abandon_records_reason_and_counts(task):
     """放弃必须留痕并计数 —— 与 `--rewitness` 同一条纪律。"""
-    name, _ = _deadlocked(task, "rw-abandon-trace")
+    name, _ = _stuck_in_03a(task, "rw-abandon-trace")
 
     assert _cli(name, "--abandon-witness", "实现先落盘了").returncode == 0
 
@@ -186,7 +209,7 @@ def test_abandon_records_reason_and_counts(task):
 
 def test_abandon_requires_a_reason(task):
     """无理由的放弃等于静默跳过见证 —— 必须拒绝，且不得改动 phase。"""
-    name, _ = _deadlocked(task, "rw-abandon-noreason")
+    name, _ = _stuck_in_03a(task, "rw-abandon-noreason")
 
     r = _cli(name, "--abandon-witness")
 
@@ -196,7 +219,7 @@ def test_abandon_requires_a_reason(task):
 
 def test_abandon_rejects_empty_reason(task):
     """空串理由同样不算理由。"""
-    name, _ = _deadlocked(task, "rw-abandon-blankreason")
+    name, _ = _stuck_in_03a(task, "rw-abandon-blankreason")
 
     r = _cli(name, "--abandon-witness", "   ")
 
@@ -212,7 +235,7 @@ def test_abandon_marks_unavailable_not_pass(task):
     `mark_unavailable` 的 docstring 写明：写 `green_at` / `failed_nodes`
     会给 A6/A10 一份假证据，让 ❓ 被静默升级成 ✅。
     """
-    name, _ = _deadlocked(task, "rw-abandon-unavailable")
+    name, _ = _stuck_in_03a(task, "rw-abandon-unavailable")
 
     assert _cli(name, "--abandon-witness", "见证不到红").returncode == 0
 
@@ -250,7 +273,7 @@ def test_abandon_then_green_tests_can_advance(task):
 
     这是整条改动的目的：`helloworld` 那样的现场要能继续往下走。
     """
-    name, _ = _deadlocked(task, "rw-abandon-unblocks")
+    name, _ = _stuck_in_03a(task, "rw-abandon-unblocks")
 
     assert _cli(name, "--abandon-witness", "实现已先落盘").returncode == 0
     r = _run_hook(name)
@@ -265,23 +288,12 @@ def test_abandon_then_failing_tests_still_blocked(task):
     不许过闸」这条既有契约必须继续成立。这正是 10.6 第七行踩过的洞：
     让路时忘了抹 phase，npm 的失败测试直接过闸。
     """
-    name, target = task("rw-abandon-notbackdoor", {
-        "src/__init__.py": "",
-        "src/models.py": "def amount():\n    return 100\n",
-        "tests/test_models.py": (
-            "from src.models import amount\n\n\n"
-            "def test_amount():\n    assert amount() == 100\n"
-        ),
-    })
-    _enter_witness_flow(name)
-    assert _run_hook(name).returncode != 0, "前提不成立"
+    name, target = _stuck_in_03a(task, "rw-abandon-notbackdoor")
     assert _cli(name, "--abandon-witness", "放弃见证").returncode == 0
 
     # 放弃之后把测试改成真的失败
-    (target / "tests" / "test_models.py").write_text(
-        "from src.models import amount\n\n\n"
-        "def test_amount():\n    assert amount() == 999\n",
-        encoding="utf-8")
+    (target / "tests" / "test_tautology.py").write_text(
+        "def test_ok():\n    assert 1 == 999\n", encoding="utf-8")
     r = _run_hook(name)
 
     assert r.returncode != 0, \
@@ -290,7 +302,7 @@ def test_abandon_then_failing_tests_still_blocked(task):
 
 def test_abandon_reports_stay_questionable_downstream(task):
     """放弃后门禁输出必须明说这不是通过（A6 三态：记 ❓ 而非 ✅）。"""
-    name, _ = _deadlocked(task, "rw-abandon-says-unavailable")
+    name, _ = _stuck_in_03a(task, "rw-abandon-says-unavailable")
     assert _cli(name, "--abandon-witness", "见证不到红").returncode == 0
 
     r = _run_hook(name)
@@ -304,7 +316,7 @@ def test_abandon_reports_stay_questionable_downstream(task):
 
 def test_abandon_is_idempotent_on_count(task):
     """连续放弃两次：计数累加，不炸，phase 仍是 `none`。"""
-    name, _ = _deadlocked(task, "rw-abandon-twice")
+    name, _ = _stuck_in_03a(task, "rw-abandon-twice")
 
     assert _cli(name, "--abandon-witness", "第一次").returncode == 0
     assert _cli(name, "--abandon-witness", "第二次").returncode == 0
@@ -317,7 +329,7 @@ def test_abandon_is_idempotent_on_count(task):
 
 def test_abandon_cannot_combine_with_other_flags(task):
     """与既有 CLI 契约一致：多个标志同时出现必须报错。"""
-    name, _ = _deadlocked(task, "rw-abandon-combo")
+    name, _ = _stuck_in_03a(task, "rw-abandon-combo")
 
     r = _cli(name, "--abandon-witness", "理由", "--rewitness")
 

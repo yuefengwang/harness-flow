@@ -230,6 +230,42 @@ def _is_test_path(rel_parts: Tuple[str, ...]) -> bool:
     return any(p in _TEST_DIR_NAMES for p in rel_parts[:-1])
 
 
+def find_impl_files(target_dir: Any, limit: int = 0) -> List[str]:
+    """目标目录下的**实现**文件（`hash_test_files` 的反面）。
+
+    用途只有一个：在 03a 判断「测试全绿」的成因是不是「实现已先落盘」。
+    与冻结共用同一套路径判据（`_is_test_path` / `_IGNORED_DIRS`），
+    两侧错位会让「哪些算测试」在冻结和绕过检测里得出不同答案。
+
+    `limit > 0` 时只返回前若干个 —— 门禁文案不该被 200 个文件名淹没，
+    但**留痕不截断**：调用方要完整清单时传 0。
+    """
+    root = Path(str(target_dir))
+    if not root.is_dir():
+        return []
+
+    out: List[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel_parts = path.relative_to(root).parts
+        if any(p in _IGNORED_DIRS for p in rel_parts):
+            continue
+        if _is_test_path(rel_parts):
+            continue
+        rel = "/".join(rel_parts)
+        # 空的包声明文件不算实现 —— `src/__init__.py` 到处都有，
+        # 拿它当「实现已落盘」的证据会让判定形同虚设。
+        if rel_parts[-1] == "__init__.py":
+            try:
+                if not path.read_bytes().strip():
+                    continue
+            except OSError:
+                continue
+        out.append(rel)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
 def compare_hashes(frozen: Dict[str, str],
                    current: Dict[str, str]) -> WitnessVerdict:
     """比对冻结的测试文件哈希与当前哈希。
@@ -492,6 +528,46 @@ def abandon_witness(task: str, reason: str = "") -> Dict[str, Any]:
     return _mutate_witness(task, fn)
 
 
+def record_bypass(task: str, impl_files: List[str]) -> Dict[str, Any]:
+    """记下一次「实现先落盘导致见证不到红」的绕过，并让路（A2 的 10.6 修正）。
+
+    与 `abandon_witness` 是同一件事的两个版本：那条要人手敲命令，这条由
+    门禁自己做。前一版只有手动版，实测证明那不成立 —— `bash` 绕过是
+    **agent 的常规行为**（`helloworld` / `helloworld2` 各一次，同一死法），
+    要求人每轮敲一条命令，等于把机制的运转成本转嫁给用户，而机制本身
+    并没有因此多拦住任何东西。
+
+    与手动放弃的三处不同：
+
+    * `bypassed` / `bypass_files` 是**结构化字段**，不只是一句中文理由 ——
+      下游（TUI / 04 事实包 / 05 报告）要按字段判定，而不是正则匹配文案。
+    * `bypass_files` 记**完整**清单（门禁文案里才截断）——
+      留痕被截断等于证据不全。
+    * 计数独立于 `abandon_count`：人为放弃与 agent 绕过是两回事，
+      混在一个计数里就分不清「用户按了几次」和「agent 绕了几次」。
+
+    其余纪律与手动放弃完全一致：phase 抹回 `none`（否则测试判定消失）、
+    记 `unavailable` 而非伪造 `green_at`、**不动 `failed_nodes`**（判据集单调）。
+    """
+    shown = impl_files[:5]
+    tail = " ..." if len(impl_files) > 5 else ""
+    reason = (
+        "03a 期间实现文件已先落盘，测试因此全绿，红无法被见证 —— "
+        f"共 {len(impl_files)} 个实现文件，含: {', '.join(shown)}{tail}。"
+        "harness 无法阻止 agent 经 bash 写文件（session 权限规则只对 "
+        "write/edit 有路径字段），故按事后处理如实记录。")
+    leave_witness_flow(task)
+    mark_unavailable(task, reason)
+
+    def fn(raw):
+        raw["bypassed"] = True
+        raw["bypass_files"] = list(impl_files)
+        raw["bypass_count"] = int(raw.get("bypass_count") or 0) + 1
+        raw["bypassed_at"] = _now()
+
+    return _mutate_witness(task, fn)
+
+
 def append_witnessed_nodes(task: str, nodes: List[str]) -> Dict[str, Any]:
     """把新节点追加进判据集（A9 接口）。
 
@@ -560,6 +636,85 @@ def mark_unavailable(task: str, reason: str) -> Dict[str, Any]:
         raw.setdefault("mock", False)
 
     return _mutate_witness(task, fn)
+
+
+#: 展示层的单一来源。三处显示（TUI 头部、04 事实包、05 报告）都从
+#: `witness_summary` 取值 —— 各处自己拼文案会立刻分叉：改了一处忘了另一处，
+#: 两边说法不一致而用户无从判断哪个是真的（A5 的 R2 正是这么裂开的）。
+
+def witness_summary(task: str) -> Dict[str, Any]:
+    """把 `red_witness` 子树压成展示层要用的几个字段。
+
+    降级为事后处理之后，「见证被绕过」成为常态，因此它必须**处处可见**。
+    记录在 `.state` 里而无人显示，与机制不存在的区别只有一个：
+    `.state` 里多了一份「我们检查过」的痕迹，反而让人以为有人在管。
+
+    标签一律走三态（A6 的 3.3 / DEV-PROTOCOL 第 2 节）：
+
+    * `ok` → ✅ 真见证过红并转绿；
+    * `unavailable` → ❓ 见证未发生（绕过 / 非 Python 栈 / 存量 / mock）；
+    * `absent` → ❓ 无任何记录，**不编造**「大概没问题」。
+
+    `detail` 里带上实现文件名：不拦人，但绕过要留下能追责的具体痕迹。
+    """
+    record = read_witness(task)
+    if not record:
+        return {"status": "absent", "bypassed": False, "bypass_count": 0,
+                "label": "❓ 红绿见证：无记录", "detail": "", "files": []}
+
+    bypassed = bool(record.get("bypassed"))
+    files = record.get("bypass_files")
+    files = list(files) if isinstance(files, list) else []
+    count = int(record.get("bypass_count") or 0)
+    status = str(record.get("status") or "")
+
+    if record.get("mock"):
+        return {"status": "unavailable", "bypassed": False, "bypass_count": count,
+                "label": "❓ 红绿见证：mock 模式（未执行真实见证）",
+                "detail": "mock 模式写入合成记录，红绿流程未被观测",
+                "files": []}
+
+    if bypassed:
+        shown = ", ".join(files[:5]) + (" ..." if len(files) > 5 else "")
+        return {
+            "status": "unavailable", "bypassed": True, "bypass_count": count,
+            "label": f"❓ 红绿见证：被绕过 {count} 次（unavailable）",
+            "detail": (f"03a 期间实现已先落盘（{len(files)} 个文件：{shown}），"
+                       f"红无法被见证；本轮测试的绿不构成「实现已被验证」"),
+            "files": files,
+        }
+
+    if status == "ok" and record.get("green_at"):
+        nodes = record.get("failed_nodes")
+        nodes = nodes if isinstance(nodes, list) else []
+        return {"status": "ok", "bypassed": False, "bypass_count": count,
+                "label": f"✅ 红绿见证：{len(nodes)} 个判据节点已红→绿",
+                "detail": "", "files": []}
+
+    if status == "unavailable":
+        return {"status": "unavailable", "bypassed": False, "bypass_count": count,
+                "label": "❓ 红绿见证：未发生（unavailable）",
+                "detail": str(record.get("unavailable_reason") or ""),
+                "files": []}
+
+    # 见证进行中（03a 已进入 / 03b 待转绿）。**不算通过**。
+    phase = record.get("phase") or PHASE_NONE
+    return {"status": "in_progress", "bypassed": False, "bypass_count": count,
+            "label": f"❓ 红绿见证：进行中（phase={phase}）",
+            "detail": "", "files": []}
+
+
+def witness_report_line(task: str) -> str:
+    """给 05 归档报告用的一行留痕。
+
+    归档是任务的最终产物，也是最容易把 ❓ 静默升级成 ✅ 的地方 ——
+    人写总结时倾向写「测试通过」，而「测试通过」与「红绿流程走过」
+    在绕过的情形下完全是两件事。
+    """
+    summary = witness_summary(task)
+    detail = summary.get("detail") or ""
+    line = str(summary.get("label") or "")
+    return f"{line} —— {detail}" if detail else line
 
 
 def ensure_mock_witness(task: str) -> Dict[str, Any]:
@@ -700,6 +855,9 @@ def _check_03a(task: str, target: Path) -> GateResult:
     exit_code, nodes = _run_in_target(target)
     verdict = classify_exit_code(exit_code, nodes)
     if not verdict.ok:
+        bypass = _bypass_files(target, exit_code, nodes)
+        if bypass:
+            return _check_impl_first_bypass(task, bypass)
         return GateResult(False, [
             f"❌ 未能见证有效的红（退出码 {exit_code}）",
             f"   {verdict.reason}",
@@ -782,6 +940,54 @@ def _has_pytest_surface(target: Path) -> bool:
         if not any(p in _IGNORED_DIRS for p in path.relative_to(target).parts):
             return True
     return False
+
+
+def _bypass_files(target: Path, exit_code: int,
+                  nodes: Dict[str, str]) -> List[str]:
+    """本次「见证不到红」是否属于「实现先落盘」，是则返回实现文件清单。
+
+    成因判定必须**收窄**，否则事后处理会变成一句「凡是见证不到就放行」：
+
+    * 退出码必须是 0（真的跑完了、全部通过）。造红（2）与无测试（5）
+      不在其中 —— 那两种不是我们拦不住，是 agent 做错了，且都有自救办法
+      （改 import / 补测试），放行它们等于把 A2 整条判据交出去。
+    * 必须**有节点真的 passed**。全 skip 的退出码也是 0，但没有任何断言
+      被执行过；「有实现文件」不能单独构成让路的理由，否则写一堆 skip
+      就是比恒真测试更省事的捷径。
+    * 必须**存在实现文件**。测试全绿而目标目录里一个实现文件都没有，
+      说明这些测试自证（`assert 1 == 1` 之类），没有不可抗因素可言。
+
+    三条同时成立，才是我们确实无力阻止的那一种形态。
+    """
+    if exit_code != EXIT_ALL_PASSED:
+        return []
+    if not any(o == "passed" for o in nodes.values()):
+        return []
+    return find_impl_files(target)
+
+
+def _check_impl_first_bypass(task: str, impl_files: List[str]) -> GateResult:
+    """实现先落盘：如实记录并放行（A2 的 R4 定案修正，用户拍板）。
+
+    **这不是「见证通过」**，是「见证被绕过且我们记下了是谁绕的」。
+    前一版在这里拒绝并打印 `--abandon-witness`，实测两个真实任务都卡死 ——
+    要求用户每轮手敲一条命令去确认一件 harness 已经看得很清楚的事实，
+    只是把成本转嫁出去，没有多拦住任何东西。
+
+    放行的同时守住三条（与其它让路路径同构）：phase 抹回 `none` 让测试
+    判定回到 `run_project_tests`、记 `unavailable`（❓）不伪造 `green_at`、
+    **理由与门禁输出都指名文件** —— 不拦人，但绕过必须留下具体痕迹。
+    """
+    record = record_bypass(task, impl_files)
+    shown = impl_files[:5]
+    tail = f" ...（共 {len(impl_files)} 个）" if len(impl_files) > 5 else ""
+    return GateResult(True, [
+        "⚠️ Red 见证未发生（unavailable）—— 03a 期间实现已先落盘，红无法被见证",
+        f"   实现文件: {', '.join(shown)}{tail}",
+        f"   本任务累计绕过 {record.get('bypass_count')} 次。"
+        "红绿流程未被 harness 观测，下游报告中该项应记为 ❓ 而非 ✅。",
+        "   测试结果仍由常规门禁判定（失败的测试照旧不许过闸）。",
+    ])
 
 
 def _check_unsupported_stack(task: str, target: Path) -> GateResult:

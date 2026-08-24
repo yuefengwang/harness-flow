@@ -139,15 +139,40 @@ def test_03a_no_tests_is_rejected(task):
 
 
 def test_03a_all_passing_is_rejected(task):
-    """验收 4：测试全通过时无法见证红（覆盖 R4：03a 就写了实现）。"""
+    """验收 4：测试全通过时无法见证红。
+
+    **本用例已按 DEV-PROTOCOL 1.2 显式重做**（原文用「实现已落盘 → 全绿」
+    这一形态，它现在由 `_check_impl_first_bypass` 自动让路并记 unavailable，
+    见 test_red_witness_post_hoc.py 与 A2 的 10.6）。
+
+    重做后靶子换成**自证测试**（不依赖任何被测代码）：验收 4 要守的是
+    「全绿不等于见证到红」，这一点未变；被降级的只是 R4 那一支成因 ——
+    `bash` 绕过我们确实拦不住，于是改为事后如实记录而非拒绝。
+    """
     name, _ = task("rw-gate-allpass", {
-        "test_y.py": "from impl import f\n\n\ndef test_f():\n    assert f() == 1\n",
-        "impl.py": "def f():\n    return 1\n",
+        "test_y.py": "def test_f():\n    assert 1 == 1\n",
     })
     r = _run_hook(name)
 
     assert r.returncode != 0, f"全部通过却见证到了红:\n{r.stdout}"
     assert "未失败" in r.stdout or "无法见证" in r.stdout, r.stdout
+
+
+def test_03a_impl_first_is_let_through_as_unavailable(task):
+    """R4 的补充面：实现先落盘时让路，但**必须**记成 unavailable。
+
+    与上一条成对存在，防止「降级」被读成「全绿都能过」：
+    同样是退出码 0，有实现文件的让路、无实现文件的拒绝，两条都钉住。
+    """
+    name, _ = task("rw-gate-implfirst", {
+        "test_y.py": "from impl import f\n\n\ndef test_f():\n    assert f() == 1\n",
+        "impl.py": "def f():\n    return 1\n",
+    })
+    r = _run_hook(name)
+
+    assert r.returncode == 0, f"实现已落盘的 03a 仍被卡死:\n{r.stdout}"
+    assert "unavailable" in r.stdout, r.stdout
+    assert "impl.py" in r.stdout, f"让路时没指名实现文件:\n{r.stdout}"
 
 
 def test_03a_all_skipped_is_rejected(task):

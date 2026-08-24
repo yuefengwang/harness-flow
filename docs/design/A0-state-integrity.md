@@ -430,6 +430,70 @@ D0-1 想保住的东西恰好被 D0-1 自己引入的空壳挤掉了。
 
 ---
 
+### 2.9.9 任务 helloworld2 的现场：四处已坐实、三处未修（登记待办）
+
+用户运行任务 `helloworld2` 后交出日志。**第一处已修**（`bash` 绕过 03a，
+见 A2 的 10.6 倒数第二行：降级为事后处理），下面三处已坐实根因但**本轮未修**，
+登记以免丢失：
+
+| # | 现场证据 | 根因 | 状态 |
+|---|---|---|---|
+| 1 | 13:20:42 → 13:29:58 静默 **9 分 16 秒**，按 `IDLE_TIMEOUT=300` 本该 13:25:42 切断 | `transport.py:156` 的 `is_idle()` **除自身测试外零生产调用点**（`rg -n "is_idle"` 只有定义 + 测试）。上一轮加了方法却只在超时报错文案里用了 `idle_seconds()` —— 又一次「判据存在、无人调用」 | ❌ 未修 |
+| 2 | agent 把 7 任务 DAG 写进 `repo/helloworld2/PLAN.md`，而 `workspace/tasks/helloworld2/02-planning.md` 的 `Task DAG` 段仍是 `___`，产出区只有 262 字符摘要 | 02 的 prompt 至今只有一句「请开始规划阶段的工作」，**没有任何地方说明产出该落在哪**。上一轮只修了 01 的模板（2.9.7 第 2 条），02 同形状的问题漏了 | ❌ 未修 |
+| 3 | 03 的 claims 三字段全空：`{"task_ids": [], "verify_cmd": "", "files_touched": []}` | 04 的 claims-vs-diff 对照因此拿到空数据，A3 的「声明与事实对照」空转 | ❌ 未修 |
+
+另有一处**顺序倒置**：13:30:23 签署 Gate、13:30:29 硬校验才失败，
+`.state` 里因此留下一条与事实矛盾的记录，且无任何机制标记这种矛盾。
+Gate 签署与硬校验的先后关系需要单独设计，本轮不动。
+
+---
+
+### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
+
+2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，
+没说清**我们究竟还剩哪些旋钮**。任务 `helloworld2` 又一次因 `bash` 绕过
+而卡死（A2 的 10.6 倒数第二行）之后，本机实测把这件事查清了：
+
+**opencode 只调它自己二进制里的工具。** `sw_lib/tools/toolbox.py` 的
+`Toolbox` 仅被 `agents/gemini.py`（2 处）与 `core/deploy_orchestrator.py`
+（1 处，Python 内直调）引用，**opencode 路径零引用**；而 `config.yaml` 的
+五个角色 `agent` 全是 `opencode`。也就是说 `_PROTECTED_FILES`、
+`WriteFileTool._is_protected` 这类函数体内的约束，在当前生产配置下一行未生效。
+我们**无法**给 opencode 递一个自己实现的 `write_file` 让它调用。
+
+对 opencode 我们只剩两个旋钮：
+
+1. **工具开关**（`opencode.py:_tool_switches()`，`TOOL_MAP` 里
+   `run_command → bash`）—— 粒度是「给 / 不给」，没有中间态；
+2. **session 权限规则** —— 路径级 allow/deny，对 `write`/`edit` 有效，
+   **对 `bash` 无效**：它的参数是整条 shell 命令，没有结构化路径字段可匹配。
+
+**可控粒度分三层**（本机实测各自的 CLI）：
+
+| 后端 | 工具执行方 | 可控粒度 | 能否约束「怎么用」 |
+|---|---|---|---|
+| 纯模型 API（如 `GeminiAgent` + `Toolbox`） | **我们** | 函数体我们写 | 能。`WriteFileTool._is_protected` 这类检查真实生效 |
+| Claude Code | 它自己 | **参数级**模式匹配：`--allowedTools "Bash(git *) Edit"`、`--tools ""`、`--permission-mode plan`、`--strict-mcp-config` | 部分能。可以只放行 `Bash(git *)` |
+| opencode | 它自己 | 工具级开关 + 路径级规则 | **不能**。`bash` 一旦给出，写文件无从拦截 |
+
+**这条的意义超出 A2**：任何依赖「agent 只能经受控入口改文件」的机制
+（A2 的红绿见证、A11 的变异探针、A0 的写入保护），其强制力**取决于后端**。
+同一份 prompt 纪律在 Gemini 路径上是硬约束，在 opencode 路径上只是建议。
+设计文档里写「禁止 X」时必须同时问一句：**这条在当前后端上由谁强制？**
+答案是「没人」时，就应当按 A2 那样改成事后检测 + 如实记录，
+而不是留一条拦不住的规则假装它是约束。
+
+**长期方向（用户明确，未展开）**：MCP。从 opencode 1.18.20 二进制挖到的
+配置形态是 `{"mcp": {"<name>": {"type":"local","command":[...],
+"environment":{}}}}`（stdio + JSON-RPC，**不需要 web server**），
+另有 `{"type":"remote","url":...}` 走 HTTP + 完整 OAuth；落点是 worktree 下的
+`opencode.json` / `.opencode/opencode.json`。**但 MCP 只能加工具、不能替换
+自带的 `write`/`bash`** —— 要让我们的受控入口成为唯一路径，仍须先关掉自带的，
+而关掉之后问题本已解决。因此 MCP 的价值在于「给 agent 更强的受控能力」，
+不在于「补上这个洞」。
+
+---
+
 ## 3. 设计
 
 分三层。第一层解决完整性，第二层解决可检出性，第三层收窄攻击面。

@@ -174,6 +174,11 @@ def test_rewitness_still_requires_a_real_red(task):
 
     若回退后能拿着「已经全绿的测试」直接过闸，那 `--rewitness` 就成了
     「一键清哈希」—— 冻结机制被自己的例外条款掏空。
+
+    **本用例已按 DEV-PROTOCOL 1.2 显式重做**：原文回退后保留实现文件，
+    而那一形态现在由 `_check_impl_first_bypass` 让路（A2 的 10.6）。
+    靶子换成回退后**删掉实现、改成自证测试**，要守的语义完全不变。
+    实现仍在场的那一支由下一条用例覆盖。
     """
     name, target = task("rw-rewit-noback", {
         "test_y.py": "from impl import f\n\n\ndef test_f():\n    assert f() == 2\n",
@@ -183,12 +188,49 @@ def test_rewitness_still_requires_a_real_red(task):
     assert _run_hook(name).returncode == 0
     assert _cli(name, "--rewitness", "重写测试").returncode == 0
 
-    # 回到 03a，但把实现也写对了 —— 测试是绿的，见证不到红
-    (target / "impl.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    # 回到 03a，测试改成自证的绿 —— 没有实现文件，让路无从谈起
+    (target / "impl.py").unlink()
+    (target / "test_y.py").write_text(
+        "def test_f():\n    assert 1 == 1\n", encoding="utf-8")
     r = _run_hook(name)
 
     assert r.returncode != 0, \
         f"回退后拿全绿的测试过闸了 —— --rewitness 成了冻结机制的后门:\n{r.stdout}"
+
+
+def test_rewitness_with_impl_present_does_not_forge_a_witness(task):
+    """回退后实现仍在场：可以让路，但**不得**因此写出「已见证」的证据。
+
+    这是降级之后 `--rewitness` 唯一可能的新后门形态：回退清掉哈希 →
+    实现还在 → 门禁让路。让路本身是定案，但结论必须是 `unavailable`，
+    绝不能出现 `green_at` —— 否则「一键清哈希再一键伪造转绿」就成立了，
+    冻结机制被两条例外条款联手掏空。
+
+    **本条的断言已按 DEV-PROTOCOL 1.2 显式重做**：初版还断言
+    `witnessed_at` 必须缺失，实测那是写错了 —— 它是**上一轮真实见证**
+    留下的历史痕迹，`request_rewitness` 与 `leave_witness_flow` 都刻意
+    保留它（同 `failed_nodes` 的单调性）。要守的是「这一轮让路不写出新的
+    见证/转绿证据」，不是「抹掉历史上真的发生过的事」。
+    「干净任务让路后 `witnessed_at` 不得出现」那一条由
+    test_red_witness_post_hoc.py 覆盖，那里没有历史见证可混淆。
+    """
+    name, target = task("rw-rewit-implstays", {
+        "test_y.py": "from impl import f\n\n\ndef test_f():\n    assert f() == 2\n",
+        "impl.py": "def f():\n    return 1\n",
+    })
+    _enter_witness_flow(name)
+    assert _run_hook(name).returncode == 0
+    assert _cli(name, "--rewitness", "重写测试").returncode == 0
+
+    (target / "impl.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    assert _run_hook(name).returncode == 0
+
+    record = rw.read_witness(name)
+    assert record.get("status") == "unavailable", record
+    assert not record.get("green_at"), f"让路伪造了转绿证据:\n{record}"
+    assert record.get("bypassed") is True, f"让路没留下绕过痕迹:\n{record}"
+    assert record.get("failed_nodes") == ["test_y.py::test_f"], \
+        f"让路把上一轮的判据集清掉了:\n{record}"
 
 
 def test_rewitness_then_new_red_refreezes(task):

@@ -580,6 +580,34 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def witness_warnings(task: str) -> List[str]:
+    """把「红绿见证未发生」变成 reviewer 能读到的警告（A2 的 10.6 修正）。
+
+    为什么必须进事实包：reviewer 拿到的 `tests.json` 可能显示 19 passed，
+    而那 19 个绿在见证被绕过的情形下**证明不了任何事** —— 没有任何断言
+    先失败过，测试可能全是照着已写好的实现补的。不给这条警告，
+    reviewer 只会读到「测试全绿」，然后判「实现已验证」。
+
+    只在真的没见证到时返回内容。真见证过就返回空 ——
+    warnings 一旦变成每次都有的噪音，就没人再看了。
+    """
+    from .red_witness import witness_summary
+
+    summary = witness_summary(task)
+    if summary.get("status") == "ok":
+        return []
+
+    out = [f"红绿见证：{summary.get('label')}（unavailable，不计为通过）"]
+    detail = summary.get("detail")
+    if detail:
+        out.append(f"  {detail}")
+    if summary.get("bypassed"):
+        out.append(
+            "  ⚠️ 本阶段的测试全绿**不构成**「实现已被验证」："
+            "实现先于测试落盘，红从未被观测到。审查时请按未验证处置。")
+    return out
+
+
 def _write_manifest(task: str, pack: FactPack, availability: Dict[str, str],
                     mock: bool) -> Path:
     from ..core.utils import now
@@ -751,6 +779,10 @@ def generate(task: str, *, force: bool = True) -> FactPack:
         if unreported:
             warnings.append(
                 f"diff 中存在未被 claims 声明的文件：{', '.join(unreported)}")
+
+    # 红绿见证的三态必须进 warnings（A2 的 10.6）。放在这里而不是让
+    # reviewer 自己去读 `.state`：事实包的契约就是「审查所需的输入全在包里」。
+    warnings.extend(witness_warnings(task))
 
     spec_text, availability = build_spec(task, state)
     plan_text = build_plan(task)
