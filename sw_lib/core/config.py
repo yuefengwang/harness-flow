@@ -144,6 +144,32 @@ class SubjectiveReviewer:
 
 DEFAULT_MAX_PARALLEL = 3
 
+#: 等真人回答 `ask_user` / `question` 的默认上限（秒）。
+#:
+#: 30 分钟是用户明确要求的值，理由是「我常常会看不到」—— 提问弹在 TUI 里，
+#: 而人可能切窗口、离开工位。超时的后果不是「慢」而是**决策被替换**：
+#: harness 会 `reject_question()` 让 agent 自行决定，而 01 阶段整个存在
+#: 意义就是消除歧义，让它自己猜等于取消这个阶段。
+#:
+#: 原值 180s 不是标定出来的，是为了塞进 `CHAT_TIMEOUT` 的余量里
+#: （见 opencode.QUESTION_TIMEOUT 的取值史）—— 那是拿人的思考时间去迁就
+#: 机器的超时链，方向反了。
+DEFAULT_ASK_USER_TIMEOUT = 1800.0
+
+
+def _parse_ask_user_timeout(raw: Any) -> float:
+    """解析 `harness.ask_user_timeout`。非法值回落默认，不崩也不取 0。
+
+    0 或负数意味着「问都不问就 reject」—— 一个手抖写错的 YAML 不该让整个
+    澄清机制静默失效。与 `_parse_max_parallel` 同一条纪律：
+    宁可用默认值，不可不跑。
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_ASK_USER_TIMEOUT
+    return value if value > 0 else DEFAULT_ASK_USER_TIMEOUT
+
 
 def _parse_max_parallel(raw: Any) -> int:
     """解析 review.max_parallel。非法值回落默认值而不是崩。
@@ -187,6 +213,8 @@ class HarnessConfigModel:
     mock_agent: MockAgentConfig = field(default_factory=MockAgentConfig)
     repo_path: str = "repo"
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    # 等真人回答 question 的上限（秒）。见 DEFAULT_ASK_USER_TIMEOUT。
+    ask_user_timeout: float = DEFAULT_ASK_USER_TIMEOUT
 
 class ConfigManager:
     """配置加载与管理单例"""
@@ -239,6 +267,9 @@ class ConfigManager:
             mock_agent=mock_cfg,
             repo_path=harness_data.get("repo_path", "repo"),
             review=review_cfg,
+            ask_user_timeout=_parse_ask_user_timeout(
+                harness_data.get("ask_user_timeout",
+                                 DEFAULT_ASK_USER_TIMEOUT)),
         )
 
     @staticmethod
@@ -670,6 +701,21 @@ def is_auto_answer() -> bool:
 def set_auto_answer(enabled: bool) -> None:
     """运行期覆写自动代答开关（供 CLI 的 --unattended 使用）。"""
     _manager.config.auto_answer = bool(enabled)
+
+
+def ask_user_timeout() -> float:
+    """等真人回答 `question` 的上限（秒）。见 DEFAULT_ASK_USER_TIMEOUT。
+
+    每次读配置而不缓存进模块常量：`ConfigManager.reload()` 之后取值应当
+    立即生效，而模块级常量会把第一次读到的值钉死。
+
+    对写坏的配置再兜一次底（`reload` 里已经解析过一次）：运行期有人
+    直接改 `_manager.config.ask_user_timeout` 时，这里是最后一道防线 ——
+    返回 0 会让 harness 问都不问就 reject。
+    """
+    return _parse_ask_user_timeout(
+        getattr(_manager.config, "ask_user_timeout", None))
+
 
 # `sw init --mock` 的跨进程载体。见 is_mock_agent() 的 docstring。
 MOCK_ENV_NAME = "SW_MOCK_AGENT"

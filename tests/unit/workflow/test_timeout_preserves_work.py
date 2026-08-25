@@ -52,9 +52,39 @@ def test_chat_timeout_still_bounded_well_below_original():
 
     这条与上一条一起构成**双向**约束：既不能短到砍掉正常工作，
     也不能长到把故障藏起来。修 bug 不等于把改动整个回滚。
+
+    【断言更正 · 显式声明（DEV-PROTOCOL 1.2）】上界从 `< 1800.0` 放宽到
+    `<= 3600.0`，与 `test_timeout_hierarchy.py` 里那条同源判据一并重做
+    （同一条不变式在本仓库有两份副本）。
+
+    放宽的理由不是「新实现过不了」，而是**这条判据守的职责已经移交**：
+    F11 那 26 分钟静默的真正原因是当时只有墙上时钟这一层，
+    `IDLE_TIMEOUT` 与 `permission.asked` 订阅都还不存在。现在死锁由空闲
+    判据在 5 分钟内暴露，`CHAT_TIMEOUT` 已退化为纯兜底。
+
+    而它必须变大：`harness.ask_user_timeout` 默认 30 分钟（用户要求），
+    agent 调 question 期间 POST /message 一直挂着，这一层若小于
+    「等人 + 处置余量」，用户在第 20 分钟作答时请求早已断开。
+
+    **对价**：下一条判据钉住 `IDLE_TIMEOUT` 没有跟着变大 ——
+    两者一起放宽才是真的降低标准。
     """
-    assert OpenCodeTransport.CHAT_TIMEOUT < 1800.0, (
-        "CHAT_TIMEOUT 回退到 1800s 会让死锁重新静默 26 分钟（F11）")
+    assert OpenCodeTransport.CHAT_TIMEOUT <= 3600.0, (
+        f"CHAT_TIMEOUT={OpenCodeTransport.CHAT_TIMEOUT}s 无界了 —— "
+        f"兜底可以放宽，但不能取消")
+
+
+def test_deadlock_silence_is_still_bounded_by_idle_timeout():
+    """死锁的暴露时延必须仍被空闲判据兜住。
+
+    这是上一条放宽上界的对价：`CHAT_TIMEOUT` 卸下「别让死锁静默太久」之后，
+    必须有人接着担。等人期间空闲计时被显式挂起
+    （`transport.waiting_for_human`），所以这一层可以保持在 5 分钟 ——
+    不需要为了迁就「等人 30 分钟」而放大。
+    """
+    assert OpenCodeTransport.IDLE_TIMEOUT <= 300.0, (
+        f"IDLE_TIMEOUT({OpenCodeTransport.IDLE_TIMEOUT}) 变大了 —— "
+        f"CHAT_TIMEOUT 的上界是在「死锁由空闲判据兜住」的前提下放宽的")
 
 
 def test_timeout_hierarchy_survives_the_fix():

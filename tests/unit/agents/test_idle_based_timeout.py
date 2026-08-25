@@ -137,6 +137,15 @@ def test_idle_timeout_leaves_question_wait_intact():
     `question` 期间 agent 本来就不动 —— 那是在等人，不是卡住。
     IDLE_TIMEOUT 必须大于 QUESTION_TIMEOUT，否则用户还在读选项，
     会话就被判空闲断掉。helloworld 里用户思考了 65 秒（10:03:29 → 10:04:34）。
+
+    ⚠️ 这条判据保留，但它已**不是**该保证的主要来源。它靠的是数值大小
+    （300 > 180），而那只是在掩盖语义混淆：等人与空闲是两件事，
+    靠常数的相对大小碰巧不冲突。等人上限改为可配置、默认 30 分钟之后，
+    这个障眼法必然破 —— 真正的保证是 `waiting_for_human()` 显式挂起空闲
+    计时，见下一条与 `test_ask_user_timeout_config.py`。
+
+    仍留着它的理由：`QUESTION_TIMEOUT` 现在是**兜底**取值（配置不可读时
+    才用），兜底路径下这条数值关系依然应当成立。
     """
     from sw_lib.agents.opencode import OpenCodeAgent
 
@@ -144,3 +153,24 @@ def test_idle_timeout_leaves_question_wait_intact():
         f"IDLE_TIMEOUT({OpenCodeTransport.IDLE_TIMEOUT}) 必须 > "
         f"QUESTION_TIMEOUT({OpenCodeAgent.QUESTION_TIMEOUT})，"
         f"否则等真人回答期间会被判成空闲")
+
+
+def test_configured_human_wait_may_exceed_idle_timeout_safely():
+    """等人上限**允许**超过空闲上限 —— 前提是那段时间不计入空闲。
+
+    这是上一条判据的继任者。用户要求等人 30 分钟，而空闲上限是 5 分钟：
+    两个数字直接冲突，靠调大 IDLE_TIMEOUT 来消解会让真死锁多沉默 25 分钟。
+    正解是把等人期从空闲计时里摘出去，于是两者不再需要互相迁就。
+    """
+    from sw_lib.core.config import ask_user_timeout
+
+    t = OpenCodeTransport(verbose=False)
+    # 前提：配置的等人上限确实超过了空闲上限，否则这条判据在空转
+    assert ask_user_timeout() > OpenCodeTransport.IDLE_TIMEOUT, (
+        "前提不成立：等人上限未超过空闲上限，本条判据测不到冲突")
+
+    t._last_activity_at -= (ask_user_timeout() + 60)
+    with t.waiting_for_human("等用户回答"):
+        assert not t.is_idle(), (
+            "等人 30 分钟被判成空闲 —— 空闲计时没有被挂起，"
+            "两个语义仍挤在同一个判据里")

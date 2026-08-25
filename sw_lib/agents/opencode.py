@@ -15,8 +15,8 @@ import queue
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..core.config import (ROOT, CONFIG_DIR, ConfigError, get_repo_path,
-                           get_tools_for_stage)
+from ..core.config import (ROOT, CONFIG_DIR, ConfigError, ask_user_timeout,
+                           get_repo_path, get_tools_for_stage)
 from ..core.utils import sw_log
 from .base import BaseAgent
 from .transport import OpenCodeTransport, OpenCodeTransportError
@@ -144,13 +144,46 @@ class OpenCodeAgent(BaseAgent):
       - 工具执行                   → opencode 原生工具（按阶段权限开关）
     """
 
-    # 等待用户回答 question 的上限；比 transport.CHAT_TIMEOUT(300s) 短，
-    # 这样超时后还能主动 reject 让 agent 继续，而不是让整轮请求烂在服务端。
+    # 等待用户回答 question 的**兜底**上限。真正生效的是可配置的
+    # `question_timeout`（`harness.ask_user_timeout`，默认 30 分钟）——
+    # 这个类属性只在配置不可读时兜底，并保留给既有测试引用。
     #
-    # 随 CHAT_TIMEOUT 1800→300 一并下调。这里**不照抄原比例**（1500/1800≈83%，
-    # 换算过来是 250s，只剩 50s 余量）：reject 要发一次 HTTP，agent 还要收到
-    # 拒绝后自行决定并把回答写完。余量按绝对值留 120s，比按比例缩放更安全。
+    # 取值史：
+    #   1500 → 180：随 CHAT_TIMEOUT 1800→300 一并下调，按绝对值留 120s 余量。
+    #   180 → 可配置：用户实测反馈「我常常会看不到」。3 分钟一到就
+    #                 `reject_question()` 让 agent 自行决定，而 01 阶段的
+    #                 全部意义就是消除歧义 —— 让它自己猜等于取消这个阶段。
+    #                 人的思考时间不该由机器的超时链决定。
+    #
+    # 仍必须 < transport.CHAT_TIMEOUT，否则超时后无法主动 reject，
+    # 整轮请求烂在服务端（关系由 test_timeout_hierarchy.py 锁定）。
     QUESTION_TIMEOUT = 180.0
+
+    @property
+    def question_timeout(self) -> float:
+        """等真人回答的上限（秒），来自 `harness.ask_user_timeout`。
+
+        走属性而不是类属性：配置在 `ConfigManager.reload()` 之后应当立即
+        生效。读失败时回落 `QUESTION_TIMEOUT` —— 配置不可读不该让
+        「等人」这件事直接崩掉。
+
+        **实例上显式设过 `QUESTION_TIMEOUT` 时以它为准。** 这不是历史包袱，
+        是必要的逃逸口：`agent.QUESTION_TIMEOUT = 0.05` 是测试压缩等待的
+        标准手法，而本属性若无条件读配置，那种覆写会静默失效 ——
+        `test_question_timeout_rejects_instead_of_hanging` 于是真的等满
+        30 分钟，一条秒级的测试变成半小时（本轮实测：`tests/unit` 从
+        5 分钟涨到 15 分钟以上仍未结束，就是它）。
+
+        判据「实例字典里有没有」而不是「值等不等于默认」：后者会在有人把
+        配置也设成 180 时把两种情形混为一谈。
+        """
+        override = self.__dict__.get("QUESTION_TIMEOUT")
+        if override is not None:
+            return float(override)
+        try:
+            return ask_user_timeout()
+        except Exception:
+            return self.QUESTION_TIMEOUT
 
     def __init__(self, tui_callbacks, name, stage, stage_idx, model_name="opencode",
                  use_native_tools: bool = True, verbose: bool = False,
@@ -736,11 +769,24 @@ class OpenCodeAgent(BaseAgent):
         prev_status = self.status
         self.status = self.STATUS_WAITING
         res_queue: "queue.Queue" = queue.Queue()
+        limit = self.question_timeout
         try:
-            cb(normalized, res_queue)
-            answers = res_queue.get(timeout=self.QUESTION_TIMEOUT)
+            # 等人期间挂起空闲计时：agent 零活动是这个状态的**预期**表现，
+            # 不是卡住。否则等人上限（默认 30 分钟）一定会撞上
+            # IDLE_TIMEOUT(5 分钟)，而把后者也抬到 30 分钟会让真死锁
+            # 多沉默 25 分钟 —— 那是拿故障暴露能力换便利。
+            with self._transport.waiting_for_human(
+                    f"等用户回答 {len(normalized)} 个问题"):
+                cb(normalized, res_queue)
+                answers = res_queue.get(timeout=limit)
         except queue.Empty:
-            self._add_log("error", "用户回答超时，已让 agent 自行决定")
+            # 说清等了多久、以及怎么调 —— 只说「超时」会让人以为是 agent
+            # 出了问题，而这里真正发生的是「没人在看」（A2 的 10.6：
+            # 拒绝必须给出下一步）。
+            self._add_log(
+                "error",
+                f"用户回答超时（已等 {limit / 60:.0f} 分钟），已让 agent 自行决定。"
+                f"可在 config/config.yaml 的 harness.ask_user_timeout 调整")
             self._transport.reject_question(request_id)
             self.status = prev_status
             return

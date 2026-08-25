@@ -91,8 +91,15 @@ class StageRunnable(HarnessRunnable):
     # 没有原因的空结果。历史上 300.0 与 CHAT_TIMEOUT 相等过，会形成竞态，
     # 故随 CHAT_TIMEOUT 一并上抬。关系由
     # tests/unit/agents/test_timeout_hierarchy.py 锁定。
-    FIRST_RESPONSE_TIMEOUT = 1020.0  # 等待 agent 首轮回复（CHAT_TIMEOUT + 2min 余量）
-    MULTI_TURN_TIMEOUT = 1800.0      # 多轮会话总时长（等 /advance）
+    #
+    # 1020 → 2100：`harness.ask_user_timeout` 默认 30 分钟后，
+    # CHAT_TIMEOUT 抬到 1980s（等人 1800 + 处置余量 180），这一层必须跟上。
+    # 余量仍取 2 分钟（1980 + 120）。
+    FIRST_RESPONSE_TIMEOUT = 2100.0  # 等待 agent 首轮回复（CHAT_TIMEOUT + 2min 余量）
+    # 多轮会话总时长（等 /advance）。必须 > FIRST_RESPONSE_TIMEOUT ——
+    # 一个阶段里 agent 可能问好几轮，每轮都可能等满等人上限，
+    # 所以这里给的是首轮上限的两倍余量而不是紧贴着它。
+    MULTI_TURN_TIMEOUT = 4200.0
 
     def __init__(
         self,

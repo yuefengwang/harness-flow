@@ -725,6 +725,77 @@ agent 自己拼错了文件名。edit 静默失败，agent **没有感知到**�
 
 ---
 
+### 2.9.13 等人回答的上限：两个语义挤在一个常数里（已修）
+
+用户反馈：「sw init 启动的任务，如果出现 ask user 的场景，把超时时间设置成
+30 分钟吧，这个应当是一个参数，我常常会看不到。」
+
+`QUESTION_TIMEOUT` 原为 180s。超时的后果不是「慢」而是**决策被替换** ——
+harness 会 `reject_question()` 让 agent 自行决定，而 01 阶段的全部意义就是
+消除歧义，让它自己猜等于取消这个阶段。
+
+#### 为什么不能只改一个数字
+
+等人处在超时链最内层，每层都靠「比外层早醒」换取一次主动处置：
+
+    StageRunnable.FIRST_RESPONSE_TIMEOUT   等 agent 首轮回复
+      └── OpenCodeTransport.CHAT_TIMEOUT   单轮 POST /message（真实 HTTP 超时）
+            ├── IDLE_TIMEOUT               空闲判据
+            └── QUESTION_TIMEOUT           等真人回答
+
+把最内层单独抬到 1800s 是**假的**：HTTP 在 900s 先断，`reject_question`
+退化成死代码，用户在第 15 分钟作答时回答已无处可投。
+
+#### 真正的根因：`IDLE_TIMEOUT` 混了两个语义
+
+`IDLE_TIMEOUT` 问的是「agent 卡住了吗」，判据是有没有新的工具调用。而 agent
+等人时**本来就零活动** —— 那是在等人，不是卡住。此前靠
+`IDLE_TIMEOUT(300) > QUESTION_TIMEOUT(180)` 这个数值关系掩盖了混淆；
+`test_idle_based_timeout.py` 里那条 `test_idle_timeout_leaves_question_wait_intact`
+就是这个障眼法的化石。等人上限一抬到 30 分钟，它必然破。
+
+> **判例**：当「放宽 A 就必须放宽 B」时，先问 A 与 B 是不是同一件事。
+> 本例中把 `IDLE_TIMEOUT` 一路抬到 30 分钟以上"也能让测试变绿"，
+> 代价是真死锁多沉默 25 分钟 —— 拿故障暴露能力换用户便利。
+> 正解是把等人期从空闲计时里**摘出去**（`transport.waiting_for_human()`），
+> 于是两个数字不再需要互相迁就：墙上时钟放宽到 33 分钟，
+> 而「多久没动静算卡住」仍然是 5 分钟。
+
+#### 转绿过程中撞出的真实缺陷（参数化的隐藏代价）
+
+把 `QUESTION_TIMEOUT` 从类属性改成读配置的属性之后，
+`agent.QUESTION_TIMEOUT = 0.05` 这种**测试压缩等待的标准手法静默失效**。
+`test_opencode.py::test_question_timeout_rejects_instead_of_hanging` 于是真的
+开始等 30 分钟：`tests/unit` 从 5 分钟涨到 15 分钟以上仍未结束。
+
+> **判例**：把一个常量改成「从配置读」，会一次性取消**所有**既有的覆写点。
+> 症状是套件变慢而不是变红 —— 没有任何断言失败，极难归因。
+> 因此参数化时必须保留实例级逃逸口，并用判据钉住它
+> （`test_instance_override_still_wins`，按 DEV-PROTOCOL 1.2 显式声明为
+> 冻结后新增）。
+
+#### 按 1.2 重做的一条判据
+
+`test_chat_timeout_is_bounded_on_both_sides` 的上界从 `< 1800.0` 放宽到
+`<= 3600.0`。原上界的依据是「F11 里让死锁静默 26 分钟的那个值」，但那次静默
+的真正原因是当时**只有**墙上时钟这一层 —— `IDLE_TIMEOUT` 与
+`permission.asked` 订阅都还不存在。这个职责已经移交，继续用 1800 卡住这一层
+等于让一个已卸任的判据阻止新需求。
+
+**放宽是有对价的**：同时新增 `test_idle_timeout_still_bounds_deadlock_silence`
+钉住 `IDLE_TIMEOUT <= 300`，确保两者不会一起变大 —— 那才是真的放宽标准。
+
+#### 落点
+
+| 项 | 值 |
+|---|---|
+| `harness.ask_user_timeout`（新参数，写进 config.yaml） | 1800s，默认 30 分钟 |
+| `transport.effective_chat_timeout()` | `max(CHAT_TIMEOUT, 等人 + 180)`，随配置自动跟上 |
+| `IDLE_TIMEOUT` | **不变**，仍 300s |
+| 两条 ask_user 路径（opencode / Toolbox） | 统一读同一个配置（原先 180 与 300 各写一处） |
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，

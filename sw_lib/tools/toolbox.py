@@ -15,7 +15,8 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Callable, Set
 
-from ..core.config import ROOT, WORKSPACE, get_tools_for_stage
+from ..core.config import (ROOT, WORKSPACE, ask_user_timeout,
+                           get_tools_for_stage)
 
 
 # ── 命令白名单 ──
@@ -341,11 +342,15 @@ class AskUserTool(BaseTool):
         self.callbacks["on_ask_user"](questions, res_queue)
 
         try:
-            # 阻塞等待 UI 收集完所有回答
-            answers = res_queue.get(timeout=300) 
+            # 阻塞等待 UI 收集完所有回答。上限走 `harness.ask_user_timeout`
+            # （默认 30 分钟）—— 原先写死 300s，与 opencode 那条路径各有一个
+            # 数字，同一个「等人多久」在两处不一致。用户调了配置却发现
+            # 某条路径没变，比两处都写死更难查。
+            answers = res_queue.get(timeout=ask_user_timeout())
             return self._format_answers(questions, answers)
         except queue.Empty:
-            return "错误: 用户响应超时。"
+            return (f"错误: 用户响应超时（已等 "
+                    f"{ask_user_timeout() / 60:.0f} 分钟，无人应答）。")
 
     def _format_answers(self, questions: List[Dict[str, Any]], answers: List[Any]) -> str:
         res = ["用户回答如下："]

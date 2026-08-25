@@ -6,6 +6,12 @@ harness:
   # 与 auto_advance 正交 —— 默认 false，提问始终交还用户决策。
   # 无人值守跑批时用 ./sw init --unattended 临时开启。
   auto_answer: false
+  # 等真人回答 agent 提问（question / ask_user）的上限，单位秒。
+  # 默认 1800（30 分钟）：提问弹在 TUI 里，人可能切窗口或离开工位，
+  # 而超时的后果不是「慢」而是决策被替换 —— harness 会让 agent 自行决定。
+  # 这段等待**不计入**空闲判据，所以调大它不会让真死锁更晚暴露
+  # （那由 transport.IDLE_TIMEOUT 的 5 分钟负责）。
+  ask_user_timeout: 1800
   repo_path: repo
   coding:
     # Red 见证（A2）。false = 03 阶段不拆子状态，走原有的 run_project_tests，

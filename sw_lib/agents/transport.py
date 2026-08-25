@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -64,8 +65,48 @@ class OpenCodeTransport:
     # 不是这个数字，而是 F11 那层 `permission.asked` 订阅 —— 超时是**兜底**，
     # 不该承担第一道防线的职责。
     #
+    #   900 → 1980：等真人回答的上限改为可配置且默认 30 分钟
+    #               （`harness.ask_user_timeout`）。这一层是真实的 HTTP
+    #               超时：agent 调 question 期间 POST /message 一直挂着，
+    #               所以它必须容得下「等人 + 一次 reject 的处置余量」，
+    #               否则用户在第 20 分钟认真作答时请求早已断开，
+    #               回答无处可投（reject_question 分支退化成死代码）。
+    #               取值 = 1800 + 180，由 `_required_chat_timeout()` 算出。
+    #
+    # ⚠️ 抬高这个数字**没有**让死锁多沉默 —— 那件事由 IDLE_TIMEOUT 负责，
+    # 而等人期间空闲计时被显式挂起（见 `waiting_for_human`）。
+    # 换句话说：墙上时钟这一层放宽的只是「一轮允许多长」，
+    # 「多久没动静算卡住」仍然是 5 分钟。这正是把两个语义拆开的收益 ——
+    # 此前它们挤在同一个常数里，任何一方的需求都会伤到另一方。
+    #
     # 改动它必须同时维持超时层级（见 tests/unit/agents/test_timeout_hierarchy.py）。
-    CHAT_TIMEOUT = 900.0
+    CHAT_TIMEOUT = 1980.0
+
+    #: 等人上限之外还要留给一次 reject + agent 收尾的余量（秒）。
+    #: 按绝对值留而不按比例：比例缩放在小基数上会只剩几十秒（见
+    #: opencode.QUESTION_TIMEOUT 的取值史）。
+    HUMAN_WAIT_MARGIN = 180.0
+
+    @classmethod
+    def effective_chat_timeout(cls) -> float:
+        """本次请求真正使用的墙上时钟上限。
+
+        取 `CHAT_TIMEOUT` 与「配置的等人上限 + 处置余量」中的较大者。
+
+        为什么不能只靠类属性：`harness.ask_user_timeout` 是用户可调的，
+        有人把它设成 60 分钟时，写死的 `CHAT_TIMEOUT` 会先断 ——
+        配置看起来生效了，实际被外层悄悄截断。那种「参数存在但不起作用」
+        正是本项目反复出现的形状。
+
+        只向上取、不向下调：配置调小不该连带缩短正常编码轮次的上限，
+        那两件事无关（`CHAT_TIMEOUT` 的 900s 下界由任务 ttt 实测标定）。
+        """
+        try:
+            from ..core.config import ask_user_timeout
+            need = ask_user_timeout() + cls.HUMAN_WAIT_MARGIN
+        except Exception:
+            need = 0.0
+        return max(cls.CHAT_TIMEOUT, need)
 
     # 空闲上限（秒）：距**上次观测到活动**多久没动静就算卡住。
     #
@@ -127,6 +168,11 @@ class OpenCodeTransport:
         # 让一个正常会话突然被判成空闲。
         self._last_activity_at: float = time.monotonic()
         self._last_activity_what: str = ""
+        # 「正在等真人回答」的嵌套深度与说明。见 waiting_for_human()。
+        # 用计数而不是布尔：agent 会连问几轮，内层退出不该解除外层的挂起。
+        self._human_wait_depth: int = 0
+        self._human_wait_reason: str = ""
+        self._human_wait_lock = threading.Lock()
 
     # ── 公开属性 ──
     @property
@@ -158,8 +204,58 @@ class OpenCodeTransport:
 
         用它可以在 CHAT_TIMEOUT 到期**之前**就区分开「卡住」与「在干活」，
         从而让超时报错说出正确的诊断，而不是让读者去翻服务端日志。
+
+        **等真人回答期间恒为 False**（见 `waiting_for_human`）：那段时间
+        agent 零活动是**预期**表现，不是故障征兆。
         """
+        if self.is_waiting_for_human:
+            return False
         return self.idle_seconds() > self.IDLE_TIMEOUT
+
+    # ── 等真人回答：把这段时间从空闲判据里摘出去 ──
+
+    @property
+    def is_waiting_for_human(self) -> bool:
+        """当前是否正在等真人回答。"""
+        return self._human_wait_depth > 0
+
+    @property
+    def waiting_reason(self) -> str:
+        """正在等什么（供超时诊断使用）。不在等人时为空串。"""
+        return self._human_wait_reason if self.is_waiting_for_human else ""
+
+    @contextmanager
+    def waiting_for_human(self, reason: str = "等用户回答"):
+        """标记「这段时间在等人，别算空闲」。
+
+        为什么必须有这一层：`IDLE_TIMEOUT` 问的是「agent 卡住了吗」，判据是
+        有没有新的工具调用。而 agent 等人回答时**本来就零活动** ——
+        那是在等人，不是卡住。此前靠 `IDLE_TIMEOUT(300s) > QUESTION_TIMEOUT
+        (180s)` 这个数值关系掩盖了语义混淆；等人上限抬到 30 分钟后，
+        障眼法就破了。
+
+        替代方案是把 `IDLE_TIMEOUT` 一路抬到 30 分钟以上 —— 那会让真正的
+        死锁多沉默 25 分钟，拿故障暴露能力换用户便利，方向反了。
+
+        退出时刷新活动时间戳：否则用户答完的那一刻，距「上次活动」已经是
+        半小时前，紧接着的第一次判定会把一个刚被唤醒的会话判成卡住。
+
+        `finally` 是必须的 —— `reject_question` 那条路径本身可能抛异常，
+        挂起状态一旦泄漏，这个会话此后永远不会被判为卡住。
+        """
+        with self._human_wait_lock:
+            self._human_wait_depth += 1
+            if reason:
+                self._human_wait_reason = reason
+        try:
+            yield
+        finally:
+            with self._human_wait_lock:
+                self._human_wait_depth = max(0, self._human_wait_depth - 1)
+                if self._human_wait_depth == 0:
+                    self._human_wait_reason = ""
+                    # 人答完了 = 一次活动。
+                    self.note_activity("user answered")
 
     @property
     def observed_tools(self) -> List[str]:
@@ -378,9 +474,10 @@ class OpenCodeTransport:
         if self._tools and not self._permission_rules:
             # 没有规则表时退回旧行为（粗粒度总比无规则默认 ask 好）。
             payload["tools"] = self._tools
+        chat_timeout = self.effective_chat_timeout()
         try:
             resp = requests.post(
-                url, json=payload, params=self._params(), timeout=self.CHAT_TIMEOUT
+                url, json=payload, params=self._params(), timeout=chat_timeout
             )
             resp.raise_for_status()
         except requests.Timeout:
@@ -399,7 +496,16 @@ class OpenCodeTransport:
             # harness 掌握。任务 helloworld 因此被误读成「模型卡住了」，
             # 实际是最后一次工具调用距断开仅 5 秒。
             idle = self.idle_seconds()
-            if idle > self.IDLE_TIMEOUT:
+            if self.is_waiting_for_human:
+                # 等人期间 idle_seconds() 被冻结，照旧的两分法会给出一句
+                # 与事实相反的诊断（「疑似卡住」）。这里必须说实话：
+                # 没人回答不是 agent 的故障（A6 第 3 条：不猜）。
+                diagnosis = (
+                    f"  诊断：**一直在等用户回答** —— {self.waiting_reason}。\n"
+                    f"  agent 没有卡住，是提问始终没有人应答。"
+                    f"等人上限可用 `harness.ask_user_timeout` 调整"
+                    f"（当前 {chat_timeout - self.HUMAN_WAIT_MARGIN:.0f}s）。")
+            elif idle > self.IDLE_TIMEOUT:
                 diagnosis = (
                     f"  诊断：**疑似卡住** —— 距上次活动已 {idle:.0f}s"
                     f"（超过空闲上限 {self.IDLE_TIMEOUT:.0f}s）。"
@@ -410,10 +516,10 @@ class OpenCodeTransport:
                     f"（未达空闲上限 {self.IDLE_TIMEOUT:.0f}s），"
                     f"是被墙上时钟上限切断的，不是卡死。\n"
                     f"  这一轮的工作量超出了单轮上限：请把任务拆小，"
-                    f"或调高 CHAT_TIMEOUT（当前 {self.CHAT_TIMEOUT:.0f}s）。")
+                    f"或调高 CHAT_TIMEOUT（当前 {chat_timeout:.0f}s）。")
 
             raise OpenCodeTransportError(
-                f"opencode 响应超时（CHAT_TIMEOUT={self.CHAT_TIMEOUT:.0f}s）: {url}\n"
+                f"opencode 响应超时（CHAT_TIMEOUT={chat_timeout:.0f}s）: {url}\n"
                 f"  {progress}\n"
                 f"{diagnosis}"
             )
