@@ -28,6 +28,7 @@ from ..core.evidence import verify_evidence
 
 EXIT_ASSERTION_FAILED = 1   # 有效的红
 EXIT_COLLECTION_ERROR = 2   # 造红：ImportError / SyntaxError
+EXIT_USAGE_ERROR = 4        # pytest 用法/内部错误：conftest 塌了最常见
 EXIT_NO_TESTS = 5           # 无测试
 EXIT_ALL_PASSED = 0         # 绿（也可能是「全 skip」的假绿）
 
@@ -156,6 +157,17 @@ def classify_exit_code(exit_code: int, nodes: Dict[str, str]) -> WitnessVerdict:
     if exit_code == EXIT_NO_TESTS:
         return WitnessVerdict(
             "invalid", "无测试：pytest 未收集到任何测试用例。", exit_code)
+
+    if exit_code == EXIT_USAGE_ERROR:
+        # 与「无测试」分开说。实测 `repo/newworld`：3 个测试文件都在，但
+        # `tests/conftest.py` 写 `from main import app` 而 `main.py` 没写，
+        # conftest 一塌 pytest 就以 4 退出、一个测试也不跑。落到下面的兜底
+        # 分支会说「无测试」，把人推去补测试 —— 该补的是 main.py。
+        return WitnessVerdict(
+            "invalid",
+            "pytest 未能启动（退出码 4）：conftest.py 导入失败或命令行/配置有误，"
+            "收集期就中断了，一个测试也没跑。",
+            exit_code)
 
     if exit_code < 0:
         # 超时 / 解释器起不来。三态里的 ❓，绝不当成通过（A2 的 R3）。
@@ -760,18 +772,119 @@ def _project_python(target: Path) -> Optional[str]:
     agent 常在 target_dir 下建 `.venv` 装依赖再跑通测试。用 harness 的
     python3 会 ModuleNotFoundError —— 那会被判成 collection error（退出码 2），
     也就是「造红」，于是门禁与 agent 对同一份代码给出相反结论。
+
+    解释器跟着**项目根**走，不只看 `target_dir`：任务 `welll` 把后端放在
+    `backend/`，依赖也装在 `backend/venv` 里。只看顶层会连解释器都对不上，
+    这是同一次误判的第二层成因（T3 的教训原先只落了一半）。
+
+    返回**绝对路径**：`run_tests` 会 `cd` 到项目根，相对路径到那里就不存在了
+    （`.state` 里存的 target_dir 就是 `repo/welll` 这种相对路径）。
+    `lib_run_tests.sh` 早就显式处理过同一件事，Python 侧原先漏了 ——
+    实测的后果是退出码 -1（unavailable），比原来的误判更糟。
+
+    绝对化用 `os.path.abspath` 而**不是** `Path.resolve()`：venv 里的
+    `bin/python` 是指向 `python3.12` 乃至系统解释器的符号链接，`resolve()`
+    会把它解析成真身，于是 venv 的 `site-packages` 整个失效 ——
+    实测 `repo/welll` 因此从 17 passed 退回退出码 2。虚拟环境靠的正是
+    「从哪个路径启动」，这条链接不能跟。
     """
-    for candidate in (target / ".venv" / "bin" / "python",
-                      target / "venv" / "bin" / "python"):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+    roots = [target]
+    real_root = resolve_pytest_root(target)
+    if real_root != target:
+        roots.append(real_root)
+    for root in roots:
+        for candidate in (root / ".venv" / "bin" / "python",
+                          root / "venv" / "bin" / "python"):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return os.path.abspath(str(candidate))
     return None
+
+
+def _local_test_files(root: Path) -> bool:
+    """``root`` 自己是否直接持有 pytest 测试文件。
+
+    与 `_has_pytest_surface` 的分工是刻意的，两者不能互换：
+
+    * `_has_pytest_surface` 回答「这个技术栈算不算 Python/pytest」，
+      递归看到任意 `.py` 都算 —— 它决定「要不要让路」；
+    * 这里回答「pytest 从这个目录跑起来能不能收集到测试」，只认
+      顶层 `test_*.py` 与 `tests/` 下的测试文件 —— 它决定「在哪里跑」。
+
+    用前者选执行目录会把 `repo/welll` 判成命中（`backend/` 下有 `.py`），
+    于是仍在仓库根跑 pytest，也就复现不出修复。
+
+    配置文件（`pytest.ini` / `pyproject.toml`）**刻意不算**：它们说明
+    「这里配置了 pytest」，不说明「这里有测试」。`welll` 的仓库根两者
+    都没有，靠配置文件判会一路空手。
+    """
+    if not root.is_dir():
+        return False
+    for path in root.glob("*.py"):
+        if path.name.startswith("test_") or path.name.endswith("_test.py"):
+            return True
+    for name in _TEST_DIR_NAMES:
+        sub = root / name
+        if not sub.is_dir():
+            continue
+        for path in sub.rglob("*.py"):
+            if path.name.startswith("test_") or path.name.endswith("_test.py"):
+                return True
+    return False
+
+
+def resolve_pytest_root(target: Any) -> Path:
+    """项目真正的 pytest 根目录（任务 `welll` 的教训）。
+
+    `target_dir` 是 harness 分配的仓库根，**不一定**是项目根。agent 常写
+    `backend/` + `frontend/` 这种布局：测试在 `backend/tests/` 下、写
+    `from main import app`，只有 cwd 在 `backend/` 时那个 import 才成立。
+    在仓库根跑 pytest 会收集期 ImportError → 退出码 2 → 判「造红」，
+    而「造红」是被硬拦的。于是 agent 报 17 passed、门禁报造红，
+    两边都没说谎 —— 只是跑在不同的地方。
+
+    探测有意收得很窄，宁可退回既有行为也不猜：
+
+    * 只有仓库根**自己没有**可收集的测试时才往下找 —— 平铺布局
+      （e2e 的主路径）与 `tests/` 布局的结论完全不变；
+    * 只找**一层**子目录，且跳过 `_IGNORED_DIRS`（`venv/`、
+      `node_modules/` 里全是别人的测试）；
+    * 命中的子目录**恰好一个**时才切换。两个以上说明这是 monorepo，
+      选谁都可能错，那时留在仓库根 —— 这类项目通常在根上配了
+      `pytest.ini` / `pyproject.toml` 来指路。
+
+    「能收集到测试」用文件存在性判定，不用真跑一次 `--collect-only`：
+    `welll` 的 `backend/main.py` 依赖 fastapi，只装在 `backend/venv` 里，
+    拿 harness 的 python3 去试收集必然失败 —— 而选执行目录这一步
+    正是为了之后能用对解释器，用「跑得通」当判据会形成循环依赖。
+    """
+    root = Path(str(target))
+    if not root.is_dir():
+        return root
+    if _local_test_files(root):
+        return root
+
+    candidates: List[Path] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name in _IGNORED_DIRS:
+            continue
+        if child.name in _TEST_DIR_NAMES:
+            # `root/tests` 本身不是项目根，它是 root 的测试目录 ——
+            # 已由上面的 `_local_test_files(root)` 覆盖。
+            continue
+        if _local_test_files(child):
+            candidates.append(child)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return root
 
 
 def _pytest_env(target: Path) -> Dict[str, str]:
     """src-layout 的 PYTHONPATH 与项目解释器（复用 lib_run_tests.sh 的结论）。"""
     env: Dict[str, str] = {}
-    if (target / "src").is_dir():
+    # `PYTHONPATH=src` 是相对 cwd 的，而 cwd 是项目根而非 target_dir ——
+    # 子目录布局里要看的是 `backend/src`，不是 `<repo>/src`。
+    if (resolve_pytest_root(target) / "src").is_dir():
         env["PYTHONPATH"] = "src"
     py = _project_python(target)
     if py:
@@ -780,7 +893,13 @@ def _pytest_env(target: Path) -> Dict[str, str]:
 
 
 def _run_in_target(target: Path) -> Tuple[int, Dict[str, str]]:
-    return run_tests(target, extra_env=_pytest_env(target))
+    """在项目**真正的** pytest 根上跑一次见证。
+
+    冻结（`hash_test_files`）仍以 `target_dir` 为基准，两者刻意不同源：
+    冻结路径是写进 `.state` 的既有记录，改基准会让存量任务的哈希键全变。
+    执行目录变、记录口径不变。
+    """
+    return run_tests(resolve_pytest_root(target), extra_env=_pytest_env(target))
 
 
 @dataclass

@@ -37,6 +37,18 @@ SCENARIO_DONE_MARKER = "mock_agent scenario complete"
 #: 仍是 e2e 的主路径，这个开关只为把那次误判钉成可复现的判据。
 TEMPLATE_ONLY_ENV = "SW_MOCK_PLANNING_TEMPLATE_ONLY"
 
+#: 置 1 时，03 场景改写成「子目录布局」的项目。
+#:
+#: 这是任务 `welll` 现场的真实形状：agent 把后端放在 `backend/`，
+#: 测试写 `from main import app`（`main.py` 在 `backend/` 下），
+#: 依赖装进 `backend/venv`，然后 `cd backend && pytest tests/` 跑出 17 passed。
+#: 而红见证在**仓库根**跑 pytest —— `main` 不在 sys.path 上，
+#: 3 个 collection error、退出码 2，被判成「造红」。
+#:
+#: 默认关闭：顶层平铺布局仍是 e2e 的主路径，这个开关只为把那次
+#: 「同一份代码两侧结论相反」钉成可复现的判据。
+SUBDIR_LAYOUT_ENV = "SW_MOCK_CODING_SUBDIR_LAYOUT"
+
 
 class MockAgent(BaseAgent):
     """
@@ -465,6 +477,8 @@ class MockAgent(BaseAgent):
 
     def _write_sample_project(self, target: Path) -> List[str]:
         """写一个自洽的最小 Python 项目；返回写入的相对路径列表。"""
+        if os.environ.get(SUBDIR_LAYOUT_ENV, "").strip() in ("1", "true", "yes"):
+            return self._write_subdir_project(target)
         files = {
             "mocknote.py": (
                 '"""Mock 产出：最小可运行模块。"""\n\n\n'
@@ -492,6 +506,63 @@ class MockAgent(BaseAgent):
             target.mkdir(parents=True, exist_ok=True)
             for rel, body in files.items():
                 (target / rel).write_text(body, encoding="utf-8")
+                written.append(rel)
+        except OSError as e:
+            sw_log(self.name, f"mock coding write failed: {e}", "error")
+        return written
+
+    def _write_subdir_project(self, target: Path) -> List[str]:
+        """写一个**子目录布局**的项目，复现任务 `welll` 的形状。
+
+        三个要素缺一不可，缺了任何一个都复现不出那次误判：
+
+        1. 实现与测试都在 `backend/` 下，测试写 `from main import app` ——
+           只有 cwd 在 `backend/` 时这个 import 才成立；
+        2. 仓库根**没有** pytest 配置，所以谁也不会告诉 pytest 该从哪跑；
+        3. 测试本身是好的：`cd backend && pytest tests/` 全绿。
+
+        第 3 点是这个复现的关键。`welll` 的 agent 报 17 passed 是**真的**，
+        门禁报「造红」也是真的 —— 两者跑在不同的工作目录里。若 mock 写出
+        一份真有 bug 的代码，测出来的红就分不清是「布局问题」还是「代码问题」。
+        """
+        files = {
+            "backend/main.py": (
+                '"""Mock 产出：子目录布局的最小后端。"""\n\n'
+                'from calc import add\n\n\n'
+                'def health():\n'
+                '    return {"status": "ok", "sum": add(1, 1)}\n'
+            ),
+            "backend/calc.py": (
+                '"""被测模块。刻意放在 backend/ 下而不是仓库根。"""\n\n\n'
+                'def add(a, b):\n'
+                '    return a + b\n'
+            ),
+            # `from calc import add` 只在 cwd == backend/ 时成立 ——
+            # 这正是 welll 里 `from main import app` 的同构形态。
+            "backend/tests/test_calc.py": (
+                'from calc import add\n\n\n'
+                'def test_add():\n'
+                '    assert add(1, 2) == 3\n\n\n'
+                'def test_add_negative():\n'
+                '    assert add(-1, 1) == 0\n'
+            ),
+            "backend/requirements.txt": "pytest\n",
+            "README.md": (
+                f"# {self.name}\n\n"
+                "Mock 模式产出的子目录布局项目（复现任务 welll 的形状）。\n\n"
+                "## 验证\n\n"
+                "```bash\n"
+                "cd backend && python3 -m pytest tests/ -q\n"
+                "```\n"
+            ),
+        }
+        written: List[str] = []
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for rel, body in files.items():
+                path = target / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
                 written.append(rel)
         except OSError as e:
             sw_log(self.name, f"mock coding write failed: {e}", "error")

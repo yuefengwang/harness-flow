@@ -796,6 +796,87 @@ harness 会 `reject_question()` 让 agent 自行决定，而 01 阶段的全部�
 
 ---
 
+### 2.9.14 任务 welll 的现场：两侧结论相反，因为跑在不同的地方（已修）
+
+用户反馈：「依旧跑出了 bug，还是 coding 阶段红绿见证的问题？」
+
+```text
+agent 🔧 bash {'command': 'cd backend && source venv/bin/activate && python -m pytest tests/test_main.py -v'}
+agent 商城应用开发完成。已完成所有7个任务：**后端 (17个测试全部通过)**
+sw    ❌ 未能见证有效的红（退出码 2）
+sw       造红：收集期就报错（ImportError / SyntaxError），断言从未被执行。
+ERR   硬校验未通过，必须满足所有条件才能推进
+```
+
+本机实测同一份代码：
+
+| 怎么跑 | 结果 |
+|---|---|
+| `cd repo/welll/backend && ./venv/bin/python -m pytest tests -q`（agent 的跑法） | **17 passed** |
+| `cd repo/welll && python3 -m pytest -q`（见证的跑法） | **3 errors**，退出码 2 |
+
+两边都没说谎。`agent` 的项目是 `backend/` + `frontend/` 布局，测试写
+`from main import app`，只有 cwd 在 `backend/` 时才成立。
+
+#### 这是同一个坑的第四次出现
+
+前三次都记在 `lib_run_tests.sh` 与 `red_witness.py` 的注释里：T2（src-layout
+缺 `PYTHONPATH=src`，agent 报 25 passed、门禁报失败）、T3（依赖装在 `.venv`
+里，门禁报缺 pandas）、helloworld（两侧测试面判据错位，20 个测试一个没跑）。
+
+三次的处置都是「在顶层再补一种探测」。这次的形状说明补的方向不够：
+
+> **判例**：当 harness 与 agent 对同一份代码给出相反结论时，先问
+> 「我们是不是在不同的地方执行」，而不是先怀疑代码。
+> 前三次修的是「少认了一种标记」，这次错的是**判据假定项目根 == `target_dir`**。
+
+#### 必须两侧同时修，否则误判会翻成假绿
+
+见证侧修好后，钩子侧实测 `repo/welll` 仍是
+`ⓘ 未发现 pytest 测试面（未执行 pytest，非『通过』）`、`rc=0`。而 A2 的所有
+让路路径都把测试判定「交回 `run_project_tests`」——
+只修见证侧的结果是**从「误拦好代码」翻成「放过坏代码」，比原 bug 更糟**。
+`test_hook_subdir_layout.py::test_03_gate_blocks_failing_tests_in_subdir_layout`
+钉住这条底线（该判据在修钩子前实测拿到 `[Hard Check] ✅ 通过`）。
+
+#### 转绿过程中撞出的两个真实缺陷
+
+两者都是**新旧行为逐任务对照**跑出来的，不是测试报的 —— 这个手法值得保留。
+
+1. **`Path.resolve()` 会解掉 venv 的符号链接。** 为让解释器路径绝对化而用了
+   `resolve()`，`backend/venv/bin/python` 是指向 `python3.12` 的软链，被解析成
+   系统解释器后 `site-packages` 整个失效，`welll` 从 17 passed 退回退出码 2。
+   虚拟环境靠的正是「从哪个路径启动」，这条链接不能跟：改用 `os.path.abspath`。
+2. **相对 `target_dir` + 切换 cwd = unavailable。** `.state` 里存的是
+   `repo/welll`，解释器路径也就是相对的，而 cwd 现在是 `repo/welll/backend`
+   —— 到那里相对路径不存在，退出码 -1。`lib_run_tests.sh` 早就显式处理过
+   同一件事，Python 侧漏了。
+
+#### 顺手修实的一处文案
+
+`repo/newworld` 从退出码 2 变成 4（它的 `conftest.py` 写
+`from main import app` 而 `backend/main.py` 根本没写）。拦对了，但理由说的是
+「无测试：未采集到任何测试节点结果」—— 测试文件有 3 个，是 conftest 塌了。
+误导性的拒绝理由会把人推去补测试，而该补的是 `main.py`。新增
+`EXIT_USAGE_ERROR = 4` 单独成句。
+
+#### 落点
+
+| 项 | 内容 |
+|---|---|
+| `red_witness.resolve_pytest_root()`（新） | 仓库根自己没有可收集测试时，往下找**一层**；命中**恰好一个**才切换，否则留在根 |
+| `red_witness._run_in_target()` / `_pytest_env()` | 在探测出的项目根上跑；`PYTHONPATH=src` 也跟着看项目根 |
+| `red_witness._project_python()` | 也找项目根下的 venv；返回 `abspath` 而非 `resolve()` |
+| `hash_test_files()` | **不变**，仍以 `target_dir` 为基准 —— 冻结路径是 `.state` 里的既有记录 |
+| `lib_run_tests.sh::_pytest_root()`（新） | 直接调 `resolve_pytest_root`，两侧判据同源而非各写一份 |
+| `_has_pytest_surface` / `run_project_tests` / `_project_python`（shell） | 一律查项目根；pytest 在项目根上跑 |
+
+探测刻意收得很窄：只有根上没测试才往下找、只找一层、跳过 `_IGNORED_DIRS`、
+命中多个就退回根（monorepo 通常在根上配了 `pytest.ini` 指路）。宁可退回既有
+行为也不猜。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，

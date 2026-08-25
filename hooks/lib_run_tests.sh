@@ -56,10 +56,33 @@ has_code_output() {
     return 1
 }
 
+# 项目**真正的** pytest 根目录（任务 welll 的教训）。
+#
+# target_dir 是 harness 分配的仓库根，不一定是项目根。agent 常写
+# backend/ + frontend/ 这种布局，测试在 backend/tests/ 下写
+# `from main import app` —— 只有 cwd 在 backend/ 时才成立。在仓库根跑
+# pytest 会收集期 ImportError，于是 agent 报 17 passed、门禁报失败。
+#
+# 判据必须与 red_witness.resolve_pytest_root 保持一致，直接调它 ——
+# 两侧各写一份就是 helloworld 那次错位的成因（见证侧认得、钩子侧不认）。
+# python3 起不来时回落到 dir 本身，也就是修复前的既有行为。
+_pytest_root() {
+    local dir="$1"
+    [ -n "$dir" ] && [ -d "$dir" ] || { echo "$dir"; return 0; }
+    python3 -c "
+import sys
+from sw_lib.workflow.red_witness import resolve_pytest_root
+print(resolve_pytest_root(sys.argv[1]))
+" "$dir" 2>/dev/null || echo "$dir"
+}
+
 # src-layout（源码在 src/ 下但包未安装）时，pytest 收集期就会
 # ModuleNotFoundError。agent 自己是用 PYTHONPATH=src 跑通的，hook 不加就会
 # 得出与 agent 相反的结论 —— 任务 T2 因此卡死：agent 报 25 passed，
 # 门禁报 pytest 失败，且用户无从下手。
+#
+# 传进来的应当是 _pytest_root 的结果而非 target_dir：PYTHONPATH=src 是
+# 相对 cwd 的，子目录布局里要看的是 backend/src。
 _pytest_pythonpath() {
     local dir="$1"
     if [ -d "$dir/src" ]; then
@@ -73,10 +96,15 @@ _pytest_pythonpath() {
 # 解释器跑通测试。钩子用 harness 的 python3 就会 ModuleNotFoundError（任务
 # T3：pandas 装在 repo/T3/.venv 里，门禁却报缺 pandas）—— 又一次门禁与
 # agent 对同一份代码给出相反结论。
+#
+# 也找项目根下的 venv：welll 把依赖装在 backend/venv 里，只看 target_dir
+# 连解释器都对不上（T3 的教训原先只落了一半）。
 _project_python() {
     local dir="$1"
-    local candidate
-    for candidate in "$dir/.venv/bin/python" "$dir/venv/bin/python"; do
+    local root candidate
+    root=$(_pytest_root "$dir")
+    for candidate in "$dir/.venv/bin/python" "$dir/venv/bin/python" \
+                     "$root/.venv/bin/python" "$root/venv/bin/python"; do
         if [ -x "$candidate" ]; then
             echo "$candidate"
             return 0
@@ -96,8 +124,13 @@ _project_python() {
 # pytest.ini 也无 pyproject.toml。旧判据三条全不命中，20 个测试一个没跑，
 # 钩子打印「未发现 pytest 测试面」并放行。见证侧却认得 tests/ ——
 # 同一份代码，两侧结论相反。
+#
+# 第二种形态（任务 welll）：布局是 backend/{main.py,tests/test_*.py} +
+# frontend/。判据全都只看顶层，17 个测试同样一个没跑、rc=0。所以这里查的
+# 是 _pytest_root 的结果而不是 target_dir 本身。
 _has_pytest_surface() {
-    local dir="$1"
+    local dir
+    dir=$(_pytest_root "$1")
     [ -n "$dir" ] && [ -d "$dir" ] || return 1
 
     # 显式声明用 pytest / setuptools 的项目
@@ -130,9 +163,12 @@ run_project_tests() {
     local fail_label="${2:-pytest 失败}"
 
     if _has_pytest_surface "$dir"; then
-        echo "运行 pytest ($dir)..."
+        # pytest 在项目根上跑，不在 target_dir 上（任务 welll）。
+        local root
+        root=$(_pytest_root "$dir")
+        echo "运行 pytest ($root)..."
         local extra_path
-        extra_path=$(_pytest_pythonpath "$dir")
+        extra_path=$(_pytest_pythonpath "$root")
         local py
         py=$(_project_python "$dir")
         if [ -n "$py" ]; then
@@ -149,7 +185,7 @@ run_project_tests() {
         # 用 python3 -m pytest 而不是裸 pytest：PATH 上的 pytest 脚本可能绑在
         # 另一个解释器上（本机是 3.9，而 python3 是 3.12），跑出来的结果和
         # agent 看到的不一致。
-        if ! out=$(cd "$dir" && PYTHONPATH="${extra_path}${extra_path:+:}${PYTHONPATH}" \
+        if ! out=$(cd "$root" && PYTHONPATH="${extra_path}${extra_path:+:}${PYTHONPATH}" \
                     "$py" -m pytest 2>&1); then
             echo "❌ $fail_label"
             # 失败原因必须回显。此前是 >/dev/null 2>&1 全丢弃，用户只看到
