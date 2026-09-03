@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.config import TASKS, is_mock_agent
+from .red_witness import resolve_pytest_root
 
 #: `diff.patch` 的字节上限。超出即按风险排序截断，被截断的文件写入
 #: `diff.truncated` 并进 warnings —— 截断必须可见（A3 的 3.8 第 4 条）。
@@ -54,12 +55,28 @@ def _project_python(target_dir: str) -> Optional[str]:
 
     优先用 `target_dir/.venv/bin/python`：PATH 上的 pytest 可能绑在另一个
     解释器上，跑出来的结果和 agent 看到的不一致。
+
+    也找**项目根**下的 venv：任务 `testNew` 把 fastapi 装在
+    `repo/testNew/backend/venv` 里，只看 `target_dir` 连解释器都对不上。
+    钩子侧的 `_project_python` 已经这么做了，这里补齐第三侧。
+
+    返回**绝对路径**：`collect_tests` 会把 cwd 切到项目根，而 `.state` 里存的
+    target_dir 是 `repo/testNew` 这种相对路径，到了 `backend/` 下就不存在了。
+    `testNew` 实测的后果是「解释器找对了、版本探测却失败」，整包记
+    `unavailable` —— 比原来的误判更糟（见证侧 docstring 已判过同型）。
+
+    绝对化用 `os.path.abspath` 而**不是** `Path.resolve()`：venv 的
+    `bin/python` 是指向 `python3.12` 的符号链接，`resolve()` 会解析成真身，
+    于是 venv 的 site-packages 整个失效。虚拟环境靠的正是「从哪个路径启动」。
     """
     base = Path(target_dir)
+    root = resolve_pytest_root(base)
     for candidate in (base / ".venv" / "bin" / "python",
-                      base / "venv" / "bin" / "python"):
+                      base / "venv" / "bin" / "python",
+                      root / ".venv" / "bin" / "python",
+                      root / "venv" / "bin" / "python"):
         if candidate.is_file():
-            return str(candidate)
+            return os.path.abspath(str(candidate))
     return None
 
 class FactPackError(Exception):
@@ -130,11 +147,17 @@ def parse_pytest_summary(output: str, exit_code: int) -> Dict[str, Any]:
 
 
 def _has_pytest_surface(target: Path) -> bool:
-    """target 下是否存在 pytest 语义的测试面。
+    """项目根下是否存在 pytest 语义的测试面。
 
     与 `lib_run_tests.sh` 的判据保持一致，否则会出现「hook 跑了、事实包说
-    没跑」这类错位。
+    没跑」这类错位 —— 任务 `testNew` 现场就是这个形状：同一次运行里 shell
+    报 9 passed，客观轨报「无测试面」并以 O3 硬拦。
+
+    量的是 `resolve_pytest_root(target)` 而非 `target` 自身：`target_dir` 是
+    harness 分配的仓库根，不一定是项目根（`backend/` + `frontend/` 布局）。
+    三侧（见证 / 钩子 / 事实包）必须同源，各写一份就是错位的成因。
     """
+    target = resolve_pytest_root(target)
     if (target / "pytest.ini").is_file() or (target / "pyproject.toml").is_file():
         return True
     if any(target.glob("test_*.py")) or any(target.glob("*_test.py")):
@@ -158,7 +181,10 @@ def _pytest_pythonpath(target: Path) -> Optional[str]:
     同一个 hook 就会自己跟自己矛盾（A6 上线后实测：shell 报 1 passed、
     客观轨的 O2 报 1 failed）。
     """
-    return "src" if (target / "src").is_dir() else None
+    # `PYTHONPATH=src` 是相对 cwd 的，而 cwd 是项目根而非 target_dir ——
+    # 子目录布局里要看的是 `backend/src`，不是 `<repo>/src`
+    # （与见证侧 `_pytest_env` 同一条结论）。
+    return "src" if (resolve_pytest_root(target) / "src").is_dir() else None
 
 
 def collect_tests(target_dir: str) -> Dict[str, Any]:
@@ -187,16 +213,22 @@ def collect_tests(target_dir: str) -> Dict[str, Any]:
         base["raw"] = f"target_dir 不存在: {target_dir}"
         return base
 
-    version = _pytest_version(py, target)
+    version = _pytest_version(py, resolve_pytest_root(target))
     if version is None:
         base["raw"] = f"无法执行 {py} -m pytest --version"
         return base
     base["pytest_version"] = version
 
+    # 项目真正的 pytest 根。探测规则见 `resolve_pytest_root`：根上有测试就
+    # 留在根，平铺布局的结论完全不变。
+    pytest_root = resolve_pytest_root(target)
+    base["pytest_root"] = str(pytest_root)
+
     if not _has_pytest_surface(target):
         # 没有测试面：明确记「未跑」，不报 0 passed —— 那看起来像跑过了。
+        # `unavailable` 绝不计为通过，这条边界不因本次修复而放宽。
         base["parse_status"] = "no_test_surface"
-        base["raw"] = "target_dir 下没有 pytest 语义的测试面"
+        base["raw"] = f"{pytest_root} 下没有 pytest 语义的测试面"
         return base
 
     env = os.environ.copy()
@@ -209,7 +241,7 @@ def collect_tests(target_dir: str) -> Dict[str, Any]:
     try:
         proc = subprocess.run(
             [py, "-m", "pytest", "--tb=no", "-q"],
-            cwd=str(target), capture_output=True, text=True,
+            cwd=str(pytest_root), capture_output=True, text=True,
             timeout=PYTEST_TIMEOUT, env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:

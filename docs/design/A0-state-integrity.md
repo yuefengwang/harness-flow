@@ -877,6 +877,94 @@ ERR   硬校验未通过，必须满足所有条件才能推进
 
 ---
 
+### 2.9.15 任务 testNew 的现场：同一个坑的第三侧 —— 事实包没跟上（已修）
+
+用户执行 `sw init` 起的新任务，04 阶段推进时被硬拦。现场（`workspace/tasks/testNew/.log`）：
+
+```text
+15:16:45 sw    运行 pytest (repo/testNew/backend)...
+15:16:45 sw      使用项目虚拟环境: .../repo/testNew/backend/venv/bin/python
+15:16:45 sw        ================ 9 passed, 17 warnings in 3.10s ================
+15:16:45 sw    [Objective Track] 客观轨判定...
+15:16:45 sw      ❓ O2 tests: unavailable target_dir 下没有 pytest 语义的测试面
+15:16:45 sw      ❌ O3 test_validity: fail collected=0（无测试面）
+15:16:45 sw    ❌ 客观轨硬失败: O3
+```
+
+**同一个 hook、同一份代码、同一次运行**：shell 那侧报 9 passed 并打印了
+`backend/venv` 的解释器，客观轨报「无测试面」并以 O3（severity=high）硬拦。
+两边都没说谎 —— 只是跑在不同的地方。
+
+#### 根因：`resolve_pytest_root` 有三个消费方，2.9.14 只接了两个
+
+这是 `welll` 那个坑的**第三侧**。形状逐字不变：**判据假定 `target_dir`
+就是项目根**。2.9.14 修好了见证侧与钩子侧，`fact_pack` 这一侧留在原地：
+
+| 位置 | 2.9.14 后的状态 | 后果 |
+|---|---|---|
+| `fact_pack._has_pytest_surface()` | 量 `target_dir` | 报「无测试面」 |
+| `fact_pack.collect_tests()` 的 cwd | `target_dir` | 收集期 ImportError |
+| `fact_pack._pytest_pythonpath()` | 看 `<repo>/src` | 子目录布局下失准 |
+| `fact_pack._project_python()` | 只找 `target_dir` 下的 venv | 解释器对不上 |
+
+`objective_check._tests_checks` 的 docstring 明写「刻意不自己跑 pytest，
+复用采集层」—— 采集层错位，O2/O3 就一起错位，且 O3 是硬阻断。
+
+**为什么必须修这一侧**：agent 无从下手。它的测试确实存在、确实全绿，
+失败信息却说「无测试面」。这与 2.9.11 的 O6 死锁同构 —— 判据要求的东西，
+没有任何角色能通过修改代码来满足。
+
+#### 第二层：单元全绿 ≠ 机制接通（第六次）
+
+三处路径改完后单元测试 9 passed 全绿，但在 `repo/testNew` 上实测仍是：
+
+```text
+python: repo/testNew/backend/venv/bin/python
+raw:    无法执行 repo/testNew/backend/venv/bin/python -m pytest --version
+parse_status: unavailable
+```
+
+解释器**找对了**，但 `_project_python` 返回相对路径，而子进程 cwd 已切到
+`backend/`，相对路径到那里不存在。整包记 `unavailable` —— 比原来的误判更糟
+（`unavailable` 不算通过，O3 照旧拦）。
+
+单元测试照不到这层：fixture 用的是 `tmp_path` 绝对路径，而 `.state` 里存的
+`target_dir` 是 `repo/testNew` 这种**相对**路径。见证侧 `_project_python` 的
+docstring 早已写明「返回绝对路径」并记录了实测后果，事实包侧漏了同一句。
+
+这条只能靠「在真实任务目录上跑一遍」发现。判例：**涉及路径的修复，单元测试
+必须额外覆盖相对 target_dir 的形态**，否则真实链路与测试链路的前提不同。
+
+#### 落点
+
+| 项 | 内容 |
+|---|---|
+| `fact_pack._has_pytest_surface()` | 量 `resolve_pytest_root(target)` 而非 target 自身 |
+| `fact_pack.collect_tests()` | cwd 与版本探测都在项目根上；`pytest_root` 落盘便于定位 |
+| `fact_pack._pytest_pythonpath()` | `PYTHONPATH=src` 相对项目根算 |
+| `fact_pack._project_python()` | 也找项目根下的 venv；返回 `os.path.abspath` 而非 `resolve()` |
+| `raw` 文案 | 由「target_dir 下没有…」改为打印实际探测到的项目根 |
+
+三条边界刻意不放宽：平铺布局结论完全不变；真的没有测试仍报
+`no_test_surface`（`unavailable` 与 `pass` 继续分开）；monorepo 多候选时
+留在仓库根，与见证侧同源。
+
+#### 同型清扫：登记一处未修
+
+`sw_lib/probe/baseline.py::is_surviving()` 是这个形状的**第四个实例** ——
+它调 `run_tests(target_dir)`，而 `run_tests` 是底层执行器、按传入目录跑，
+不自己解析项目根。子目录布局下它会得到退出码 5/-1 并记 `unavailable`。
+
+**本轮不修**，理由：它只被 `scripts/probe/b0_capture.py` 与
+`b0_survival_screen.py` 调用，不在 04 门禁链路上，错位的后果是 B0 采样把
+样本记为「未测量」（分母不被灌大，方向是保守的），不会误拦任何任务。
+修它需要一并决定「变异注入的路径基准是否跟着项目根走」，那是 A11 的口径问题，
+不宜夹在本次修复里。
+
+登记于此，以免成为第八个「判据存在、无人回头」的遗留。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，
