@@ -365,6 +365,68 @@ def record_decision(task: str, stage: str, question: str, answer: str,
 
 
 # ── AI Output 边界 nonce ──
+# ── 歧义自评的留痕（A13：自评降级为参考，但必须记账）──
+#
+# 歧义分数是 **agent 自评**，不是 harness 观测到的事件。A13 把它从硬拦判据
+# 降级为参考之后，「放行」这个动作本身必须留下痕迹 —— 否则读不到分数与
+# 分数达标在下游看来一模一样，那正是 DEV-PROTOCOL 第 2 节禁止的二态化：
+# 把「没测到」洗成「测过了」。
+#
+# 记在 `.state` 而不是阶段文件里，理由与 Gate 相同：文件 agent 能改，
+# `.state` 的判据区它写不进去（toolbox 的 `_PROTECTED_NAMES` + HMAC）。
+
+#: 自评的三种状态。与 A2 的红见证同一套三态词汇，不另造一套。
+AMBIGUITY_OK = "ok"                          # 读到了，且达标
+AMBIGUITY_BELOW = "below_threshold"          # 读到了，但低于阈值
+AMBIGUITY_UNAVAILABLE = "unavailable"        # 读不到 —— **不算通过**
+
+
+def read_ambiguity_record(task: str, stage: str) -> Dict[str, Any]:
+    """读本阶段的歧义自评记录；没有记录返回空字典。
+
+    空字典与 `{"status": "unavailable"}` 是两回事：前者是「判据还没跑过」，
+    后者是「判据跑了，但分数读不到」。下游报告要区分这两种 ❓ 的成因。
+    """
+    bucket = _read_bucket(task, stage)
+    raw = bucket.get("ambiguity")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def record_ambiguity(task: str, stage: str, status: str,
+                     score: Optional[int] = None,
+                     reason: str = "") -> bool:
+    """记一次歧义自评的判定结果。同阶段重复判定会覆盖，不追加。
+
+    覆盖而非追加：门禁可能被 `/advance` 触发多次（每次未通过用户都会重试），
+    追加会让 `.state` 里堆满同一件事的历史副本，而下游只关心最后一次判定。
+
+    走 `update_state` 而不是 `read_state` + `write_state`：判据类写入在并发下
+    丢更新，丢掉的正是判据本身（A0 验收 20，`test_writer_does_not_call_
+    write_state_directly` 钉着这条）。
+    """
+    if status not in (AMBIGUITY_OK, AMBIGUITY_BELOW, AMBIGUITY_UNAVAILABLE):
+        return False
+    ok = False
+
+    def mutate(state):
+        nonlocal ok
+        if not state:
+            return NO_CHANGE
+        bucket = _stage_bucket(state, stage)
+        record: Dict[str, Any] = {"status": status, "checked_at": _now()}
+        if score is not None:
+            record["score"] = score
+        if reason:
+            record["reason"] = reason
+        bucket["ambiguity"] = record
+        ok = True
+        return state
+
+    update_state(task, mutate)
+    return ok
+
+
+# ── AI Output 边界 nonce ──
 
 def issue_output_nonce(task: str, stage: str) -> str:
     """为本阶段的产出区分配（或复用）一个 nonce。

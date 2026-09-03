@@ -137,15 +137,36 @@ def test_reads_from_output_region_not_template(task):
 
 # ── 门禁：分数真的参与准出判定 ──
 
-def test_score_below_threshold_blocks(task):
-    """低于阈值必须拒绝 —— 这才是 hook-01-01 声称的行为。"""
+# ⚠️ **显式改判（DEV-PROTOCOL 1.2）**，不是静默改断言。
+#
+# 本节原有两条测试断言「低分硬拦」「缺分硬拦」。A13 推翻了这个契约：
+# 歧义分数是 agent **自评**，硬规则才决定准出，自评只作参考。
+# 推翻的依据是三个真实任务（maybework / 7090 / ppppp）收到同一句
+# 「❌ 未给出歧义分数」，而三者的真实根因各不相同 —— 判据把三种病
+# 报成同一种，指错了方向。判例见 A0 的 2.9.17。
+#
+# 改判的是**结论方向**（拦 → 放行 + 记账），不是判据的存在性：
+# 下面两条仍然断言这一项**不得被伪造成 ✅**，留痕必须落到 `.state`。
+# 若哪天有人把记账也去掉，这两条会红。
+
+def test_score_below_threshold_passes_but_is_recorded(task):
+    """低于阈值**不再硬拦**，但必须记账为 below_threshold 且给出下一步。
+
+    （原 `test_score_below_threshold_blocks`，A13 改判。）
+    """
     name = task(f"歧义分数：4\n\n{_FILLER}")
 
     verdict = check_output(name, _STAGE)
 
-    assert not verdict.ok, "歧义分数低于阈值却过闸了 —— hook-01-01 仍是装饰"
+    assert verdict.ok, \
+        "自评仍在硬拦 —— 被判者写不写决定过不过闸:\n" + "\n".join(verdict.lines)
     joined = "\n".join(verdict.lines)
     assert "歧义" in joined, joined
+    assert "❓" in joined, f"低分被伪造成通过，没有 ❓ 标记:\n{joined}"
+
+    record = ss.read_ambiguity_record(name, _STAGE)
+    assert record.get("status") == "below_threshold", record
+    assert record.get("score") == 4, record
 
 
 def test_score_at_threshold_passes(task):
@@ -170,18 +191,23 @@ def test_rejection_tells_the_agent_what_to_do(task):
 
 
 def test_missing_score_is_unavailable_not_pass(task):
-    """分数不可得 → 拒绝并说明原因，**不静默放行**。
+    """分数不可得 → **放行但记 `unavailable`**，绝不伪造成 ✅。
 
-    静默放行会让这条判据在 agent 不写分数时自动消失 ——
-    那是最省事的绕过方式，而且无人知晓。
+    （A13 改判：原断言是「拒绝」。）改的是拦不拦，没改三态纪律 ——
+    「放行」与「达标」必须在 `.state` 和输出里都能分辨，
+    否则就是把「没测到」洗成「测过了」（DEV-PROTOCOL 第 2 节）。
     """
     name = task(f"我完成了需求分析，结论如上。\n\n{_FILLER}")
 
     verdict = check_output(name, _STAGE)
 
-    assert not verdict.ok, "没写歧义分数却过闸 —— 不写就能跳过判据"
+    assert verdict.ok, "缺分仍在硬拦 —— 不写分数不该卡死用户"
     joined = "\n".join(verdict.lines)
     assert "歧义分数" in joined, joined
+    assert "❓" in joined, f"缺分被伪造成通过:\n{joined}"
+
+    record = ss.read_ambiguity_record(name, _STAGE)
+    assert record.get("status") == "unavailable", record
 
 
 def test_threshold_matches_documented_hook():

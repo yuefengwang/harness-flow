@@ -79,6 +79,10 @@ class PromptBuilder:
             if previous:
                 parts.append(previous)
 
+            carryover = self._read_ambiguity_carryover(task_name, stage_idx)
+            if carryover:
+                parts.append(carryover)
+
         current_tpl = self._read_current_template(task_name, stage, stage_name)
         if current_tpl:
             parts.append(current_tpl)
@@ -195,6 +199,48 @@ class PromptBuilder:
             if content:
                 return f"=== 前一阶段产出 ({prev_stage} / {STAGE_NAMES[stage_idx - 1]}) ===\n{content}"
         return None
+
+    def _read_ambiguity_carryover(self, task_name: str,
+                                  stage_idx: int) -> Optional[str]:
+        """把 01 的歧义自评结论带给下一阶段；达标或无记录则不输出。
+
+        A13 把自评从硬拦降级为「放行 + 记账」。降级立刻带来一个新缺口：
+        **记了账没人读就等于没记** —— 那是 S7（判据存在、无人调用）。
+        2.9.16 的教训正是「修复引入的新代码也要过形状库」，这里补上。
+
+        读的是 harness 自己写进 `.state` 的记录，不是 agent 的自述：
+        证据流向下游，自述留在原地（A13）。
+
+        自评达标时**不输出任何东西**。对正常情况也喊一句话，等于没有警告
+        （A2 的失败信息纪律）。
+        """
+        if stage_idx < 1:
+            return None
+        prev_stage = STAGES[stage_idx - 1]
+        if prev_stage != "01-brainstorming":
+            return None
+
+        from ..workflow import stage_state as ss
+
+        record = ss.read_ambiguity_record(task_name, prev_stage)
+        status = record.get("status")
+        if not status or status == ss.AMBIGUITY_OK:
+            return None
+
+        lines = ["=== ⚠️ 上一阶段的歧义自评未达标 ==="]
+        if status == ss.AMBIGUITY_UNAVAILABLE:
+            lines.append(
+                "01 阶段**未给出**歧义自评（记为 unavailable）——"
+                "需求是否已澄清，无人验证过。")
+        else:
+            score = record.get("score")
+            lines.append(
+                f"01 阶段的歧义自评为 {score}，低于目标 8 ——"
+                "需求里仍有未澄清的假设。")
+        lines.append(
+            "请在动手规划之前，先用 `question` 工具把剩下的不确定点问清楚，"
+            "不要带着假设排期。")
+        return "\n".join(lines)
 
     #: 注入 04 prompt 的事实文件，及其顺序。
     #: `03-coding.md` **不在其中，也不得被加入** —— 那正是 C1 的来源。

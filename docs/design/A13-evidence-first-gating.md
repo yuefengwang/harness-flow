@@ -5,7 +5,9 @@
 > 被依赖：01/02 的准出判据、04 的 Route 判定、A10 的达成度报告
 > 范围：`sw_lib/workflow/output_check.py`、`hooks/check_0{1,2,4,5}.sh`、
 > 新增 `sw_lib/workflow/stage_completion.py`
-> 状态：**设计稿，未实施**
+> 状态：**第 2 步已实施**（判例 2.9.17：自评降级为参考 + 留痕 + 下游消费）。
+>   第 1 步（`stage_completion.py` 阶段完成性判据）与第 3 步（02/04 的 grep
+>   降级为提示）**仍未实施** —— 落地顺序见第 6 节，刻意不一次全改。
 
 ---
 

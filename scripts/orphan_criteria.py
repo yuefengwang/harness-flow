@@ -51,6 +51,9 @@ REGISTERED_CRITERIA = [
     ("missing_dependencies", "2.9.16", "S4"),
     ("install_hint", "2.9.16", "S4"),
     ("_diagnose_missing_deps", "2.9.16", "S10"),
+    ("read_ambiguity_record", "2.9.17", "S7"),
+    ("record_ambiguity", "2.9.17", "S6"),
+    ("_read_ambiguity_carryover", "2.9.17", "S7"),
 ]
 
 

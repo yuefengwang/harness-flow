@@ -202,6 +202,22 @@ _SCORE_PATTERNS: Tuple[re.Pattern, ...] = (
                r"(?:歧义分数|歧义度|Ambiguity\s*Score|Score)"
                r"[\s：:*_`]{0,8}"
                r"(\d{1,2})\s*(?:/\s*10|分)?", re.IGNORECASE),
+    # `歧义分数达到 8` / `歧义分数已达到 9` / `歧义分数为 7` / `歧义分数是 6`
+    # —— 关键词与数字之间夹着一个**中文动词**。上面三条都认不出：它们只允许
+    # 空白、分隔符与强调符，动词的两个字卡在中间。
+    #
+    # 任务 maybework 的现场：agent 写了「歧义分数达到 8」，判据读出 None，
+    # 门禁报「未给出歧义分数」把它拦下。**agent 没做错任何事**，是判据只认
+    # 我们脑子里的那种格式。判据自己的缺陷不该由被判者承担。
+    #
+    # 动词白名单而不是通配：`.{0,4}` 那种写法会把「歧义分数一节里提到 3 个
+    # 风险」读成 3 —— 判据读到假数字比读不到更危险。
+    re.compile(r"(?:\*\*|__|\*|`)?\s*"
+               r"(?:歧义分数|歧义度|Ambiguity\s*Score|Score)"
+               r"(?:\*\*|__|\*|`)?\s*"
+               r"(?:已)?(?:达到|评为|评估为|定为|为|是)\s*"
+               r"[：:]?\s*"
+               r"(\d{1,2})\s*(?:/\s*10|分)?", re.IGNORECASE),
 )
 
 
@@ -233,37 +249,68 @@ def read_ambiguity_score(task: str, stage: str) -> Optional[int]:
     return None
 
 
-def _ambiguity_problems(task: str, stage: str) -> List[str]:
-    """歧义分数判据（`hook-01-01`）。只作用于 01 阶段。
+def _ambiguity_advisory(task: str, stage: str) -> List[str]:
+    """歧义自评（`hook-01-01`）：**记账 + 提示，不拦**。只作用于 01 阶段。
 
-    这条规则在 `hooks/01-brainstorming.md` 里写了很久 ——
-    「Score < 8 → block Planning entry」—— 但全仓库检索 `ambiguity`
-    只找到一个字段定义，**零消费方**。于是它在真实流程中不存在，
-    这是「判据存在、无人调用」的第七例。
+    ## 为什么它不再硬拦（A13）
 
-    接上它同时解决另一件事：agent 的收敛条件。任务 `ppppp` 问了 14 轮
-    （`hook-01-02` 只写「≥3 questions」，无上界），因为「信息够了吗」
-    没有可执行的判据。分数达标才是**语义**收敛条件 —— 而不是凑够轮数。
+    歧义分数是 agent **自评**，不是 harness 观测到的事件。拿它当硬拦判据，
+    等于把准出开关交给被判者 —— 它想不写就不写，而门禁只会说「你没写 X」。
+
+    三个真实任务收到**同一句**「❌ 产出区未给出歧义分数」，根因各不相同：
+
+    * `maybework` —— 写了「歧义分数达到 8」，正则不认「达到」（判据的错）；
+    * `7090` —— agent 在正文里问「你同意方案 A 吗」就停了，阶段没走完；
+    * `ppppp` —— 问了 14 轮无收敛出口。
+
+    一句话指向三个完全不同的下一步，这是「失败信息指错方向」（2.9.16）的
+    01 版本。真正拦住空转的从来是**硬规则**（产出区实质内容 ≥ 80 字符），
+    它读的是 harness 落盘的围栏区，agent 绕不过去。
+
+    ## 放行必须留痕
+
+    返回提示行的同时写 `.state`。读不到分数记 `unavailable`（❓），
+    **不伪造成 ✅** —— 与 A2 的 `--abandon-witness`、非 Python 栈让路
+    同一条纪律：让路可以，让路而不记账不行。
+
+    ## 低分为什么是「继续提问」而不是「改数字」
+
+    分数是澄清程度的度量。低于阈值说明还有没问清的地方，下一步是
+    继续用 `question` 澄清 —— 01 阶段的 agent 确实有这个工具（Q2 已核）。
+    把数字改大只会让 02 带着未澄清的假设开工。
     """
     if stage != "01-brainstorming":
         return []
 
     score = read_ambiguity_score(task, stage)
+
     if score is None:
+        stage_state.record_ambiguity(
+            task, stage, stage_state.AMBIGUITY_UNAVAILABLE,
+            reason="产出区中未找到 0-10 的歧义自评")
         return [
-            "❌ 产出区未给出歧义分数（hook-01-01 要求 0-10 的自评）",
-            "   分数不可得**不算达标** —— 不写就能跳过判据是最省事的绕过方式。",
-            "   请在产出里写明：`歧义分数：<0-10>`，并说明为什么是这个分数。",
+            "❓ 产出区未给出歧义分数 —— 本项**未测到**，不计为通过",
+            "   自评不是硬门禁（A13：硬规则决定准出，自评只作参考），"
+            "因此不拦；但它已记为 unavailable，下游报告不会显示 ✅。",
+            "   若设计尚有不确定处，请继续用 `question` 工具澄清，"
+            "并在产出里写明 `歧义分数：<0-10>`。",
         ]
 
     if score < AMBIGUITY_THRESHOLD:
+        stage_state.record_ambiguity(
+            task, stage, stage_state.AMBIGUITY_BELOW, score=score,
+            reason=f"自评 {score} 低于目标 {AMBIGUITY_THRESHOLD}")
         return [
-            f"❌ 歧义分数 {score} 低于准出阈值 {AMBIGUITY_THRESHOLD}"
-            "（hook-01-01：不带假设进入下一阶段）",
-            "   下一步是**继续用 `question` 工具澄清**尚未确定的点，"
-            "然后重新给出分数。",
+            f"❓ 歧义分数 {score} 低于目标 {AMBIGUITY_THRESHOLD}"
+            " —— 设计仍有未澄清处（hook-01-01）",
+            "   自评不硬拦，但这一项记为 below_threshold，不是 ✅。",
+            "   下一步是**继续用 `question` 工具逐个澄清**尚未确定的点，"
+            f"问到自评达到 {AMBIGUITY_THRESHOLD} 为止。",
             "   **不要**直接把数字改大 —— 分数是澄清程度的度量，不是准出开关。",
         ]
+
+    stage_state.record_ambiguity(
+        task, stage, stage_state.AMBIGUITY_OK, score=score)
     return []
 
 
@@ -385,16 +432,21 @@ def check_output(task: str, stage: str) -> OutputVerdict:
             "   请让 agent 给出本阶段真正的结论后再签署门禁。",
         ])
 
-    # 歧义分数放在最后：内容都没有时先说「空转」更有信息量，
-    # 报「分数没写」会让人以为只差一个数字。
-    ambiguity = _ambiguity_problems(task, stage)
-    if ambiguity:
-        return OutputVerdict(False, ambiguity)
-
+    # 到这里硬规则已全部通过。硬规则**决定**准出，自评只**参考**（A13）。
+    #
+    # 顺序是刻意的：内容都没有时先说「空转」更有信息量，报「分数没写」
+    # 会让人以为只差一个数字 —— 三个任务正是这样被推去补数字的。
     lines = [f"✅ {stage} {where}有实质内容（{count} 字符）"]
+
+    advisory = _ambiguity_advisory(task, stage)
+    if advisory:
+        # 放行，但把 ❓ 带在通过结论后面。不合并进 ✅ 那一行：
+        # 二态化的第一步就是把「未测到」写进「通过」的句子里。
+        return OutputVerdict(True, lines + advisory)
+
     score = read_ambiguity_score(task, stage)
     if score is not None:
-        lines.append(f"   歧义分数 {score} ≥ 阈值 {AMBIGUITY_THRESHOLD}")
+        lines.append(f"   歧义分数 {score} ≥ 目标 {AMBIGUITY_THRESHOLD}")
     return OutputVerdict(True, lines)
 
 
