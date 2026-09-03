@@ -58,7 +58,15 @@ def _mk(name, body):
     (d / ".state").write_text(json.dumps({
         "id": name, "stage": _STAGE, "stage_idx": 0,
         "stage_status": "running",
-        "stages": {_STAGE: {"output_nonce": nonce}},
+        # decisions 非空：A13 第 1 步的完成性判据要求 01 至少有一轮问答。
+        # 本文件测的是**自评**这一条，不是完成性 —— 夹具必须先满足
+        # 前置的硬规则，否则红会来自另一条判据，测的就不是本形状了。
+        "stages": {_STAGE: {
+            "output_nonce": nonce,
+            "decisions": {"需求范围？": {
+                "answer": "基础电商", "decided_by": "user",
+                "decided_at": "2026-09-03T12:00:00"}},
+        }},
     }), encoding="utf-8")
     (d / f"{_STAGE}.md").write_text(
         f"# 01-Brainstorming\n\n## AI Output\n"

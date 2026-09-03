@@ -54,6 +54,7 @@ REGISTERED_CRITERIA = [
     ("read_ambiguity_record", "2.9.17", "S7"),
     ("record_ambiguity", "2.9.17", "S6"),
     ("_read_ambiguity_carryover", "2.9.17", "S7"),
+    ("_stage_completion_problems", "2.9.18", "S11"),
 ]
 
 

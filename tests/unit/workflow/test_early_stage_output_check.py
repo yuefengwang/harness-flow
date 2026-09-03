@@ -90,6 +90,15 @@ def task():
             }}},
         }
 
+        # 01 的完成性判据（A13 第 1 步）要求至少一轮问答。本文件测的是
+        # 产出区的实质内容，问答记录只是前置条件的填充料 —— 缺了它，
+        # 红会来自完成性那条，测的就不是本形状了。
+        if stage == "01-brainstorming":
+            state["stages"][stage]["decisions"] = {
+                "需求范围？": {"answer": "已确认", "decided_by": "user",
+                            "decided_at": "2026-08-24T00:00:00"},
+            }
+
         if output is not None:
             nonce = "abcd1234"
             state["stages"][stage]["output_nonce"] = nonce

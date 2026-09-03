@@ -54,6 +54,10 @@ def task():
         created.append(d)
         write_state(name, {"id": name, "stage": _STAGE, "stage_idx": 0,
                            "stage_status": "running"})
+        # A13 第 1 步的完成性判据要求 01 至少有一轮问答。本文件测的是
+        # 围栏与 Gate 的篡改，问答记录只是让产出过得了前置硬规则的填充料
+        # —— 理由与上面那段「分数取 9」的注释相同。
+        ss.record_decision(name, _STAGE, "需求范围？", "已确认")
         tpl = (TPLS / f"{_STAGE}.md").read_text(encoding="utf-8")
         nonce = ss.issue_output_nonce(name, _STAGE)
         path = d / f"{_STAGE}.md"

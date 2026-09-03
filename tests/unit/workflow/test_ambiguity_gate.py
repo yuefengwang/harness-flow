@@ -66,6 +66,10 @@ def task():
         created.append(d)
         write_state(name, {"id": name, "stage": _STAGE, "stage_idx": 0,
                            "stage_status": "running"})
+        # A13 第 1 步的完成性判据要求 01 至少有一轮问答。走生产函数
+        # `record_decision` 而不是手拼 state：夹具与真实链路同一条路。
+        # 本文件测的是自评解析与准出方向，完成性由 test_stage_completion 管。
+        ss.record_decision(name, _STAGE, "需求范围？", "基础功能")
         tpl = (TPLS / f"{_STAGE}.md").read_text(encoding="utf-8")
         nonce = ss.issue_output_nonce(name, _STAGE)
         (d / f"{_STAGE}.md").write_text(

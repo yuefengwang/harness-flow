@@ -91,6 +91,13 @@ def staged():
         }), encoding="utf-8")
         created.append(d)
 
+        # 01 的完成性判据（A13 第 1 步）要求至少一轮问答。mock 场景确实
+        # 问过（`_run_stage` 的 on_ask_user 答了），但那是在**另一个任务名**
+        # 下跑的，这里补记一条到被检查的任务上。本文件测的是产出的实质内容，
+        # 完成性由 test_stage_completion.py 管。
+        if stage == "01-brainstorming":
+            stage_state.record_decision(name, stage, "需求范围？", "A. 第一个选项")
+
         nonce = stage_state.issue_output_nonce(name, stage)
         (d / f"{stage}.md").write_text(
             stage_state.render_output_block(nonce, output), encoding="utf-8")

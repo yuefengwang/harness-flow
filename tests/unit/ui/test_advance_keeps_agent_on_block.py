@@ -40,6 +40,9 @@ def _task_dir():
     d.mkdir(parents=True, exist_ok=True)
     write_state(_TASK, {"id": _TASK, "stage": "01-brainstorming",
                         "stage_idx": 0, "stage_status": "running"})
+    # A13 第 1 步的完成性判据要求 01 至少一轮问答。本文件测的是
+    # 「校验通过后 agent 应被收尾」—— 完成性只是前置条件。
+    ss.record_decision(_TASK, "01-brainstorming", "需求范围？", "已确认")
     nonce = ss.issue_output_nonce(_TASK, "01-brainstorming")
     (d / "01-brainstorming.md").write_text(
         "# 01-Brainstorming\n\n"

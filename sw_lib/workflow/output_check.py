@@ -314,6 +314,31 @@ def _ambiguity_advisory(task: str, stage: str) -> List[str]:
     return []
 
 
+def _stage_completion_problems(task: str, stage: str) -> List[str]:
+    """阶段完成性检查：01 必须至少有一轮问答（纯证据，无启发式）。
+
+    A13 第 1 步，用户拍板：只用纯证据，不用文本启发式。零误报优先。
+
+    `decisions == 0` 是硬证据：`record_decision` 只在用户真实回答时由
+    TUI/web/CLI 写入，agent 伪造不了。产出为空已被 `_substance_report`
+    拦在前面的步骤，这里只查「问了没有」。
+
+    不检查"问够了几轮"：hook-01-02 的 ≥3 条是 prompt 级的收敛条件，
+    不是门禁硬规则。判据不替 prompt 做裁判。
+    """
+    if stage != "01-brainstorming":
+        return []
+    from . import stage_state as ss
+    if ss.count_decisions(task, stage) == 0:
+        return [
+            "❌ 01 阶段尚未进行任何问答 —— 0 轮问答，阶段未完成",
+            "   01 阶段的核心是向用户提问澄清需求。「没有提问」意味着需求",
+            "   未经澄清。请让 agent 使用 `question` 工具向用户提问，",
+            "   确认需求范围后再签署门禁。",
+        ]
+    return []
+
+
 def check_tamper(task: str, stage: str) -> List[str]:
     """检出对**围栏**与 **Gate** 的篡改，返回问题清单（空表示干净）。
 
@@ -431,6 +456,11 @@ def check_output(task: str, stage: str) -> OutputVerdict:
             "   两个落点都查过了：回复正文（产出区）与模板区回填。",
             "   请让 agent 给出本阶段真正的结论后再签署门禁。",
         ])
+
+    # 阶段完成性：01 必须至少有一轮问答（纯证据）
+    completion = _stage_completion_problems(task, stage)
+    if completion:
+        return OutputVerdict(False, completion)
 
     # 到这里硬规则已全部通过。硬规则**决定**准出，自评只**参考**（A13）。
     #
