@@ -165,8 +165,14 @@ def declared_dependencies(target_dir: Any) -> List[str]:
     （`python-dotenv` 导入 `dotenv`、`Pillow` 导入 `PIL`），
     从 ModuleNotFoundError 的模块名反推包名会给出装不上的命令 ——
     那比不给下一步更糟，因为它看起来可执行。
+
+    声明要在**跑测试的那个目录**里找（`resolve_pytest_root`），不是
+    `target_dir`。两者在 `backend/` + `frontend/` 布局下不同，而依赖
+    声明跟着项目根走 —— 读 `target_dir` 会一无所获，缺依赖诊断整个失效、
+    退回「造红」。这是形状 S4 的第五个实例（welll 2.9.14、testNew 2.9.15
+    是同一个坑的前几侧），实测已复现。
     """
-    root = Path(str(target_dir))
+    root = resolve_pytest_root(Path(str(target_dir)))
     if not root.is_dir():
         return []
 

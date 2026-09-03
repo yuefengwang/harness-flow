@@ -316,3 +316,57 @@ def test_run_project_tests_normal_failure_has_no_install_hint(tmp_path):
     assert r.returncode != 0
     assert "pip install" not in r.stdout, \
         f"普通断言失败被误诊成缺依赖:\n{r.stdout}"
+
+
+# ── S4（执行环境错位）：依赖声明要在**跑测试的那个目录**里找 ──
+#
+# 形状库 S4 的第五个实例，检测方法直接来自 CLOSED-LOOP.md：
+#   rg -n "cwd|target_dir|PYTHONPATH|_project_python" sw_lib/workflow/ hooks/
+#
+# 初版 `declared_dependencies` 读 `target_dir`，而 pytest 跑在
+# `resolve_pytest_root(target_dir)`。平铺布局下两者相同，子目录布局
+# （backend/ + frontend/，任务 welll 的形状）下不同 —— 读不到声明，
+# 缺依赖诊断整个失效，退回「造红」，8090 的死锁原样复现。
+#
+# 这是 welll(2.9.14) / testNew(2.9.15) 那个坑的**第五侧**：
+# 「判据假定 target_dir 就是项目根」。
+
+def test_dependency_declared_in_subdir_is_found(tmp_path):
+    """依赖声明在 `backend/` 里时也要读得到。
+
+    实测（修复前）：`declared_dependencies` 返回 `[]`，
+    于是门禁说「造红」，把人推去改一个本来没错的 import。
+    """
+    proj = tmp_path / "p"
+    backend = proj / "backend"
+    (backend / "tests").mkdir(parents=True)
+    (backend / "requirements.txt").write_text("Flask==3.1.1\n", encoding="utf-8")
+    (backend / "main.py").write_text("from flask import Flask\n", encoding="utf-8")
+    (backend / "tests" / "test_main.py").write_text(
+        "from main import Flask\n\n\ndef test_x():\n    assert True\n",
+        encoding="utf-8")
+
+    assert rw.resolve_pytest_root(proj) == backend, "前提不成立：pytest 根应是 backend/"
+    assert rw.declared_dependencies(proj) == ["Flask"], \
+        "依赖声明在 backend/ 下就读不到了 —— S4：判据与执行不在同一个目录"
+
+
+def test_subdir_layout_missing_dep_is_not_called_fake_red(tmp_path):
+    """子目录布局下，缺依赖同样不许被诊断成造红（死锁的第五侧）。"""
+    proj = tmp_path / "p"
+    backend = proj / "backend"
+    (backend / "tests").mkdir(parents=True)
+    (backend / "requirements.txt").write_text("Flask==3.1.1\n", encoding="utf-8")
+    (backend / "main.py").write_text("from flask import Flask\n", encoding="utf-8")
+    (backend / "tests" / "test_main.py").write_text(
+        "from main import Flask\n\n\ndef test_x():\n    assert True\n",
+        encoding="utf-8")
+
+    exit_code, nodes = rw._run_in_target(proj)
+    assert exit_code == rw.EXIT_COLLECTION_ERROR, f"前提不成立: rc={exit_code}"
+
+    verdict = rw.classify_exit_code(
+        exit_code, nodes, rw._missing_deps_if_collection_failed(proj, exit_code))
+    assert _FAKE_RED_VERDICT not in verdict.reason, \
+        f"子目录布局下缺依赖仍被误诊为造红:\n{verdict.reason}"
+    assert verdict.missing_deps == ["Flask"], verdict.missing_deps

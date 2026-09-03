@@ -1085,6 +1085,48 @@ pytest 就以 4 退出……落到兜底分支会说『无测试』，把人推�
 影响所有工具调用，不宜夹在本次修复里。**登记于此**，
 以免成为下一个「判据存在、无人回头」的遗留。
 
+#### 事后用形状库复审：查出一处自己犯的 S4（已修）
+
+本节初版提交（`2b93b51`）**没走 Entry A** —— 形状库当时在工作区里还没提交，
+我按 criterion-design 的五问设计了判据，但没有逐条对 S1-S10。
+用户要求拿形状库重新审视，S4 的检测方法当场扫出问题：
+
+```bash
+rg -n "cwd|target_dir|PYTHONPATH|_project_python" sw_lib/workflow/ hooks/
+```
+
+`declared_dependencies(target_dir)` 读的是 `target_dir`，而 pytest 跑在
+`resolve_pytest_root(target_dir)`。平铺布局下两者相同，**子目录布局下不同**。
+实测 `/tmp/s4probe`（`backend/{requirements.txt,main.py,tests/}` 布局）：
+
+```text
+pytest root         : /tmp/s4probe/backend
+declared@target_dir : []
+VERDICT: 造红：收集期就报错（ImportError / SyntaxError）...
+```
+
+依赖声明读不到 → 诊断整个失效 → 退回「造红」→ **8090 的死锁在子目录布局下
+原样复现**。修复本身带着它要修的那个病。
+
+这是「判据假定 `target_dir` 就是项目根」的**第五侧**（welll 2.9.14 修见证侧
+与钩子侧，testNew 2.9.15 修 fact_pack，2.9.15 登记 `is_surviving` 未修）。
+修法是复用既有的 `resolve_pytest_root`，不另写一份路径判断 ——
+另写一份正是这个坑前四侧的共同成因。
+
+> **判例**：**修复本身也要过形状库。** 一次修复引入的新代码，和被修的旧代码
+> 一样会犯已知形状。Entry A 不只适用于「新增门禁」，也适用于「修 bug 时
+> 新写的判据」—— 而这恰恰是最容易跳过的场合，因为注意力都在旧 bug 上。
+
+顺带补的两件事：
+
+- 四个新判据（`declared_dependencies` / `missing_dependencies` /
+  `install_hint` / `_diagnose_missing_deps`）已登记进
+  `scripts/orphan_criteria.py` 的 `REGISTERED_CRITERIA`，实跑确认均有生产
+  调用点。不登记等于不在监控范围内 —— 那本身就是 S7 的风险点。
+- S5/S6 复核：依赖查不动时（解释器不存在、`rg` 起不来、pyproject 解析失败）
+  一律返回空表，退回旧的「造红」文案。**「没查到」不放宽判定**，
+  与三态纪律一致。
+
 ---
 
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
