@@ -1179,9 +1179,34 @@ VERDICT: 造红：收集期就报错（ImportError / SyntaxError）...
 不是判据的存在性。两条改判后仍断言「不得被伪造成 ✅」且留痕必须落盘，
 文件内留有改判声明，不是静默改断言。
 
-**验证**：单元 1612 passed / 6 skipped / 0 failed；三个真实任务实跑
+**验证**：单元全量 passed / 0 failed；三个真实任务实跑
 （maybework 读到 8 分通过；7090、ppppp 放行且 `.state` 记 `unavailable`）；
 空转夹具仍 rc=1 —— 放宽的是自评，硬规则原样。
+
+**MockAgent 复现（本轮补做，用户要求）**：初版修复的夹具是手拼 `.state`
+与 `.md` —— 那测的是**我们对 agent 行为的想象**，不是 agent 干了什么。
+`harness-criterion-design` 的红绿第 1 步明确要求用 MockAgent 加真实的
+`_save_stage_output` 复现，初版跳过了这一步。
+
+补做方式与任务 `rrr`（`TEMPLATE_ONLY_ENV`）、`welll`（`SUBDIR_LAYOUT_ENV`）
+同一体例：新增 `SW_MOCK_BRAINSTORM_NO_SCORE=1`，让 01 场景走 7090 的现场
+形态 —— 5 轮 `question`、产出 357 字符、**问句写在正文里**、不给自评。
+落盘走生产路径，`decisions` 由 `record_decision` 真实累积。
+见 `tests/unit/workflow/test_bug_7090_no_score_deadlock.py`。
+
+**基线对照实测**（`git archive a500540` 检出到 /tmp，只搬测试与 mock）：
+修复前 **4 failed / 3 passed**，钩子脚本吐出的正是 7090 日志 14:52:42
+的三行原文；修复后 7 条全绿。3 条 passed 的是前提自检（轮次 / 产出长度 /
+无分数），它们证明红来自判据而不是夹具本身有毛病。
+
+这一步的价值不在于多了 7 条测试，而在于**证明了判据抓得住这个 bug**。
+一个从未见过红的判据，与不存在没有区别。
+
+**顺带定性的既存偶发**：`tests/unit/web/` 有一条
+`test_engine_start_on_nonexistent_task_returns_404` 会偶发 teardown error。
+基线（`a500540`）与本轮各连跑 5 次：基线 2 次 error（其中一次 2 errors），
+本轮 2 次 error，分布一致 —— **既存问题，非本轮引入**。
+按三态纪律记为 ❓ 而不是「已通过」：它没被修，只是被排除了嫌疑。
 
 **遗留**：7090 的**真实**问题（agent 用正文提问导致阶段未走完）本次
 **未修** —— 那是 A13 第一道判据 `stage_completion` 的职责，属另一个任务。

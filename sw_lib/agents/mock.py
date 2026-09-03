@@ -37,6 +37,20 @@ SCENARIO_DONE_MARKER = "mock_agent scenario complete"
 #: 仍是 e2e 的主路径，这个开关只为把那次误判钉成可复现的判据。
 TEMPLATE_ONLY_ENV = "SW_MOCK_PLANNING_TEMPLATE_ONLY"
 
+#: 置 1 时，01 场景改走任务 `7090` 的现场形态：**不给歧义分数就收尾**。
+#:
+#: `workspace/tasks/7090/.log` 14:52:32 的真实一幕：agent 问完 5 轮
+#: `question` 之后，把「你同意方案 A 吗？」写在**回复正文**里（而不是
+#: 再调一次 `question` 工具），然后结束发言。harness 收不到 question
+#: 事件，判定「它说完了」→ 弹门禁 → 用户批准 → 门禁去量一个尚未产生的
+#: 产出 → ❌ 未给出歧义分数。用户此后除了反复敲 `/advance` 拿到同一句
+#: 报错之外无事可做。
+#:
+#: 默认关闭：正常形态（结论 + 自评齐全）仍是 e2e 的主路径。这个开关
+#: 只为把那次死锁钉成可复现的判据 —— 与 `TEMPLATE_ONLY_ENV`（任务 rrr）、
+#: `SUBDIR_LAYOUT_ENV`（任务 welll）同一个用途。
+BUG_7090_ENV = "SW_MOCK_BRAINSTORM_NO_SCORE"
+
 #: 置 1 时，03 场景改写成「子目录布局」的项目。
 #:
 #: 这是任务 `welll` 现场的真实形状：agent 把后端放在 `backend/`，
@@ -261,7 +275,15 @@ class MockAgent(BaseAgent):
 
         分数写在产出区（围栏内），与真实 agent 的落点一致：`read_ambiguity_score`
         只读产出区，模板区不算数。
+
+        `SW_MOCK_BRAINSTORM_NO_SCORE=1` 时改走任务 `7090` 的现场形态：
+        问完之后在正文里追问方案、不给分数就收尾。
+        见 `_scenario_brainstorming_no_score`。
         """
+        if os.environ.get(BUG_7090_ENV, "").strip() in ("1", "true", "yes"):
+            self._scenario_brainstorming_no_score()
+            return
+
         self._say("你好！我是你的需求分析专家。我已阅读了你的任务需求。")
         self._pause(1)
         self._say("在开始设计之前，我需要确认几个关键细节：")
@@ -311,6 +333,64 @@ class MockAgent(BaseAgent):
             "剩余不确定项仅为实现细节，不影响方案选型。\n"
         )
         self._say(output)
+
+    def _scenario_brainstorming_no_score(self):
+        """任务 `7090` 的现场：问了 5 轮，正文里追问方案，**不给分数**就收尾。
+
+        逐条对齐 `workspace/tasks/7090/.log`：
+
+        * 14:42:01 - 14:51:43 连续 5 次 `question`（用途 / 技术栈 / 数据库 /
+          MVP 范围 / 内容格式），每次用户都答了；
+        * 14:52:32 agent 输出「## 设计方案 …… **推荐方案 A** …… 你同意方案
+          A 吗？」—— 问题写在**正文**里，没有再调 `question` 工具；
+        * 同一秒 `complete reply (357 chars)`，harness 判定它说完了。
+
+        关键点是**产出实质内容够（357 字符，远超阈值 80），只是没有自评**。
+        若 mock 把产出也写薄，红就会来自「实质内容不足」那条硬规则，
+        测的就不是本形状了 —— 判据必须精确到「缺的是哪一样」。
+        """
+        self._say("你好！我是你的需求分析专家。我已阅读了你的任务需求。")
+
+        # 5 轮 question，与 7090 的现场轮次一致。轮次数量本身是判据的一部分：
+        # 「问得够不够」与「有没有自评」是两件事，7090 恰恰是前者充分、
+        # 后者缺失 —— 而旧门禁把它报成了同一句话。
+        for header, question, options in (
+            ("BBS 用途", "这个 BBS 应用的主要用途是什么？",
+             ["A. 技术社区论坛", "B. 企业内部沟通"]),
+            ("技术栈选择", "你希望使用什么技术栈？",
+             ["A. React + FastAPI", "B. Vue + Django"]),
+            ("数据库选择", "数据库用哪个？", ["A. SQLite", "B. PostgreSQL"]),
+            ("MVP 功能范围", "第一版需要包含哪些核心功能？",
+             ["A. 基础功能", "B. 完整功能"]),
+            ("帖子内容格式", "帖子内容支持什么格式？",
+             ["A. 纯文本", "B. Markdown"]),
+        ):
+            answers = self._ask([{
+                "question": question, "options": options,
+                "header": header, "type": "choice",
+            }])
+            if not answers or not self.running:
+                return
+
+        # 14:52:32 的原话。问句在正文里，不是 question 工具调用 ——
+        # 这正是 harness 收不到 question 事件、判定「说完了」的原因。
+        self._say(
+            "好的，纯文本格式。现在我有足够的信息来提出设计方案了。\n\n"
+            "## 设计方案\n\n"
+            "基于你的需求（技术社区论坛、React + FastAPI、SQLite、"
+            "基础功能、纯文本），我提出两个方案：\n\n"
+            "**方案 A：最小化单体（推荐）**\n"
+            "- FastAPI 单文件后端 + React 前端\n"
+            "- SQLite + SQLAlchemy ORM\n"
+            "- 优点：开发快、部署简单、适合 MVP\n"
+            "- 缺点：扩展性一般\n\n"
+            "**方案 B：模块化单体**\n"
+            "- FastAPI 按领域拆分（users/posts/categories 模块）\n"
+            "- SQLAlchemy + Alembic 迁移\n"
+            "- 优点：代码组织更好、易维护\n"
+            "- 缺点：初始设置稍复杂\n\n"
+            "**推荐方案 A**，因为 MVP 阶段优先速度，后续可重构。\n\n"
+            "你同意方案 A 吗？")
 
     def _scenario_planning(self):
         """02-planning 场景：产出规划阶段真正要交的三段。
