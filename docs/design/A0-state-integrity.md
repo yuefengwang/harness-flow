@@ -965,6 +965,128 @@ docstring 早已写明「返回绝对路径」并记录了实测后果，事实�
 
 ---
 
+### 2.9.16 任务 8090 的现场：失败信息把人指向一条走不通的路（已修）
+
+用户 `sw init` 起的 BBS 论坛任务（Flask），卡在 03-coding。
+现场（`workspace/tasks/8090/.log` 尾部）：
+
+```text
+❌ 未能见证有效的红（退出码 2）
+   造红：收集期就报错（ImportError / SyntaxError），断言从未被执行。
+   红必须是断言失败，不是 import 失败。
+   若本轮确实无法见证红（例如实现已先落盘），走这条显式放弃：
+     python3 -m sw_lib.workflow.red_witness 8090 --abandon-witness '<为什么见证不到红>'
+```
+
+实测 `repo/8090`：`.venv` 不存在，flask 未安装，
+`python3 -m pytest tests/ -q` → `ModuleNotFoundError: No module named 'flask'`，
+`3 errors during collection`，rc=2。**门禁的拦截本身是对的**，
+这次不是判据量错了地方。
+
+#### 成因链
+
+1. `10:07:15` agent 执行 `python3 -m venv .venv && ... && pip install ...`，
+   下一条日志是 `10:14:37`，中间空 7 分 22 秒。`HOOK_TIMEOUT_MINUTES = 2.0`
+   把它砍掉了，venv 没建成。
+2. agent 没收到失败信号，交出「23 个测试全部通过」的产出。
+3. 门禁跑 pytest，收集期 ModuleNotFoundError，rc=2 → 判「造红」。
+
+#### 死锁的形状：出路能执行，但解决不了这个问题
+
+实测走了日志给的那条出路：
+
+```text
+$ python3 -m sw_lib.workflow.red_witness 8090 --abandon-witness '...'
+[Red Witness] 已放弃本轮见证（第 1 次）
+   phase 已回到 none —— 测试判定交回常规门禁。
+
+$ bash hooks/check_03-coding.sh 8090
+⚠️ Red 见证未发生（unavailable）
+运行 pytest (repo/8090)...
+❌ pytest 失败
+    ModuleNotFoundError: No module named 'flask'
+```
+
+**两条路通向同一堵墙。** 放弃见证后判定交回常规门禁，
+常规门禁跑同一份 pytest，撞同一个 ModuleNotFoundError。
+
+与 2.9.11（O6 死锁）**不同型**：那次是没有任何角色能满足判据；
+这次判据能被满足（装上依赖就见证得到红），但**失败信息指错了方向**。
+按失败信息三要件，缺的是第三条：**一个真实角色在真实阶段能执行的下一步**。
+此处应为「装依赖」，而门禁说的是「改 import」和「放弃见证」。
+
+> **判例**：拒绝给出的下一步，必须能**解决导致这次拒绝的那个原因**。
+> 「有一条能执行的命令」不等于「有出路」—— `--abandon-witness` 跑得通，
+> 但它治不了缺依赖。这是 2.9.7「拦住一条路而不给替代路径」的**变体**：
+> 那次是没给路，这次是给了一条通向同一堵墙的路。
+
+#### 根因：用退出码去猜原因
+
+退出码 2 只说明「收集期塌了」，说不出塌的原因。而
+「缺第三方依赖」与「自写模块 import 错了 / 语法错」性质不同，
+需要的下一步动作也不同 —— 前者装依赖，后者改代码。
+判据把两者合并成一句「造红」，于是必然有一半的情形被指错方向。
+
+同形先例就在同一个函数里：退出码 4 的分支注释明写「conftest 一塌
+pytest 就以 4 退出……落到兜底分支会说『无测试』，把人推去补测试 ——
+该补的是 main.py」。本次是**同一形状的第二个实例**。
+
+#### 修法：加一个独立的事实源，不从退出码推原因
+
+| 落点 | 改动 |
+|---|---|
+| `red_witness.declared_dependencies()` | 新增。读 `requirements*.txt` 与 `pyproject.toml`（PEP 621 + poetry） |
+| `red_witness.missing_dependencies()` | 新增。在**跑测试的那个解释器**里按发行名查 `importlib.metadata` |
+| `red_witness.install_hint()` | 新增。给出落在项目根、用项目解释器的 `pip install` |
+| `classify_exit_code()` | 加 `missing_deps` 参数。退出码 2 **与 4** 都据它分流 |
+| `_check_03a()` | 缺依赖时给 `install_hint`，**不给** `--abandon-witness` |
+| `lib_run_tests.sh::_diagnose_missing_deps()` | 新增。pytest 失败时补同一诊断 |
+
+两个设计决策：
+
+1. **只读声明，不从 ModuleNotFoundError 的模块名反推包名。**
+   导入名与发行名经常对不上（`python-dotenv` → `dotenv`、`Pillow` → `PIL`），
+   反推会给出一条装不上的命令 —— 那比不给下一步更糟，因为它看起来可执行。
+2. **依赖要在跑测试的那个解释器里查**（`_project_python`），
+   否则会出现「pytest 在 .venv 里跑、依赖却拿 harness 的解释器查」这种
+   新的错位 —— 那正是 2.9.14 那个坑换一副面孔。
+
+#### 两侧一起修
+
+`7ee1928` 记过这个陷阱：只修一侧会把「误拦」翻成「放过坏代码」。
+本次的形状是另一种 —— 见证侧修好了，但 `--abandon-witness` 之后判定
+交回 `run_project_tests`，那边仍只回显原始 pytest 输出。
+出路走到头还是看不懂为什么失败，死锁只是从一堵墙挪到另一堵墙。
+`check_04-review.sh` 复用同一个 `run_project_tests`，因此一并覆盖。
+
+#### 同型清扫
+
+| 候选 | 判定 |
+|---|---|
+| `classify_exit_code` 退出码 4 分支 | **同型，本次一并修**（conftest 里 `import flask` 实测 rc=4） |
+| `lib_run_tests.sh` 常规门禁侧 | **同型，本次一并修** |
+| `check_04-review.sh` | 复用 `run_project_tests`，已覆盖 |
+| `_check_03b` / `verify_green` | **不同型**：03b 的前提是 03a 已见证到红，依赖那时必然已装好 |
+| `fact_pack.collect_tests` | **不同型**：它不判「造红」，缺依赖时如实记 `unavailable`（❓），未把人指向错误的下一步 |
+| `probe/baseline.py::is_surviving` | **不同型**：同样不做原因诊断，缺依赖记 `unavailable`。它在 2.9.15 已因另一个形状（`resolve_pytest_root`）登记延后，此处不重复登记 |
+
+#### 未修的部分（登记）
+
+**`HOOK_TIMEOUT_MINUTES = 2.0` 砍掉装依赖命令这件事本身没修。**
+本次修的是「被砍之后 harness 说什么」，不是「不要砍」。理由：
+超时上限的存在是对的（钩子挂住会让 CLI 永久等待），
+而装依赖耗时不可预估，放宽到多少都可能不够。
+门禁文案里因此明说了「装依赖可能耗时超过钩子上限；若被中断，
+在终端里手动装完再 /advance」—— 把不可抗因素交代清楚，
+而不是假装它不存在。
+
+更彻底的修法是**让 agent 知道自己的命令被超时砍了**（现在它收不到信号，
+所以才会交出「23 个测试全部通过」）。那是 toolbox 层的改动，
+影响所有工具调用，不宜夹在本次修复里。**登记于此**，
+以免成为下一个「判据存在、无人回头」的遗留。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，

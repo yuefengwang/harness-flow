@@ -158,6 +158,29 @@ _has_pytest_surface() {
     return 1
 }
 
+# pytest 失败时补一句「是不是依赖没装」。
+#
+# 任务 8090 的第二堵墙：见证侧把缺依赖说清楚了，但 `--abandon-witness`
+# 之后判定交回这里，而这里只回显原始 pytest 输出 —— 用户走完出路照样
+# 卡住。两侧必须一起给对下一步，否则死锁只是从一堵墙挪到另一堵墙。
+#
+# 判据**复用** red_witness 的 `missing_dependencies`，不在 bash 里另写一份：
+# 两侧各写一份正是 helloworld / welll 那两次错位的成因。
+# python3 起不来或查不出东西时静默返回，绝不猜。
+_diagnose_missing_deps() {
+    local root="$1"
+    local py="$2"
+    [ -n "$root" ] && [ -d "$root" ] || return 0
+    python3 -c "
+import sys
+from sw_lib.workflow.red_witness import missing_dependencies, install_hint
+root, py = sys.argv[1], (sys.argv[2] or None)
+missing = missing_dependencies(root, py)
+if missing:
+    print('\n'.join(install_hint(root, missing, py)))
+" "$root" "$py" 2>/dev/null || true
+}
+
 run_project_tests() {
     local dir="$1"
     local fail_label="${2:-pytest 失败}"
@@ -191,6 +214,10 @@ run_project_tests() {
             # 失败原因必须回显。此前是 >/dev/null 2>&1 全丢弃，用户只看到
             # 「pytest 失败」四个字，反复 /advance 也不知道要改什么。
             echo "$out" | tail -25 | sed 's/^/    /'
+            # 缺依赖诊断（与 red_witness 的 _check_03a 共享同一个解析器）。
+            # 只打在 pytest 失败上，不打在 npm test 失败上 —— 后者没有
+            # Python 依赖文件可查。
+            _diagnose_missing_deps "$root" "$py" || true
             return 1
         fi
         # 成功时也要回显计数（A3 的 2.5）。此前 out 在成功分支被整个丢弃，

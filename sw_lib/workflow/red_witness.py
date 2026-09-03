@@ -12,6 +12,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,16 @@ PHASE_IMPL = "03b"
 # 它们的实现早已写完，测试本来就是绿的，按 03a 判定会永久无法准出。
 PHASE_NONE = "none"
 
+# 依赖声明的落点。多个同时存在时全都要读 —— 只读一个就会漏掉
+# 「依赖分散在两处」的项目（A0 的「判据量的落点比产出少」那一形状）。
+_REQUIREMENT_FILES = (
+    "requirements.txt", "requirements-dev.txt", "requirements/base.txt",
+)
+
+# PEP 508 的依赖行：包名在最前，后面跟版本/extras/环境标记。
+# 只取包名 —— 版本对不对是另一回事，这里回答的是「装没装」。
+_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
 
 @dataclass
 class WitnessVerdict:
@@ -63,6 +74,9 @@ class WitnessVerdict:
     exit_code: Optional[int] = None
     failed_nodes: List[str] = field(default_factory=list)
     passed_nodes: List[str] = field(default_factory=list)
+    #: 项目声明了却没装的依赖。非空表示这次收集期报错的成因是**环境**
+    #: 而不是代码 —— 调用方据此改用「装依赖」而非「改 import」的下一步。
+    missing_deps: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -133,7 +147,149 @@ def run_tests(target_dir: Any,
             pass
 
 
-def classify_exit_code(exit_code: int, nodes: Dict[str, str]) -> WitnessVerdict:
+# ── 依赖事实源：项目声明了什么，环境里装了什么 ──
+#
+# 这一层与 pytest 的退出码**刻意分开**。退出码 2 只说明「收集期塌了」，
+# 说不出塌的原因；而「缺第三方依赖」与「自写模块 import 错了 / 语法错」
+# 需要的下一步动作完全不同 —— 前者装依赖，后者改代码。
+# 拿退出码去猜原因，就是任务 8090 死锁的成因。
+
+def declared_dependencies(target_dir: Any) -> List[str]:
+    """读项目自己声明的第三方依赖，按声明顺序去重返回发行名。
+
+    落点要全部读，不能只读一个（A0 的「判据量的落点比产出少」）：
+    `requirements.txt` 之外，`pyproject.toml` 的 `project.dependencies`
+    与 poetry 的 `tool.poetry.dependencies` 都是真实落点。
+
+    **只读声明、不做导入猜测**。理由是导入名与发行名经常对不上
+    （`python-dotenv` 导入 `dotenv`、`Pillow` 导入 `PIL`），
+    从 ModuleNotFoundError 的模块名反推包名会给出装不上的命令 ——
+    那比不给下一步更糟，因为它看起来可执行。
+    """
+    root = Path(str(target_dir))
+    if not root.is_dir():
+        return []
+
+    names: List[str] = []
+
+    def _add(raw: str) -> None:
+        m = _REQ_NAME.match(raw)
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+
+    for rel in _REQUIREMENT_FILES:
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.split("#", 1)[0].strip()
+            # `-r other.txt` / `-e .` 是指令不是包名。
+            if not line or line.startswith("-"):
+                continue
+            _add(line)
+
+    pyproject = root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            data = {}
+        project = data.get("project")
+        if isinstance(project, dict):
+            for item in project.get("dependencies") or []:
+                if isinstance(item, str):
+                    _add(item)
+        poetry = (((data.get("tool") or {}).get("poetry") or {})
+                  .get("dependencies") or {})
+        if isinstance(poetry, dict):
+            for item in poetry:
+                # poetry 把 python 版本约束也写在这里，它不是可装的包。
+                if isinstance(item, str) and item.lower() != "python":
+                    _add(item)
+
+    return names
+
+
+def missing_dependencies(target_dir: Any,
+                         python: Optional[str] = None) -> List[str]:
+    """项目声明了、但目标解释器里装不到的依赖。
+
+    **必须在跑测试的那个解释器里查**，不是 harness 自己的解释器。
+    两者不同源正是任务 T3/welll 反复踩的那个坑：依赖装在项目
+    `.venv` 里，harness 的 python3 看不见，于是门禁与 agent 对同一份
+    代码给出相反结论。这里因此收 `python` 参数，由调用方传
+    `_project_python` 的结果。
+
+    查的是**发行名**（`importlib.metadata`），不是能不能 import：
+    import 得起来的模块名与包名对不上（`Pillow` → `PIL`），
+    而我们要给出的下一步是 `pip install <发行名>`。
+    """
+    declared = declared_dependencies(target_dir)
+    if not declared:
+        return []
+
+    py = python or sys.executable
+    probe = (
+        "import sys, json\n"
+        "from importlib.metadata import distribution, PackageNotFoundError\n"
+        "missing = []\n"
+        "for name in json.loads(sys.argv[1]):\n"
+        "    try:\n"
+        "        distribution(name)\n"
+        "    except PackageNotFoundError:\n"
+        "        missing.append(name)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "print(json.dumps(missing))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [py, "-c", probe, json.dumps(declared)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            return []
+        out = json.loads(proc.stdout.strip() or "[]")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # 查不动就当没查到。宁可退回旧的「造红」文案，
+        # 也不凭猜测给出一条装不上的命令。
+        return []
+    return [str(n) for n in out] if isinstance(out, list) else []
+
+
+def install_hint(target_dir: Any, missing: List[str],
+                 python: Optional[str] = None) -> List[str]:
+    """缺依赖时能直接执行的下一步。
+
+    命令要落在**项目根**上并用**项目自己的解释器**，否则装完了跑测试
+    的那个解释器仍然看不见 —— 这是同一个错位的第三种形态。
+    """
+    root = resolve_pytest_root(Path(str(target_dir)))
+    py = python or "python3"
+    lines = [
+        f"   缺少已声明的依赖 {len(missing)} 个: " + ", ".join(missing[:8])
+        + (" ..." if len(missing) > 8 else ""),
+        "   这不是造红 —— 代码本身没问题，是环境里没装依赖。装上再推进：",
+    ]
+    if (Path(str(root)) / "requirements.txt").is_file():
+        lines.append(f"     cd {root} && {py} -m pip install -r requirements.txt")
+    else:
+        lines.append(f"     cd {root} && {py} -m pip install "
+                     + " ".join(missing[:8]))
+    lines.append(
+        "   装依赖可能耗时超过钩子上限；若被中断，在终端里手动装完再 /advance。")
+    return lines
+
+
+def classify_exit_code(exit_code: int, nodes: Dict[str, str],
+                       missing_deps: Optional[List[str]] = None,
+                       ) -> WitnessVerdict:
     """把一次 pytest 运行判成「有效的红」或具体的拒绝理由。
 
     只有退出码 1 且**确有节点 failed** 才算有效的红。
@@ -142,12 +298,30 @@ def classify_exit_code(exit_code: int, nodes: Dict[str, str]) -> WitnessVerdict:
     而全 skip 的套件在 03b 会被「只看退出码」的实现当成全部转绿
     （A2 的 10.4）。判定因此一律以节点 outcome 为准，退出码只用于
     识别 collection error 与「无测试」这两种拿不到节点表的情形。
+
+    ``missing_deps`` 是**独立的事实源**（`missing_dependencies`），不是从
+    退出码推的。收集期塌掉时它决定我们说哪句话：有缺的依赖就是环境没装好
+    （下一步是装依赖），没有就是造红（下一步是改代码）。缺省 None 表示
+    调用方没查 —— 那时一律按造红处理，与加这个参数之前完全一致。
     """
     failed = sorted(n for n, o in nodes.items() if o == "failed")
     passed = sorted(n for n, o in nodes.items() if o == "passed")
     skipped = sorted(n for n, o in nodes.items() if o == "skipped")
+    missing = list(missing_deps or [])
 
     if exit_code == EXIT_COLLECTION_ERROR:
+        if missing:
+            # 任务 8090：把「环境缺依赖」说成「造红」，会把人推去改一个
+            # 本来没错的 import，而唯一给出的出路（--abandon-witness）
+            # 放弃见证后判定交回常规门禁，那边跑同一份 pytest、撞同一个
+            # ModuleNotFoundError —— 两条路通向同一堵墙。
+            return WitnessVerdict(
+                "invalid",
+                f"缺少已声明的依赖（{', '.join(missing[:5])}"
+                + (" ..." if len(missing) > 5 else "")
+                + "）：收集期 import 失败，测试一个也没跑。"
+                "这不是造红 —— 代码没问题，是环境里没装依赖。",
+                exit_code, missing_deps=missing)
         return WitnessVerdict(
             "invalid",
             "造红：收集期就报错（ImportError / SyntaxError），断言从未被执行。"
@@ -163,6 +337,18 @@ def classify_exit_code(exit_code: int, nodes: Dict[str, str]) -> WitnessVerdict:
         # `tests/conftest.py` 写 `from main import app` 而 `main.py` 没写，
         # conftest 一塌 pytest 就以 4 退出、一个测试也不跑。落到下面的兜底
         # 分支会说「无测试」，把人推去补测试 —— 该补的是 main.py。
+        #
+        # 缺依赖同样能让 conftest 塌掉（`import flask` 在 conftest 里），
+        # 那时成因与下一步都和「conftest 写错了」不同 —— 同一形状的第三处，
+        # 与退出码 2 一并处理，不留兄弟实例（任务 8090 的同型清扫）。
+        if missing:
+            return WitnessVerdict(
+                "invalid",
+                f"缺少已声明的依赖（{', '.join(missing[:5])}"
+                + (" ..." if len(missing) > 5 else "")
+                + "）：pytest 未能启动，收集期就中断了。"
+                "这不是 conftest 写错 —— 是环境里没装依赖。",
+                exit_code, missing_deps=missing)
         return WitnessVerdict(
             "invalid",
             "pytest 未能启动（退出码 4）：conftest.py 导入失败或命令行/配置有误，"
@@ -950,6 +1136,22 @@ def check_gate(task: str) -> GateResult:
     return _check_not_witnessed(task, target)
 
 
+def _missing_deps_if_collection_failed(target: Path,
+                                       exit_code: int) -> List[str]:
+    """收集期塌掉时才查依赖，否则返回空表。
+
+    只在退出码 2 / 4 上查有两个理由：一是别的退出码下这个事实用不上，
+    二是查一次要起子解释器，正常路径不该为它付钱。
+
+    解释器必须与跑测试的那个一致（`_project_python`），否则会出现
+    「pytest 在 .venv 里跑、依赖却拿 harness 的解释器查」这种新的错位 ——
+    那正是任务 T3/welll 那个坑换一副面孔。
+    """
+    if exit_code not in (EXIT_COLLECTION_ERROR, EXIT_USAGE_ERROR):
+        return []
+    return missing_dependencies(target, _project_python(target))
+
+
 def _check_03a(task: str, target: Path) -> GateResult:
     """见证红：必须有测试文件，且退出码为 1（断言失败）。
 
@@ -972,11 +1174,22 @@ def _check_03a(task: str, target: Path) -> GateResult:
         ] + _abandon_hint(task))
 
     exit_code, nodes = _run_in_target(target)
-    verdict = classify_exit_code(exit_code, nodes)
+    # 收集期塌了才去查依赖：查一次要起一个子解释器，正常路径上不必付这个钱。
+    verdict = classify_exit_code(
+        exit_code, nodes, _missing_deps_if_collection_failed(target, exit_code))
     if not verdict.ok:
         bypass = _bypass_files(target, exit_code, nodes)
         if bypass:
             return _check_impl_first_bypass(task, bypass)
+        if verdict.missing_deps:
+            # 缺依赖不给 `--abandon-witness`：那条路放弃见证后把判定交回
+            # 常规门禁，而常规门禁跑同一份 pytest、撞同一个
+            # ModuleNotFoundError。给它等于给一条走不通的路（任务 8090）。
+            return GateResult(False, [
+                f"❌ 未能见证有效的红（退出码 {exit_code}）",
+                f"   {verdict.reason}",
+            ] + install_hint(target, verdict.missing_deps,
+                             _project_python(target)))
         return GateResult(False, [
             f"❌ 未能见证有效的红（退出码 {exit_code}）",
             f"   {verdict.reason}",
