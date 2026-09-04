@@ -61,6 +61,12 @@ REGISTERED_CRITERIA = [
     # 从未在生产路径上执行过，因为 assert_config_valid 只被测试调用。
     ("assert_config_valid", "2.9.20", "S7"),
     ("validate_config", "2.9.20", "S7"),
+    # A15：`.state` 的受控写入入口。登记它们的理由与上面一样 ——
+    # `update_state` 建成之后，仍有 11 处调用点走裸 write_state（形状 S10），
+    # 判据在、没接上。`finish` 是三个终态写入点收拢后的唯一出口。
+    ("update_state", "2.9.21", "S10"),
+    ("finish", "2.9.21", "S10"),
+    ("_write_state_safe", "2.9.21", "S6"),
 ]
 
 

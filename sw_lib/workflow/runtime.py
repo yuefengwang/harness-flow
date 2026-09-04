@@ -11,7 +11,7 @@ from .utils import (
 )
 from . import stage_state as ss
 from ..core.config import MAX_REROUTE, STAGES
-from ..core.state import (read_state, write_state, upsert_task_summary,
+from ..core.state import (read_state, upsert_task_summary,
                           raise_if_corrupted, update_state, NO_CHANGE)
 from ..core.utils import now, sw_log
 
@@ -80,6 +80,28 @@ class WorkflowRuntime:
 
         return update_state(name, mutate)
 
+    @staticmethod
+    def finish(name: str) -> Dict[str, Any]:
+        """把任务置为终态 `Finished`，走受控入口。
+
+        两个终态分支（idx 已到末尾 / 无路可走）原本各自 `read_state` → 改 →
+        `write_state`，且都在主推进路径之前 **提前 return** —— 因此主路径那句
+        「重读一次再改字段」帮不到它们。A15 实测：并发签署的 Gate 会被这两个
+        分支的旧快照抹掉。抽成一处而不是各自受控化，是为了让「终态怎么写」
+        只有一个答案。
+
+        `cli/commands.py` 的 `cmd_advance` 归档分支是第三个写终态的地方
+        （A15 的 sweep 里发现，设计文档最初漏了它），也走这里。
+        """
+        def mutate(state):
+            if not state:
+                return NO_CHANGE
+            state["stage_status"] = "Finished"
+            state["updated_at"] = now()
+            return state
+
+        return update_state(name, mutate)
+
     @classmethod
     def advance(cls, name: str) -> Dict[str, Any]:
         """Single source of truth for stage routing.
@@ -104,9 +126,7 @@ class WorkflowRuntime:
 
         # Terminal stage -> finished
         if idx >= len(STAGES) - 1:
-            st["stage_status"] = "Finished"
-            st["updated_at"] = now()
-            write_state(name, st)
+            st = cls.finish(name)
             upsert_task_summary(name, stage_status="Finished")
             sw_log(name, "🏁 任务已完成 (Finished)", "sw")
             return st
@@ -122,10 +142,7 @@ class WorkflowRuntime:
         if cur_stage == "03-coding" and _stay_for_impl(name):
             ss.reset_gate(name, cur_stage)
             ss.render_gate_section(name, cur_stage)
-            st = read_state(name) or st
-            st["stage_status"] = "pending"
-            st["updated_at"] = now()
-            write_state(name, st)
+            st = cls.set_stage_status(name, "pending")
             upsert_task_summary(name, stage_status="pending")
             sw_log(name, "03a 已见证红 → 留在 03-coding 进入实现（03b）", "sw")
             return st
@@ -149,9 +166,7 @@ class WorkflowRuntime:
 
         if next_stage == cur_stage:
             # Nowhere to go -> finished
-            st["stage_status"] = "Finished"
-            st["updated_at"] = now()
-            write_state(name, st)
+            st = cls.finish(name)
             upsert_task_summary(name, stage_status="Finished")
             return st
 
@@ -173,14 +188,21 @@ class WorkflowRuntime:
         if is_reroute:
             ss.reset_route(name)
 
-        # reset_gate / reset_route 刚刚写过盘，`st` 是函数入口读的旧快照 ——
-        # 直接拿它写回去会把重置结果整体覆盖掉。重读一次再改字段。
-        st = read_state(name) or st
-        st["stage"] = next_stage
-        st["stage_idx"] = next_idx
-        st["stage_status"] = "pending"
-        st["updated_at"] = now()
-        write_state(name, st)
+        # reset_gate / reset_route 刚刚写过盘，函数入口读的 `st` 已经过期。
+        # 原先在这里手工 `st = read_state(name) or st` 重读一次 —— 那是对的，
+        # 但把正确性寄存在「下一个人记得这件事」上：谁在 advance 里加一行
+        # 状态修改，都得自己想到手上的快照可能过期（A15 的 1.1）。
+        # 改走受控入口后，重读发生在锁内，由机制保证。
+        def _mutate(state):
+            if not state:
+                return NO_CHANGE
+            state["stage"] = next_stage
+            state["stage_idx"] = next_idx
+            state["stage_status"] = "pending"
+            state["updated_at"] = now()
+            return state
+
+        st = update_state(name, _mutate)
         upsert_task_summary(name, stage=next_stage, stage_idx=next_idx,
                             stage_status="pending")
         sw_log(name, f"advanced to {next_stage} (via chain logic)", "sw")

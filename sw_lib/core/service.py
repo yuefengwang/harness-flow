@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Tuple
 
 from .config import TASKS, TPLS, STAGES, TRASH
 from .state import (
-    read_state, write_state,
+    read_state, write_state, update_state, NO_CHANGE,
     upsert_task_summary, remove_task_summary,
 )
 from .utils import now, sanitize_name, sw_log
@@ -138,7 +138,10 @@ class TaskService:
             "created_at": now(),
             "updated_at": now(),
         }
-        write_state(clean_name, state_data)
+        # 刻意不走 update_state（A15 的 2.2 已裁定）：任务此刻**尚不存在**，
+        # 不存在第二个写者；受控入口的 mutator 会拿到空状态，语义上是「创建」
+        # 而非「修改」。硬套受控化会让「任务已存在」的冲突检测失效。
+        write_state(clean_name, state_data, _internal=True)
 
         upsert_task_summary(clean_name,
             type=task_type,
@@ -220,10 +223,15 @@ class TaskService:
 
         TRASH.mkdir(parents=True, exist_ok=True)
         
-        # 记录移除时间
-        st = read_state(name)
-        st["removed_at"] = now()
-        write_state(name, st)
+        # 记录移除时间。走受控入口：任务可能仍在运行，agent / HealthMonitor
+        # 都可能正在写盘，拿入口快照整体写回会把它们的写入抹掉。
+        def _mark_removed(state):
+            if not state:
+                return NO_CHANGE
+            state["removed_at"] = now()
+            return state
+
+        update_state(name, _mark_removed)
 
         shutil.move(str(task_dir), str(TRASH / name))
         
@@ -276,11 +284,15 @@ class TaskService:
 
         shutil.move(str(src), str(dst))
 
-        # 清除移除标记
-        st = read_state(name)
-        if "removed_at" in st:
-            del st["removed_at"]
-        write_state(name, st)
+        # 清除移除标记。没有标记可清时返回 NO_CHANGE：不刷 updated_at、
+        # 不重算签名，免得在审计里留下一次无内容的状态变更。
+        def _clear_removed(state):
+            if not state or "removed_at" not in state:
+                return NO_CHANGE
+            del state["removed_at"]
+            return state
+
+        st = update_state(name, _clear_removed)
         
         upsert_task_summary(name,
             type=st.get("type", "feature"),
@@ -299,12 +311,17 @@ class TaskService:
         with open(input_file, "a", encoding="utf-8") as f:
             f.write(f"[{now()}] user | {text}\n")
         
-        # 如果当前由于等待提问处于 pending 状态，则恢复为 running
-        st = read_state(name)
-        if st.get("stage_status") == "pending":
-            st["stage_status"] = "running"
-            st["updated_at"] = now()
-            write_state(name, st)
+        # 如果当前由于等待提问处于 pending 状态，则恢复为 running。
+        # 走受控入口：这是与 agent 写状态**高频并发**的一处 —— 用户回答问题时
+        # agent 往往正在写盘，拿旧快照整体写回会把它的写入抹掉。
+        def _resume_running(state):
+            if not state or state.get("stage_status") != "pending":
+                return NO_CHANGE          # 幂等路径，不刷 updated_at
+            state["stage_status"] = "running"
+            state["updated_at"] = now()
+            return state
+
+        update_state(name, _resume_running)
 
         sw_log(name, f"user answer added: {text[:50]}", "user")
 
@@ -353,57 +370,104 @@ class TaskService:
         Returns:
             更新后的任务状态字典
         """
-        st = self.get_task_state(name)
+        # 先读一次只为把「任务不存在」报成 TaskError，而不是让 update_state
+        # 抛出更底层的错。真正的准入检查在 mutator 里、锁内重做一遍：
+        # 「检查完再写」跨两次读写时，两个并发 deploy 会双双通过 deploying 检查。
+        self.get_task_state(name)
 
-        if not force and st.get("stage_status") != "Finished":
-            raise TaskError(f"任务未完成，无法部署: {name}")
+        def _begin_deploy(state):
+            if not state:
+                raise TaskError(f"无法读取任务状态: {name}")
+            if not force and state.get("stage_status") != "Finished":
+                raise TaskError(f"任务未完成，无法部署: {name}")
+            if state.get("deploy_status") == "deploying":
+                raise TaskError(f"任务正在部署中: {name}")
+            target_dir = state.get("target_dir", "")
+            if not target_dir or not Path(target_dir).is_dir():
+                raise TaskError(f"目标目录不存在或不可用: {target_dir}")
+            state["deploy_status"] = "deploying"
+            state["deploy_at"] = now()
+            state["updated_at"] = now()
+            return state
 
-        if st.get("deploy_status") == "deploying":
-            raise TaskError(f"任务正在部署中: {name}")
-
-        target_dir = st.get("target_dir", "")
-        if not target_dir or not Path(target_dir).is_dir():
-            raise TaskError(f"目标目录不存在或不可用: {target_dir}")
-
-        st["deploy_status"] = "deploying"
-        st["deploy_at"] = now()
-        st["updated_at"] = now()
-        write_state(name, st)
+        st = update_state(name, _begin_deploy)
         upsert_task_summary(name, deploy_status="deploying")
 
         return st
 
     def complete_deploy(self, name: str, success: bool, deploy_url: str = ""):
         """完成部署：标记部署结果为成功或失败，可选记录服务地址"""
-        st = self.get_task_state(name)
-        st["deploy_status"] = "deployed" if success else "deploy_failed"
-        st["updated_at"] = now()
-        if success:
-            st["health_status"] = "ok"
-            if deploy_url:
-                st["deploy_url"] = deploy_url
-            if "health_config" not in st:
-                st["health_config"] = {
-                    "enabled": True,
-                    "check_interval": 10,
-                    "failure_threshold": 3,
-                    "auto_redeploy": False,
-                    "max_redeploys": 5,
-                    "redeploy_window_sec": 300,
-                }
-        else:
-            if deploy_url:
-                st["deploy_url"] = deploy_url
-            elif "deploy_url" in st:
-                # 部署失败且无新 URL → 清除旧 URL，避免 HealthMonitor 检测失效域名
-                del st["deploy_url"]
-        write_state(name, st)
+        self.get_task_state(name)       # 任务不存在时报 TaskError
+
+        # 走受控入口：HealthMonitor 在独立线程里写同一份 `.state`
+        # （health_status / deploy_status），拿旧快照整体写回会抹掉它的写入。
+        def _finish_deploy(state):
+            if not state:
+                raise TaskError(f"无法读取任务状态: {name}")
+            state["deploy_status"] = "deployed" if success else "deploy_failed"
+            state["updated_at"] = now()
+            if success:
+                state["health_status"] = "ok"
+                if deploy_url:
+                    state["deploy_url"] = deploy_url
+                if "health_config" not in state:
+                    state["health_config"] = {
+                        "enabled": True,
+                        "check_interval": 10,
+                        "failure_threshold": 3,
+                        "auto_redeploy": False,
+                        "max_redeploys": 5,
+                        "redeploy_window_sec": 300,
+                    }
+            else:
+                if deploy_url:
+                    state["deploy_url"] = deploy_url
+                elif "deploy_url" in state:
+                    # 部署失败且无新 URL → 清除旧 URL，避免 HealthMonitor 检测失效域名
+                    del state["deploy_url"]
+            return state
+
+        st = update_state(name, _finish_deploy)
         upsert_task_summary(name, deploy_status=st["deploy_status"])
 
     def _write_state_safe(self, name: str, data: dict):
-        """安全写入状态（供 HealthMonitor 等外部调用），直接写 .state 文件。"""
-        from .state import write_state as _ws
-        _ws(name, data)
+        """把 `data` 里**发生变化的标量字段**合并进当前状态。
+
+        供 HealthMonitor 等持有过期快照的外部调用方使用。
+
+        原先这里是裸 `write_state`：**函数名承诺 safe，实现没兑现**。
+        那比直接调 `write_state` 更坏 —— 它让调用方以为并发问题已经处理过了。
+        HealthMonitor 跑在独立线程，它手里的快照与写盘之间隔着一次 HTTP 探测，
+        过期是常态；整体写回会把这期间用户签的 Gate 抹掉（A15 已实测）。
+
+        ⚠️ 语义不是「浅合并」，而是「只写差异标量」。真实路径实测（A15 的
+        2.9.20）：浅合并**仍然会抹掉判据** —— 调用方的快照里早就带着一棵
+        **旧的** `stages` 子树，`dict.update` 会用旧子树整棵替换新的，
+        用户刚签的 Gate 随之消失（实测 True → False）。
+        单元测试当时是绿的，因为那份快照读取于 `stages` 出现之前。
+
+        因此这里只回写「调用方确实改动过的标量字段」：
+        取 `data` 与磁盘现状逐键比对，跳过 dict / list 这类嵌套结构 ——
+        判据（`stages`、`red_witness`、`facts`）全都住在嵌套结构里，
+        而 HealthMonitor 要写的 `health_status` / `deploy_status` /
+        `updated_at` / `deploy_url` 全是标量。
+
+        边界（写明而不是假装没有）：
+        - **删除键无法通过本函数表达**，嵌套结构也不能通过它修改。
+          当前 3 处调用点都只赋标量；需要改嵌套结构的调用方必须自己写 mutator。
+        """
+        from .state import update_state as _us
+
+        def _merge_scalars(state):
+            state = state or {}
+            for key, value in (data or {}).items():
+                if isinstance(value, (dict, list)):
+                    continue          # 判据住在嵌套结构里，不许被过期快照带回来
+                if state.get(key) != value:
+                    state[key] = value
+            return state
+
+        _us(name, _merge_scalars)
 
 
 _service = TaskService()

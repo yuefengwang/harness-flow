@@ -13,6 +13,7 @@ import os
 import contextlib
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, Iterator
 
@@ -186,7 +187,7 @@ def raise_if_corrupted(state: Dict[str, Any], name: str = "") -> Dict[str, Any]:
     )
 
 
-def write_state(name: str, data: Dict[str, Any]):
+def write_state(name: str, data: Dict[str, Any], *, _internal: bool = False):
     """
     将状态字典以 JSON 格式**原子地**持久化到任务的 .state 文件。
 
@@ -198,10 +199,29 @@ def write_state(name: str, data: Dict[str, Any]):
     （序列化异常、进程被杀、掉电），磁盘上留下半截 JSON。
     配合旧的读路径，那份半截内容会被当成旧格式解析并固化。
 
+    ⚠️ **这不是写入 `.state` 的入口，`update_state` 才是。**
+    它只保证「单次写入是原子的」，不保证「不覆盖别人的写入」：
+    `read_state` → 改 → `write_state` 的写法在并发下会丢更新，
+    而丢掉的往往是 Gate 签名这类**判据**（A15 的第 1 节，已实测）。
+
     Args:
         name: 任务名称
         data: 状态字典
+        _internal: 仅供 `update_state` 与已裁定的例外（`create_task`：
+            任务尚不存在，不存在第二个写者）使用。其余调用会收到
+            `DeprecationWarning`，指向受控入口。
     """
+    # 为什么用警告而不是直接禁止：A15 的 3.4 —— 改名 + 私有化会一次性打断
+    # 全部既有调用点（含测试），回滚粒度变粗；警告能让迁移分批且可观测。
+    if not _internal:
+        warnings.warn(
+            f"write_state({name!r}) 绕过了受控入口：并发下会用旧快照整体覆盖"
+            f"他人的写入（丢的往往是 Gate 签名这类判据）。请改用 "
+            f"update_state(name, mutator)，见 docs/design/A15-write-state-migration.md。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     sf = state_path(name)
     sf.parent.mkdir(parents=True, exist_ok=True)
 
@@ -329,7 +349,7 @@ def update_state(name: str, mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
             raise TypeError(
                 f"mutator 必须返回 dict 或 NO_CHANGE，"
                 f"实际返回 {type(new_state).__name__}")
-        write_state(name, new_state)
+        write_state(name, new_state, _internal=True)
         return new_state
 
 

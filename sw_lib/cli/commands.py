@@ -44,7 +44,7 @@ from ..core.config import (
     ROOT, STAGES, STAGE_NAMES, HOOKS_DIR,
     HOOK_TIMEOUT_MINUTES, HOOK_TIMEOUT_SECONDS,
 )
-from ..core.state import get_active_from_status, write_state, upsert_task_summary, find_context_from_cwd
+from ..core.state import get_active_from_status, upsert_task_summary, find_context_from_cwd
 from ..core.deploy_orchestrator import DeployOrchestrator
 from ..core.health import HealthMonitor, HealthConfig
 from ..core.utils import (
@@ -191,9 +191,11 @@ def cmd_advance(args):
             if todo_items:
                 die(f"检测到 {len(todo_items)} 个未完成项，请完善后重试。")
 
-            st["stage_status"] = "Finished"
-            st["updated_at"] = now()
-            write_state(name, st)
+            # 走 WorkflowRuntime.finish 而不是就地写盘：这是第三个写终态的地方
+            # （另两个在 advance 里），三处各写一遍就会各自漏一次受控化 ——
+            # A15 的 sweep 正是在这里抓到本任务设计文档漏掉的第 11 处裸写。
+            from ..workflow.runtime import WorkflowRuntime
+            WorkflowRuntime.finish(name)
             upsert_task_summary(name, stage_status="Finished")
             ok("🏁 任务已完成 (Finished)")
             return

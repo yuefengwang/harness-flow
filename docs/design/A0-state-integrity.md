@@ -1325,6 +1325,196 @@ roles 从 6 个变 0 个、`stage_roles` 变空，而 `./sw list` **照常运行
 
 ---
 
+### 2.9.21 受控入口建成三年，一半的人还在走窗户（A15）
+
+**形状**：S10（修了一半）第 6 个实例。判例 1（D0-1「十余处调用点只修了
+瓶颈处」）正是这件事的前身 —— 同一个形状，第二次以更大的规模出现。
+
+**现场**：`update_state` 的 docstring 写着「这是写入 `.state` 的受控入口」，
+实测分布却是：
+
+| 位置 | 裸 `write_state` | 受控 `update_state` |
+|---|---|---|
+| `stage_state.py` / `fact_pack.py` | 0 | 11 |
+| `workflow/runtime.py` | 4 | 1 |
+| `core/service.py` | 5 | 0 |
+| `core/health.py`（经 `_write_state_safe`） | 3 | 0 |
+| **`cli/commands.py`** | **1** | 0 |
+
+最后一行是 sweep 抓出来的：**本任务自己的设计文档漏了它**。
+机械搜索（`rg -n "write_state\(" sw_lib/ hooks/ bin/`）比人的枚举可靠，
+这正是 same-shape-sweep 存在的理由。
+
+**危险不在「可能出错」，在「注释在替代机制」**。`advance` 里原有一句：
+
+```python
+# reset_gate / reset_route 刚刚写过盘，`st` 是函数入口读的旧快照 ——
+# 直接拿它写回去会把重置结果整体覆盖掉。重读一次再改字段。
+st = read_state(name) or st
+```
+
+这段注释是对的，也确实修掉了当时那个 bug。但它把正确性**寄存在下一个
+读代码的人身上**。证据：同一个函数里另外 3 个分支（两处终态、03a 留级）
+**提前 return，都没有这次重读** —— 写注释的人自己就漏了 3 处。
+
+**关键实测（否决了原设计）**：`state_lock` **不可重入**，
+`update_state` **不可嵌套**（`flock` 每次 `os.open` 拿新 fd，`LOCK_EX`
+对同一进程的第二个 fd 同样阻塞）。原方案「advance 外层加一把锁」会在
+调用 `reset_gate` 时死锁，而**死锁在测试里表现为「卡住」而不是「失败」**，
+极易被当成环境问题。定案改为：重置类操作留在锁外各自原子，
+`advance` 的最终落盘收拢成一次 `update_state`，mutator 在锁内重新读盘。
+
+**边界（写明而不是假装没有）**：本任务**不让 `advance` 变成原子操作**。
+它消除的是「用过期快照整体覆盖」，不是「推进过程中的所有交错」。
+后者需要重构路由逻辑，超出范围。把目标写大而实现做不到，本身就是自欺。
+
+**让形状不可表达**：`write_state` 新增 `_internal` 关键字参数，
+非内部调用发 `DeprecationWarning` 并指向 `update_state`。
+不用「改名 + 私有化」是为了让迁移分批、回滚粒度细。
+两条判据一正一反：非内部调用**必须**告警，`update_state` 内部**不得**告警
+（否则警告变噪音，下一个人会整体忽略它 —— 那等于机制没建）。
+
+#### 本仓库第 7 次「单元测试全绿 ≠ 机制接通」
+
+`_write_state_safe` 的名字承诺 safe，实现是裸 `write_state`。
+改成「锁内重读 + 浅合并」之后，**13 条单元测试全绿，真实任务上仍然丢判据**：
+
+```text
+真实任务 a15probe（无 mock、无 monkeypatch）
+  签署后 05 gate: True
+  _write_state_safe 写盘后: False        ← 判据被抹掉
+```
+
+**根因**：HealthMonitor 手里的快照**本身就带着一棵旧的 `stages` 子树**，
+`dict.update` 用旧子树整棵替换掉新的。而单元测试里那份快照读取于
+`stages` 出现**之前**，浅合并看起来完全够用 —— 测试的前提与生产的常态不同。
+
+**定案**：`_write_state_safe` 只回写「调用方改动过的**标量**字段」，
+跳过 dict / list。判据（`stages`、`red_witness`、`facts`）全住在嵌套结构里，
+而 HealthMonitor 要写的 `health_status` / `deploy_status` 全是标量。
+代价写在 docstring 里：删除键与嵌套修改无法通过它表达，需要时自己写 mutator。
+
+**这一条的教训值得单独记**：真实路径验证抓住了 13 条单元测试放过的缺陷，
+而它之所以能抓住，是因为用的是**真实任务已经积累的状态形状**，
+不是测试现场捏出来的干净状态。
+
+#### 测试脚手架自己空转过一次
+
+红测试第一版只钩 `read_state` 注入并发写者。迁移之后
+`add_answer` / `remove_task` 不再调用它 —— **注入点静默失效，第二个写者
+从未运行**，而测试仍在断言「签名还在」，于是变成一条恒真判据。
+
+修法：同时钩 `read_state` 与 `update_state`（后者注入在取锁**之前**，
+否则撞上不可重入的锁），并给每条用例加 `assert fired["done"]` ——
+**注入没发生就是判据空转，必须报错而不是通过**。
+
+按 DEV-PROTOCOL 的 1.2：这次修改发生在见到红之后，因此已显式声明并
+**在未改动的 HEAD 代码上重跑新测试**确认仍是红（8 failed / 4 passed，
+与第一版红的集合一致），green 才算成立。
+
+**验证（三态）**：
+
+| 项 | 态 | 证据 |
+|---|---|---|
+| 11 处裸写全部受控 | ✅ | `rg` 判据通过，只剩 `create_task` + `state.py` 内部 |
+| 并发下判据不丢 | ✅ | HEAD 上 8 红 → 迁移后 13 绿 |
+| 真实任务推进正常 | ✅ | a15probe 走完 01→05，`advance` 与签 Gate 并发不丢签名 |
+| 真实路径丢判据已修 | ✅ | baseline True→False，迁移后 True→True |
+| `tests/unit/core/` | ✅ | 333 passed |
+| `tests/unit/workflow/` | ✅ | 624 passed |
+| 锁竞争是否会超时（U15-7） | ❓ | 单机 957 条测试与真实任务未触发 `timeout=10.0`；高并发多轨场景未压测 |
+
+**检测方法**：`test_no_bare_write_state_left_in_production_paths`
+（机械搜索，新增调用点会立刻变红）+ `scripts/orphan_criteria.py`。
+
+---
+
+### 2.9.19 03 门禁死锁：判据要求先写测试，指令从未说过（任务 44444）
+
+**形状**：S2（阶段错位 —— 指令与硬约束各自独立，互不校验）的变体，
+加 S10（修了一半）。这次错位不在「阶段」，在**指令与判据之间**：
+判据硬要求的动作，指令里一个字都没提。
+
+**现场**：`workspace/tasks/44444/.log` 63 次工具调用，涉及 test 的只有一次 ——
+第 3 次调用 `mkdir -p backend/routers backend/tests frontend/src` 建了空目录，
+此后再没碰过。agent 全程用 `bash` 起 uvicorn、手工 curl 验证接口，
+产出里写「后端 API 所有接口测试通过」。**它没说谎**，它真验证过，
+只是用的不是 pytest。准出被拦：
+
+    ❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）
+
+判据是对的，红绿流程确实没走。**缺的是指令。**
+
+**根因一：动作要求不在指令里。** `03-coding.yaml` 有 1400 字讲记账格式、
+README 要求、围栏保护，**没有一句要求先写测试**。它只说 `## Red-Green`
+那一节要写「可复现的真实命令」—— 那是**记账格式**要求，不是**动作**要求。
+
+「先写测试」四个字确实在完整 prompt 里，位置是 28903 字符的第 **26707 位
+（92% 处）**，来自 `hooks/03-coding.md` 的自动注入。段落顺序实测：
+
+           0  全局项目规范 (INSTRUCTIONS.md)   17747 字符，占 61%
+       17747  阶段 system_prompt                 只有 839 字符
+       19526  前一阶段产出
+       23398  当前阶段模板
+       26118  强制规则 (03-coding)             ← 「先写测试」在这里
+
+**根因二：失败信息指错方向。** 空 `tests/` 目录有个反直觉的后果 ——
+它**触发** `_has_pytest_surface`（`_TEST_DIR_NAMES` 命中 `tests`），
+于是判据认定「Python 项目，该写测试却没写」。而那句拒绝的括号里
+写着 `tests/`，agent **确实建了** `tests/`：按字面看它已满足要求却被拒。
+同 2.9.16 的「失败信息指向一条走不通的路」。
+
+**修复**：
+
+1. `03-coding.yaml` 新增「本阶段的动作顺序（硬约束，准出时由 harness
+   亲自校验）」段：先写测试→跑红→写实现的顺序、测试文件命名（**明说建空
+   `tests/` 不算**）、红必须是断言失败（ImportError 叫造红）、bash 手工验证
+   不能替代 pytest、`--abandon-witness` 出路。
+2. `red_witness.empty_test_dirs()` + `_no_tests_lines()`：命中空测试目录时
+   说出真实路径与「目录建了不算写测试」。**结论不变**（仍然拦）——
+   放宽它会让「建个空目录」变成绕过红见证的捷径。
+
+**sweep 的收获（这是本轮真正的重点）**：改完 03 一个 yaml 就想收工，
+按 same-shape-sweep 机械扫一遍才发现 **五个阶段的 yaml 全都是
+`{global_rules}` 打头**，实测位置 01/02/04/05 全在第 0 位。
+修一个文件等于 S10 的第五个实例（同 2.9.9 第 2 条：模板只有 01 修了落盘
+指令，02 漏了）。
+
+**因此位置收归 `PromptBuilder`**：yaml 不再自己摆放占位符，builder 统一把
+全局规范排在阶段指令**之后**。这样这个形状长不出第六个实例 —— 新增阶段
+不写占位符就自动正确。yaml 若显式写了 `{global_rules}` 仍按它的位置渲染，
+不重复追加（兼容口）。
+
+实测位置变化：五个阶段的指令一律到第 0 位，全局规范落到 1%-6% 之后；
+03 的「先写测试」从 **92% 提到 1%**（152/22791）。
+
+**基线对照实测**（`git archive cc51be6` 检出到 /tmp，只搬测试文件）：
+把 MockAgent 的复现设施一并搬过去（否则红是 ImportError，那叫造红），
+只让判据侧留在旧版：**18 failed / 4 passed**。4 条 passed 是前提自检与
+默认形态 —— 红来自判据本身，不是恒真。
+
+**MockAgent 复现**（`SW_MOCK_CODING_EMPTY_TESTS_DIR=1`，与 `7090` 同一套做法）：
+`_write_empty_tests_project` 写出 44444 的形状 —— `backend/` 有实现、
+`backend/tests/` 是空目录、零测试文件。判据侧 6 条全绿，
+其中一条走**真实钩子** `check_03-coding.sh`（rc≠0，且 stdout 含
+`backend/tests`）—— 单元绿不等于机制接通。
+
+进入 03a 必须走真实的 `pre_check_03-coding.sh`：测试进程的证据密钥被
+conftest 重定向到 tmp，进程内调 `begin_test_phase` 会让钩子判 `tampered`，
+红的原因就不再是被测行为（同 `test_red_witness_non_python` 的处置）。
+
+**真实任务实跑**：`python3 -m sw_lib.workflow.red_witness 44444` 仍 rc=1
+（结论不变），文案已改为「测试目录是空的（已建好，但里面没有测试文件）
+—— backend/tests/」并指出往哪里写。
+
+**遗留**：`_read_global_rules()` 把 harness 自己的 `INSTRUCTIONS.md`
+（400 余行内部架构文档）当作「被开发项目的全局规范」注入每个任务 agent，
+这件事本轮**只改了位置，没改语义**。它在
+`test_prompt_self_sufficiency.py` 里已被登记为范围外事项，仍然有效：
+agent 收到的 21258 字符 prompt 里，17747 是它用不上的 harness 内部文档。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，
