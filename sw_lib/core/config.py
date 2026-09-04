@@ -305,14 +305,34 @@ class ConfigManager:
         )
 
     def _load_raw_yaml(self) -> Dict[str, Any]:
+        """读 `config.yaml`。**语法错误必须响亮失败**（A14 的 2.4）。
+
+        改造前这里是 `except Exception: pass` + `return {}` ——
+        一处缩进错误会让**整份配置**退化为默认值：实测 roles 从 6 个变 0 个、
+        `stage_roles` 变空字典，而 `sw list` 照常运行、零报错。
+
+        这与 A4 的 2.3 消除的「配置指向不存在的角色时静默兜底到 gemini」
+        是同一个形状，且更彻底：前者丢一个角色，后者丢全部配置。
+        A4 的全部目的是用不同 provider 消除先验盲区，静默退化让它归零。
+
+        文件**不存在**仍按默认值走：那是合法的首次运行状态。
+        「文件有但语法坏」才意味着有人改坏了它 —— 两者处置刻意不同。
+        """
         config_path = CONFIG_DIR / "config.yaml"
-        if config_path.exists():
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    return yaml.safe_load(f) or {}
-            except Exception:
-                pass
-        return {}
+        if not config_path.exists():
+            return {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(
+                f"config.yaml 语法解析失败: {config_path}\n"
+                f"    {exc}\n"
+                f"    此前这里会静默退化为默认值（全部角色配置消失且无报错），"
+                f"现改为响亮失败。请修正 YAML 语法后重试。") from exc
+        except OSError as exc:
+            raise ConfigError(
+                f"config.yaml 无法读取: {config_path}\n    {exc}") from exc
 
 # 初始化全局管理器
 _manager = ConfigManager()
@@ -590,6 +610,41 @@ def validate_config() -> List[ConfigIssue]:
             "error", "review_has_no_reviewer",
             "review.subjective 为空且 objective.enabled 为 false —— "
             "04 阶段将没有任何审查者，等于无条件放行。"))
+
+    # 多审查者需要仲裁器归约，而 A9 尚未实施（A14）。
+    #
+    # 实测（A5 的 11.1）：配两个主观审查者后 fan-out 各自跑完、`arbiter`
+    # 节点 `return {}`，于是 `StageOutput.route` 为 None、TUI 推不动 04 阶段。
+    # 这个缺口今天不发作纯属配置侥幸（subjective 为空），而配置是给人改的。
+    #
+    # 判据刻意读 `ARBITER_IMPLEMENTED` 而非硬编码「禁止多审查者」：
+    # A9 落地后本校验的条件不再成立、自动失效，无需谁记得回来拆守护栏。
+    # 守护栏的失效条件写在判据里，不写在某人的记忆里。
+    if len(review.subjective) >= 2:
+        try:
+            from ..workflow.review_graph import ARBITER_IMPLEMENTED
+        except Exception as exc:  # noqa: BLE001
+            # 判据读不到自己要读的东西时**不判通过**（A6 的 3.3）。
+            # 这里比 unavailable 更强：review_graph 是本仓库自己的模块，
+            # 导入失败意味着代码坏了，不是环境缺件。
+            issues.append(ConfigIssue(
+                "error", "arbiter_status_unreadable",
+                f"无法确认仲裁器实现状态（导入 review_graph 失败: {exc}）。"
+                f"review.subjective 配了 {len(review.subjective)} 个审查者，"
+                f"而多审查者必须有仲裁器归约结论，因此不能按「通过」处理。"))
+        else:
+            if not ARBITER_IMPLEMENTED:
+                issues.append(ConfigIssue(
+                    "error", "review_needs_unimplemented_arbiter",
+                    f"harness.review.subjective 配了 {len(review.subjective)} 个"
+                    f"主观审查者，但仲裁器（A9）尚未实现。\n"
+                    f"    实测后果：04 阶段 fan-in 之后没人把多份 findings 归约成"
+                    f"阶段结论，route 为空，TUI 推不动阶段，任务卡在审查阶段。\n"
+                    f"    下一步二选一：\n"
+                    f"      (a) 减到 1 个审查者 —— 单审查者路径自带 route，"
+                    f"行为与改造前一致；\n"
+                    f"      (b) 实施 A9（docs/design/A9-route-arbiter.md）后把"
+                    f" review_graph.ARBITER_IMPLEMENTED 置 True，本校验自动失效。"))
 
     issues.extend(_heterogeneity_issues(cfg))
     return issues

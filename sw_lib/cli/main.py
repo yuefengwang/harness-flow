@@ -16,19 +16,40 @@ from .commands import (
     cmd_state_get, cmd_reap,
 )
 from .test_cmd import cmd_test
+from ..core.config import ConfigError
 
 
 def _ensure_bootstrapped():
-    """Activate Phase 1-3 workflow chain on first CLI invocation."""
+    """Activate Phase 1-3 workflow chain on first CLI invocation.
+
+    `ConfigError` **刻意不吞**（A14 的 3.2.1）：它的语义是「配置写错了，
+    人必须来改」，与「某个可选模块没装好」不是一类事。此前这里是
+    `except Exception: pass`，会把配置校验的结论静默丢弃 —— 那样
+    `assert_config_valid` 就成了一条永远不会被人看见的判据，
+    形状 S7 换个形态复发。
+
+    其余异常保持原有的非致命语义：bootstrap 失败时系统回落到旧路径。
+    """
     try:
         from ..core.bootstrap import bootstrap
         bootstrap()
+    except ConfigError:
+        raise
     except Exception:
         pass  # bootstrap failure is non-fatal; system falls back to legacy
 
 
 def main():
-    _ensure_bootstrapped()
+    # 配置错误以可读文本 + 非零退出码呈现（A14）。
+    #
+    # 裸 traceback 把「你的配置写错了」表述成「程序崩了」，而退出码 0
+    # 会让脚本与 CI 认为一切正常 —— 判据拦住了却没人知道。
+    # 与 A2 的 10.6 同一条纪律：拦一条路时必须让人看懂发生了什么。
+    try:
+        _ensure_bootstrapped()
+    except ConfigError as exc:
+        print(f"\n配置错误 —— harness 拒绝启动：\n{exc}\n", file=sys.stderr)
+        return 2
     # 全局标志同时挂到主 parser 和每个子命令上。只挂主 parser 的话，
     # `sw remove-all --yes` 里的 --yes 会被 argparse 当作未知参数 ——
     # 而 --yes 决定破坏性操作能否执行，静默丢弃是最坏的失败方式：

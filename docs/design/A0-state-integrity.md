@@ -1278,89 +1278,50 @@ helloworld(1) 全部放行，**零误伤**；手工构造的 0 轮任务被钩�
 
 ---
 
-### 2.9.19 03 门禁死锁：判据要求先写测试，指令从未说过（任务 44444）
+### 2.9.20 配置里的仲裁器缺口，与静默吞掉的 YAML 错误（A14）
 
-**形状**：S2（阶段错位 —— 指令与硬约束各自独立，互不校验）的变体，
-加 S10（修了一半）。这次错位不在「阶段」，在**指令与判据之间**：
-判据硬要求的动作，指令里一个字都没提。
+**形状**：S7（判据存在、无人调用）第 4 个实例，附带 S6（静默降级）一例。
 
-**现场**：`workspace/tasks/44444/.log` 63 次工具调用，涉及 test 的只有一次 ——
-第 3 次调用 `mkdir -p backend/routers backend/tests frontend/src` 建了空目录，
-此后再没碰过。agent 全程用 `bash` 起 uvicorn、手工 curl 验证接口，
-产出里写「后端 API 所有接口测试通过」。**它没说谎**，它真验证过，
-只是用的不是 pytest。准出被拦：
+**现场**：`config.yaml` 里配置 2 个以上审查者时，fan-in 需要一个仲裁器来
+归约多份结论；缺仲裁器时归约无人做。`validate_config` 本该拦住这类配置，
+而实测发现它**从未在生产路径上跑过**：
 
-    ❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）
+| `assert_config_valid` 的调用点 | 数量 |
+|---|---|
+| 定义 | 1 |
+| 测试 | 3 |
+| **生产** | **0** |
 
-判据是对的，红绿流程确实没走。**缺的是指令。**
+躺在 `validate_config` 里的 6 条 error 级校验，一条都没执行过。
+**所以 A14 不只是加第 7 条判据，更是给这一整组判据接线** ——
+只加不接就是交付第 5 个 S7 实例。
 
-**根因一：动作要求不在指令里。** `03-coding.yaml` 有 1400 字讲记账格式、
-README 要求、围栏保护，**没有一句要求先写测试**。它只说 `## Red-Green`
-那一节要写「可复现的真实命令」—— 那是**记账格式**要求，不是**动作**要求。
+**兄弟实例（实施期意外发现，已修）**：`_load_raw_yaml` 是
+`except Exception: pass` + `return {}`。我手滑弄坏一处 YAML 缩进时实测到：
+roles 从 6 个变 0 个、`stage_roles` 变空，而 `./sw list` **照常运行、零报错**。
+配置整个消失，harness 用一份空配置继续跑。这是典型的 S6：
+读不出来被伪装成「读到了空的」。
 
-「先写测试」四个字确实在完整 prompt 里，位置是 28903 字符的第 **26707 位
-（92% 处）**，来自 `hooks/03-coding.md` 的自动注入。段落顺序实测：
+**修法与判据**：新增 `review_needs_unimplemented_arbiter`；
+`bootstrap()` 在**建图之前**调用 `assert_config_valid`（建完一张错的图
+再报错，错误信息会指向图而不是配置）；`cli/main.py` 把 `ConfigError`
+呈现为可读文本 + 两条可执行的下一步，退出码 **2**。
+`_load_raw_yaml` 不再吞 `YAMLError`。
 
-           0  全局项目规范 (INSTRUCTIONS.md)   17747 字符，占 61%
-       17747  阶段 system_prompt                 只有 839 字符
-       19526  前一阶段产出
-       23398  当前阶段模板
-       26118  强制规则 (03-coding)             ← 「先写测试」在这里
+**双向实测（真实启动路径）**：
 
-**根因二：失败信息指错方向。** 空 `tests/` 目录有个反直觉的后果 ——
-它**触发** `_has_pytest_surface`（`_TEST_DIR_NAMES` 命中 `tests`），
-于是判据认定「Python 项目，该写测试却没写」。而那句拒绝的括号里
-写着 `tests/`，agent **确实建了** `tests/`：按字面看它已满足要求却被拒。
-同 2.9.16 的「失败信息指向一条走不通的路」。
+| 配置 | `./sw list` | 退出码 |
+|---|---|---|
+| 2 个审查者、无仲裁器 | 拦住，打印可读错误与下一步 | 2 |
+| 干净配置 | 正常列出 13 个任务 | 0 |
 
-**修复**：
+反向那半必不可少：只验「拦得住」无法排除「把所有配置都拦住」。
 
-1. `03-coding.yaml` 新增「本阶段的动作顺序（硬约束，准出时由 harness
-   亲自校验）」段：先写测试→跑红→写实现的顺序、测试文件命名（**明说建空
-   `tests/` 不算**）、红必须是断言失败（ImportError 叫造红）、bash 手工验证
-   不能替代 pytest、`--abandon-witness` 出路。
-2. `red_witness.empty_test_dirs()` + `_no_tests_lines()`：命中空测试目录时
-   说出真实路径与「目录建了不算写测试」。**结论不变**（仍然拦）——
-   放宽它会让「建个空目录」变成绕过红见证的捷径。
+**附带收获**：守护栏一接上，两条一直沉默的异构性校验
+（`reviewer_shares_provider_with_developer`、`reviewers_share_provider`）
+当场发声 —— 它们早就写好了，只是从没人调用。
 
-**sweep 的收获（这是本轮真正的重点）**：改完 03 一个 yaml 就想收工，
-按 same-shape-sweep 机械扫一遍才发现 **五个阶段的 yaml 全都是
-`{global_rules}` 打头**，实测位置 01/02/04/05 全在第 0 位。
-修一个文件等于 S10 的第五个实例（同 2.9.9 第 2 条：模板只有 01 修了落盘
-指令，02 漏了）。
-
-**因此位置收归 `PromptBuilder`**：yaml 不再自己摆放占位符，builder 统一把
-全局规范排在阶段指令**之后**。这样这个形状长不出第六个实例 —— 新增阶段
-不写占位符就自动正确。yaml 若显式写了 `{global_rules}` 仍按它的位置渲染，
-不重复追加（兼容口）。
-
-实测位置变化：五个阶段的指令一律到第 0 位，全局规范落到 1%-6% 之后；
-03 的「先写测试」从 **92% 提到 1%**（152/22791）。
-
-**基线对照实测**（`git archive cc51be6` 检出到 /tmp，只搬测试文件）：
-把 MockAgent 的复现设施一并搬过去（否则红是 ImportError，那叫造红），
-只让判据侧留在旧版：**18 failed / 4 passed**。4 条 passed 是前提自检与
-默认形态 —— 红来自判据本身，不是恒真。
-
-**MockAgent 复现**（`SW_MOCK_CODING_EMPTY_TESTS_DIR=1`，与 `7090` 同一套做法）：
-`_write_empty_tests_project` 写出 44444 的形状 —— `backend/` 有实现、
-`backend/tests/` 是空目录、零测试文件。判据侧 6 条全绿，
-其中一条走**真实钩子** `check_03-coding.sh`（rc≠0，且 stdout 含
-`backend/tests`）—— 单元绿不等于机制接通。
-
-进入 03a 必须走真实的 `pre_check_03-coding.sh`：测试进程的证据密钥被
-conftest 重定向到 tmp，进程内调 `begin_test_phase` 会让钩子判 `tampered`，
-红的原因就不再是被测行为（同 `test_red_witness_non_python` 的处置）。
-
-**真实任务实跑**：`python3 -m sw_lib.workflow.red_witness 44444` 仍 rc=1
-（结论不变），文案已改为「测试目录是空的（已建好，但里面没有测试文件）
-—— backend/tests/」并指出往哪里写。
-
-**遗留**：`_read_global_rules()` 把 harness 自己的 `INSTRUCTIONS.md`
-（400 余行内部架构文档）当作「被开发项目的全局规范」注入每个任务 agent，
-这件事本轮**只改了位置，没改语义**。它在
-`test_prompt_self_sufficiency.py` 里已被登记为范围外事项，仍然有效：
-agent 收到的 21258 字符 prompt 里，17747 是它用不上的 harness 内部文档。
+**检测方法**：`python3 scripts/orphan_criteria.py`（已登记这两个判据）。
 
 ---
 

@@ -57,6 +57,10 @@ REGISTERED_CRITERIA = [
     ("_stage_completion_problems", "2.9.18", "S11"),
     ("empty_test_dirs", "2.9.19", "S10"),
     ("_no_tests_lines", "2.9.19", "S10"),
+    # A14：判据本身曾是 S7 —— validate_config 里 6 条 error 级校验
+    # 从未在生产路径上执行过，因为 assert_config_valid 只被测试调用。
+    ("assert_config_valid", "2.9.20", "S7"),
+    ("validate_config", "2.9.20", "S7"),
 ]
 
 

@@ -220,7 +220,11 @@ def test_heterogeneous_violation_tolerated_when_switch_off():
     )
 
     issues = C.validate_config()
-    assert _errors(issues) == []
+    # 本测试的判据是**异构性**那一族，不是「零 error」。
+    # A14 给多审查者加了 `review_needs_unimplemented_arbiter`（仲裁器未实现），
+    # 而这里为了构造同构场景必须配 2 个审查者 —— 两条判据正交，
+    # 断言收窄到异构性自身，否则每加一条无关校验都会让本测试变红。
+    assert "reviewers_share_provider" not in _codes(_errors(issues))
     # 降级不得静默：仍须留下 warn 供 A10 报告标注「审查者同构」。
     assert "reviewers_homogeneous_degraded" in _codes(issues)
     assert C.resolve_review_config().heterogeneous_status == "degraded"
@@ -246,7 +250,11 @@ def test_mock_mode_marks_heterogeneity_skipped_not_passed():
         ],
     )
 
-    assert _errors(C.validate_config()) == []
+    # 同上：判据收窄到异构性一族，不断言「零 error」
+    # （A14 的仲裁器校验与本测试正交）。
+    codes = _codes(_errors(C.validate_config()))
+    assert "reviewers_share_provider" not in codes
+    assert "reviewer_shares_provider_with_developer" not in codes
     assert C.resolve_review_config().heterogeneous_status == "mock_skipped"
 
 

@@ -30,6 +30,16 @@ def bootstrap(templates_dir: Optional[Path] = None):
     if _executor is not None:
         return  # already bootstrapped
 
+    # 配置校验（A14）。必须在建图**之前** —— 建完一张错的图再报错，
+    # 那张图已经进了 WorkflowRuntime，后续调用方拿到的是半成品。
+    #
+    # 这里是 `assert_config_valid` 的**生产调用点**。改造前它只被测试调用
+    # （形状 S7），于是 `validate_config` 里 6 条 error 级校验从未在真实
+    # 启动路径上执行过：配置指向不存在的角色、审查者 kind 写错、
+    # 04 阶段无任何审查者，全部静默通过。
+    from .config import assert_config_valid
+    assert_config_valid()
+
     if templates_dir is None:
         templates_dir = Path(__file__).resolve().parent.parent / "prompts" / "templates"
 
