@@ -63,6 +63,21 @@ BUG_7090_ENV = "SW_MOCK_BRAINSTORM_NO_SCORE"
 #: 「同一份代码两侧结论相反」钉成可复现的判据。
 SUBDIR_LAYOUT_ENV = "SW_MOCK_CODING_SUBDIR_LAYOUT"
 
+#: 置 1 时，03 场景改走任务 `44444` 的现场形态：**建空 `tests/`、一个测试都不写**。
+#:
+#: `workspace/tasks/44444/.log` 的真实一幕：63 次工具调用，涉及 test 的
+#: 只有第 3 次 —— `mkdir -p backend/routers backend/tests frontend/src`
+#: 建了空目录，此后再没碰过。agent 全程用 `bash` 起 uvicorn、手工 curl
+#: 验证接口，产出里写「后端 API 所有接口测试通过」。它没说谎，
+#: 它真验证过，只是用的不是 pytest。
+#:
+#: 那个空目录有个反直觉的后果：它**触发** `_has_pytest_surface`，
+#: 于是判据说「必须先写测试文件（... / tests/）」—— 而 agent 确实建了
+#: `tests/`，按字面看已满足要求却被拒（判例 2.9.19）。
+#:
+#: 默认关闭：正常形态（测试齐备）仍是 e2e 的主路径。
+BUG_44444_ENV = "SW_MOCK_CODING_EMPTY_TESTS_DIR"
+
 
 class MockAgent(BaseAgent):
     """
@@ -559,6 +574,8 @@ class MockAgent(BaseAgent):
         """写一个自洽的最小 Python 项目；返回写入的相对路径列表。"""
         if os.environ.get(SUBDIR_LAYOUT_ENV, "").strip() in ("1", "true", "yes"):
             return self._write_subdir_project(target)
+        if os.environ.get(BUG_44444_ENV, "").strip() in ("1", "true", "yes"):
+            return self._write_empty_tests_project(target)
         files = {
             "mocknote.py": (
                 '"""Mock 产出：最小可运行模块。"""\n\n\n'
@@ -646,6 +663,58 @@ class MockAgent(BaseAgent):
                 written.append(rel)
         except OSError as e:
             sw_log(self.name, f"mock coding write failed: {e}", "error")
+        return written
+
+    def _write_empty_tests_project(self, target: Path) -> List[str]:
+        """写一个 44444 形态的项目：有实现、有空的 `tests/`、**零测试文件**。
+
+        44444 的现场形状（`.log` 第 3 次工具调用）：
+        `mkdir -p backend/routers backend/tests frontend/src` 建了空目录，
+        实现代码照常写进 `backend/`，测试一个都没写 —— agent 转头用 bash
+        起 uvicorn、手工 curl 验证接口。
+
+        空 `tests/` 是这个复现的关键，不是装饰：它**触发**
+        `_has_pytest_surface`（`_TEST_DIR_NAMES` 命中 `tests`），
+        于是判据说「必须先写测试文件（... / tests/）」，而 agent 确实
+        建了 `tests/` —— 按字面看已满足要求却被拒（判例 2.9.19）。
+        若不建这个目录，红会来自另一条分支（rglob 命中 `.py`），
+        复现的就不是同一句话。
+        """
+        files = {
+            "backend/main.py": (
+                '"""Mock 产出：44444 形态的最小后端。"""\n\n'
+                'from calc import add\n\n\n'
+                'def health():\n'
+                '    return {"status": "ok", "sum": add(1, 1)}\n'
+            ),
+            "backend/calc.py": (
+                '"""被测模块 —— 只是从来没有人为它写测试。"""\n\n\n'
+                'def add(a, b):\n'
+                '    return a + b\n'
+            ),
+            "backend/requirements.txt": "pytest\n",
+            "README.md": (
+                f"# {self.name}\n\n"
+                "Mock 产出的 44444 形态项目（空 tests/、无测试文件）。\n\n"
+                "## 启动\n\n"
+                "```bash\n"
+                "cd backend && python3 -c 'import main; print(main.health())'\n"
+                "```\n"
+            ),
+        }
+        written: List[str] = []
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for rel, body in files.items():
+                path = target / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
+                written.append(rel)
+            # 这一句就是 44444 的 `mkdir -p ... backend/tests ...`
+            (target / "backend" / "tests").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            sw_log(self.name,
+                   f"mock coding empty-tests write failed: {e}", "error")
         return written
 
     # 各审查角色的关注点。mock 不做真判断，但产出必须**可区分** ——

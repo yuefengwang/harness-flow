@@ -43,9 +43,21 @@ class PromptBuilder:
         template = self.registry.get(stage)
         parts = []
 
+        # 阶段指令先落地，全局规范排在它**之后**（判例 2.9.19 的 sweep）。
+        #
+        # 位置由这里统一决定，不交给各 yaml 自己摆放。任务 `44444` 的现场：
+        # 五份 yaml 全都用 `{global_rules}` 打头，展开后 17747 字符的
+        # INSTRUCTIONS.md 占掉整份 prompt 的前 61%，阶段自己那 839 字符的
+        # 指令被埋在中段，「先写测试」直到 92% 处才第一次出现。
+        #
+        # 修 03 一个文件不解决问题 —— 位置只要还由 yaml 各自决定，
+        # 下一个新阶段照旧会写在开头（S10「修了一半」，同 2.9.9 第 2 条）。
+        # 保留占位符支持是为了兼容：yaml 若显式写了 `{global_rules}`，
+        # 就按它的位置渲染，不在末尾重复追加。
         global_rules = self._read_global_rules() or "（未定义全局规范）"
+        raw_system = template["system_prompt"]
 
-        system_prompt = template["system_prompt"].format(
+        system_prompt = raw_system.format(
             task_name=task_name,
             stage=stage,
             stage_name=stage_name,
@@ -53,6 +65,10 @@ class PromptBuilder:
             stage_file=str(TASKS / task_name / f"{stage}.md"),
         )
         parts.append(system_prompt)
+        if "{global_rules}" not in raw_system:
+            parts.append(
+                "以下是全局项目规范（背景信息，"
+                f"本阶段的具体要求以上面为准）：\n\n{global_rules}")
 
         orchestration = self.registry.get_system_rules()
         if orchestration:

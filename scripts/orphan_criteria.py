@@ -55,6 +55,8 @@ REGISTERED_CRITERIA = [
     ("record_ambiguity", "2.9.17", "S6"),
     ("_read_ambiguity_carryover", "2.9.17", "S7"),
     ("_stage_completion_problems", "2.9.18", "S11"),
+    ("empty_test_dirs", "2.9.19", "S10"),
+    ("_no_tests_lines", "2.9.19", "S10"),
 ]
 
 

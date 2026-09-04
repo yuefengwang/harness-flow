@@ -1278,6 +1278,92 @@ helloworld(1) 全部放行，**零误伤**；手工构造的 0 轮任务被钩�
 
 ---
 
+### 2.9.19 03 门禁死锁：判据要求先写测试，指令从未说过（任务 44444）
+
+**形状**：S2（阶段错位 —— 指令与硬约束各自独立，互不校验）的变体，
+加 S10（修了一半）。这次错位不在「阶段」，在**指令与判据之间**：
+判据硬要求的动作，指令里一个字都没提。
+
+**现场**：`workspace/tasks/44444/.log` 63 次工具调用，涉及 test 的只有一次 ——
+第 3 次调用 `mkdir -p backend/routers backend/tests frontend/src` 建了空目录，
+此后再没碰过。agent 全程用 `bash` 起 uvicorn、手工 curl 验证接口，
+产出里写「后端 API 所有接口测试通过」。**它没说谎**，它真验证过，
+只是用的不是 pytest。准出被拦：
+
+    ❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）
+
+判据是对的，红绿流程确实没走。**缺的是指令。**
+
+**根因一：动作要求不在指令里。** `03-coding.yaml` 有 1400 字讲记账格式、
+README 要求、围栏保护，**没有一句要求先写测试**。它只说 `## Red-Green`
+那一节要写「可复现的真实命令」—— 那是**记账格式**要求，不是**动作**要求。
+
+「先写测试」四个字确实在完整 prompt 里，位置是 28903 字符的第 **26707 位
+（92% 处）**，来自 `hooks/03-coding.md` 的自动注入。段落顺序实测：
+
+           0  全局项目规范 (INSTRUCTIONS.md)   17747 字符，占 61%
+       17747  阶段 system_prompt                 只有 839 字符
+       19526  前一阶段产出
+       23398  当前阶段模板
+       26118  强制规则 (03-coding)             ← 「先写测试」在这里
+
+**根因二：失败信息指错方向。** 空 `tests/` 目录有个反直觉的后果 ——
+它**触发** `_has_pytest_surface`（`_TEST_DIR_NAMES` 命中 `tests`），
+于是判据认定「Python 项目，该写测试却没写」。而那句拒绝的括号里
+写着 `tests/`，agent **确实建了** `tests/`：按字面看它已满足要求却被拒。
+同 2.9.16 的「失败信息指向一条走不通的路」。
+
+**修复**：
+
+1. `03-coding.yaml` 新增「本阶段的动作顺序（硬约束，准出时由 harness
+   亲自校验）」段：先写测试→跑红→写实现的顺序、测试文件命名（**明说建空
+   `tests/` 不算**）、红必须是断言失败（ImportError 叫造红）、bash 手工验证
+   不能替代 pytest、`--abandon-witness` 出路。
+2. `red_witness.empty_test_dirs()` + `_no_tests_lines()`：命中空测试目录时
+   说出真实路径与「目录建了不算写测试」。**结论不变**（仍然拦）——
+   放宽它会让「建个空目录」变成绕过红见证的捷径。
+
+**sweep 的收获（这是本轮真正的重点）**：改完 03 一个 yaml 就想收工，
+按 same-shape-sweep 机械扫一遍才发现 **五个阶段的 yaml 全都是
+`{global_rules}` 打头**，实测位置 01/02/04/05 全在第 0 位。
+修一个文件等于 S10 的第五个实例（同 2.9.9 第 2 条：模板只有 01 修了落盘
+指令，02 漏了）。
+
+**因此位置收归 `PromptBuilder`**：yaml 不再自己摆放占位符，builder 统一把
+全局规范排在阶段指令**之后**。这样这个形状长不出第六个实例 —— 新增阶段
+不写占位符就自动正确。yaml 若显式写了 `{global_rules}` 仍按它的位置渲染，
+不重复追加（兼容口）。
+
+实测位置变化：五个阶段的指令一律到第 0 位，全局规范落到 1%-6% 之后；
+03 的「先写测试」从 **92% 提到 1%**（152/22791）。
+
+**基线对照实测**（`git archive cc51be6` 检出到 /tmp，只搬测试文件）：
+把 MockAgent 的复现设施一并搬过去（否则红是 ImportError，那叫造红），
+只让判据侧留在旧版：**18 failed / 4 passed**。4 条 passed 是前提自检与
+默认形态 —— 红来自判据本身，不是恒真。
+
+**MockAgent 复现**（`SW_MOCK_CODING_EMPTY_TESTS_DIR=1`，与 `7090` 同一套做法）：
+`_write_empty_tests_project` 写出 44444 的形状 —— `backend/` 有实现、
+`backend/tests/` 是空目录、零测试文件。判据侧 6 条全绿，
+其中一条走**真实钩子** `check_03-coding.sh`（rc≠0，且 stdout 含
+`backend/tests`）—— 单元绿不等于机制接通。
+
+进入 03a 必须走真实的 `pre_check_03-coding.sh`：测试进程的证据密钥被
+conftest 重定向到 tmp，进程内调 `begin_test_phase` 会让钩子判 `tampered`，
+红的原因就不再是被测行为（同 `test_red_witness_non_python` 的处置）。
+
+**真实任务实跑**：`python3 -m sw_lib.workflow.red_witness 44444` 仍 rc=1
+（结论不变），文案已改为「测试目录是空的（已建好，但里面没有测试文件）
+—— backend/tests/」并指出往哪里写。
+
+**遗留**：`_read_global_rules()` 把 harness 自己的 `INSTRUCTIONS.md`
+（400 余行内部架构文档）当作「被开发项目的全局规范」注入每个任务 agent，
+这件事本轮**只改了位置，没改语义**。它在
+`test_prompt_self_sufficiency.py` 里已被登记为范围外事项，仍然有效：
+agent 收到的 21258 字符 prompt 里，17747 是它用不上的 harness 内部文档。
+
+---
+
 ### 2.9.8 U0-1 的架构真相：不同 agent 后端的可控粒度不同，同一纪律的强制力也不同
 
 2.5 已记「`Toolbox` 的白名单对 opencode 无效」，但只说了「无效」，

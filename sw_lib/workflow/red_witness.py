@@ -434,6 +434,52 @@ def _is_test_path(rel_parts: Tuple[str, ...]) -> bool:
     return any(p in _TEST_DIR_NAMES for p in rel_parts[:-1])
 
 
+def empty_test_dirs(target_dir: Any) -> List[str]:
+    """存在但**不含任何测试文件**的测试目录，返回相对路径（判例 2.9.19）。
+
+    只服务于失败信息，不参与放行判定 —— 结论仍然是拦。
+
+    这个形态来自任务 `44444`：agent 一句 `mkdir -p backend/tests` 建了空
+    目录就再没回来。空目录有个反直觉的后果 —— 它让 `_has_pytest_surface`
+    命中，于是判据说「必须先写测试文件（test_*.py / *_test.py / tests/）」，
+    而 agent 按字面看**已经建了** `tests/`。要求与现场自相矛盾，
+    agent 无从知道下一步该做什么（2.9.16 判过的「失败信息指错方向」）。
+
+    「有没有测试文件」必须与 `hash_test_files` 用同一个 `_is_test_path`：
+    两侧各写一套判断，就会出现「冻结说这里有测试、诊断说这里是空的」。
+    因此 `__pycache__` 里的 `.pyc` 不算内容 —— 它不是 agent 写的测试。
+    """
+    root = Path(str(target_dir))
+    if not root.is_dir():
+        return []
+
+    out: List[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_dir():
+            continue
+        rel_parts = path.relative_to(root).parts
+        if path.name not in _TEST_DIR_NAMES:
+            continue
+        # 嵌套在被忽略目录里的 tests/（`venv/*/tests`）不是本项目的产出
+        if any(p in _IGNORED_DIRS for p in rel_parts):
+            continue
+        if _dir_has_test_file(root, path):
+            continue
+        out.append("/".join(rel_parts))
+    return out
+
+
+def _dir_has_test_file(root: Path, directory: Path) -> bool:
+    """`directory` 下（含子目录）是否有 `hash_test_files` 会认的测试文件。"""
+    for path in directory.rglob("*.py"):
+        rel_parts = path.relative_to(root).parts
+        if any(p in _IGNORED_DIRS for p in rel_parts):
+            continue
+        if _is_test_path(rel_parts):
+            return True
+    return False
+
+
 def find_impl_files(target_dir: Any, limit: int = 0) -> List[str]:
     """目标目录下的**实现**文件（`hash_test_files` 的反面）。
 
@@ -1174,10 +1220,7 @@ def _check_03a(task: str, target: Path) -> GateResult:
         # 测试都不会被看见，于是不存在「补上测试就能过」的自救办法。
         if not _has_pytest_surface(target):
             return _check_unsupported_stack(task, target)
-        return GateResult(False, [
-            "❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）",
-            "   红绿流程要求测试先于实现 —— 没有测试就没有判据。",
-        ] + _abandon_hint(task))
+        return GateResult(False, _no_tests_lines(target) + _abandon_hint(task))
 
     exit_code, nodes = _run_in_target(target)
     # 收集期塌了才去查依赖：查一次要起一个子解释器，正常路径上不必付这个钱。
@@ -1378,6 +1421,36 @@ _USAGE = ("用法: python3 -m sw_lib.workflow.red_witness <task-name> "
           "[--phase | --begin | --rewitness <理由> | --abandon-witness <理由>]")
 
 _FLAGS = ("--phase", "--begin", "--rewitness", "--abandon-witness")
+
+
+def _no_tests_lines(target: Path) -> List[str]:
+    """「没有测试」的拒绝文案。空测试目录要单独说（判例 2.9.19）。
+
+    同一个结论（拦）有两种成因，下一步不同：
+
+    * 连目录都没有 → 去建目录、写测试文件；
+    * 目录建好了、里面是空的 → 往那个目录里写文件。
+
+    两种混成一句「必须先写测试文件（... / tests/）」，落到第二种身上就
+    成了自相矛盾的提示：agent 明明建了 `tests/`，却被告知要建 `tests/`。
+    任务 `44444` 卡在这里，agent 转头去用 bash 手工验证接口。
+    """
+    empty = empty_test_dirs(target)
+    if not empty:
+        return [
+            "❌ 无测试：03a 阶段必须先写测试文件（test_*.py / *_test.py / tests/）",
+            "   红绿流程要求测试先于实现 —— 没有测试就没有判据。",
+        ]
+
+    shown = ", ".join(f"{d}/" for d in empty[:3])
+    more = f" 等 {len(empty)} 个" if len(empty) > 3 else ""
+    return [
+        f"❌ 无测试：测试目录是空的（已建好，但里面没有测试文件）—— {shown}{more}",
+        "   目录建了不算写测试，判据认的是文件："
+        f"往 {empty[0]}/ 里写 test_*.py（或 *_test.py）。",
+        "   手工用 curl / bash 验证接口不能替代 pytest —— "
+        "harness 只承认自己跑出来的红与绿。",
+    ]
 
 
 def _abandon_hint(task: str) -> List[str]:

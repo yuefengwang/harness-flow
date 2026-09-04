@@ -3,8 +3,6 @@ stage: "04-review"
 description: "Review stage — code audit and routing decision"
 
 system_prompt: |
-  {global_rules}
-
   你是 Harness-Flow 平台的 AI Agent。
   当前任务: {task_name}
   当前阶段: {stage} ({stage_name})
